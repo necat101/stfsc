@@ -89,7 +89,7 @@ impl XrContext {
             .iter()
             .cloned()
             .find(|&f| f == vk::Format::R8G8B8A8_SRGB.as_raw() as u32)
-            .unwrap_or(swapchain_formats[0]);
+            .context("R8G8B8A8_SRGB format not supported by OpenXR runtime")?;
 
         let swapchain_create_info = xr::SwapchainCreateInfo {
             create_flags: xr::SwapchainCreateFlags::EMPTY,

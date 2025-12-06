@@ -3,6 +3,7 @@ use ash::vk::Handle; // Import Handle trait
 use anyhow::{Result, Context};
 use std::ffi::{CString};
 use openxr as xr;
+use glam;
 
 pub struct GraphicsContext {
     pub entry: Entry,
@@ -15,6 +16,8 @@ pub struct GraphicsContext {
     pub command_buffer: vk::CommandBuffer,
     pub fence: vk::Fence,
     pub render_pass: vk::RenderPass,
+    pub pipeline_layout: vk::PipelineLayout,
+    pub pipeline: vk::Pipeline,
 }
 
 impl GraphicsContext {
@@ -139,6 +142,133 @@ impl GraphicsContext {
             .subpasses(&subpasses);
         let render_pass = unsafe { device.create_render_pass(&render_pass_create_info, None)? };
 
+        // 9. Create Pipeline Layout
+        let push_constant_ranges = [
+            vk::PushConstantRange::builder()
+                .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .offset(0)
+                .size(std::mem::size_of::<glam::Mat4>() as u32 * 3)
+                .build()
+        ];
+        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::builder()
+            .push_constant_ranges(&push_constant_ranges);
+        let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_create_info, None)? };
+
+        // 10. Create Shader Modules
+        let vert_code = include_bytes!(concat!(env!("OUT_DIR"), "/vert.spv"));
+        let frag_code = include_bytes!(concat!(env!("OUT_DIR"), "/frag.spv"));
+
+        let vert_module = unsafe {
+            let code = ash::util::read_spv(&mut std::io::Cursor::new(&vert_code[..]))?;
+            let create_info = vk::ShaderModuleCreateInfo::builder().code(&code);
+            device.create_shader_module(&create_info, None)?
+        };
+
+        let frag_module = unsafe {
+            let code = ash::util::read_spv(&mut std::io::Cursor::new(&frag_code[..]))?;
+            let create_info = vk::ShaderModuleCreateInfo::builder().code(&code);
+            device.create_shader_module(&create_info, None)?
+        };
+
+        let main_function_name = CString::new("main")?;
+
+        let shader_stages = [
+            vk::PipelineShaderStageCreateInfo::builder()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vert_module)
+                .name(&main_function_name)
+                .build(),
+            vk::PipelineShaderStageCreateInfo::builder()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(frag_module)
+                .name(&main_function_name)
+                .build(),
+        ];
+
+        // Vertex Input
+        let vertex_binding_descriptions = [
+            vk::VertexInputBindingDescription {
+                binding: 0,
+                stride: std::mem::size_of::<crate::world::Vertex>() as u32,
+                input_rate: vk::VertexInputRate::VERTEX,
+            }
+        ];
+        let vertex_attribute_descriptions = [
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 0, // position
+            },
+            vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 12, // color
+            }
+        ];
+
+        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
+            .vertex_binding_descriptions(&vertex_binding_descriptions)
+            .vertex_attribute_descriptions(&vertex_attribute_descriptions);
+
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::builder()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
+
+        let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
+            .viewport_count(1)
+            .scissor_count(1);
+
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::builder()
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::BACK)
+            .front_face(vk::FrontFace::CLOCKWISE)
+            .depth_bias_enable(false);
+
+        let multisampling = vk::PipelineMultisampleStateCreateInfo::builder()
+            .sample_shading_enable(false)
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::builder()
+            .color_write_mask(vk::ColorComponentFlags::R | vk::ColorComponentFlags::G | vk::ColorComponentFlags::B | vk::ColorComponentFlags::A)
+            .blend_enable(false)
+            .build();
+
+        let color_blending = vk::PipelineColorBlendStateCreateInfo::builder()
+            .logic_op_enable(false)
+            .attachments(std::slice::from_ref(&color_blend_attachment));
+
+        let dynamic_states = [
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR
+        ];
+        let dynamic_state = vk::PipelineDynamicStateCreateInfo::builder()
+            .dynamic_states(&dynamic_states);
+
+        let pipeline_info = vk::GraphicsPipelineCreateInfo::builder()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input_info)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .color_blend_state(&color_blending)
+            .dynamic_state(&dynamic_state)
+            .layout(pipeline_layout)
+            .render_pass(render_pass)
+            .subpass(0);
+
+        let pipeline = unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info.build()], None).map_err(|e| e.1).unwrap()[0] };
+
+        unsafe {
+            device.destroy_shader_module(vert_module, None);
+            device.destroy_shader_module(frag_module, None);
+        }
+
         Ok(Self {
             entry,
             instance,
@@ -150,6 +280,40 @@ impl GraphicsContext {
             command_buffer,
             fence,
             render_pass,
+            pipeline_layout,
+            pipeline,
         })
+    }
+
+    pub fn create_buffer(&self, size: u64, usage: vk::BufferUsageFlags, properties: vk::MemoryPropertyFlags) -> Result<(vk::Buffer, vk::DeviceMemory)> {
+        let buffer_info = vk::BufferCreateInfo::builder()
+            .size(size)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            
+        let buffer = unsafe { self.device.create_buffer(&buffer_info, None)? };
+        
+        let mem_reqs = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let memory_type_index = self.find_memory_type(mem_reqs.memory_type_bits, properties)?;
+        
+        let alloc_info = vk::MemoryAllocateInfo::builder()
+            .allocation_size(mem_reqs.size)
+            .memory_type_index(memory_type_index);
+            
+        let memory = unsafe { self.device.allocate_memory(&alloc_info, None)? };
+        
+        unsafe { self.device.bind_buffer_memory(buffer, memory, 0)? };
+        
+        Ok((buffer, memory))
+    }
+    
+    pub fn find_memory_type(&self, type_filter: u32, properties: vk::MemoryPropertyFlags) -> Result<u32> {
+        let mem_properties = unsafe { self.instance.get_physical_device_memory_properties(self.physical_device) };
+        for i in 0..mem_properties.memory_type_count {
+            if (type_filter & (1 << i)) != 0 && (mem_properties.memory_types[i as usize].property_flags & properties) == properties {
+                return Ok(i);
+            }
+        }
+        anyhow::bail!("Failed to find suitable memory type")
     }
 }
