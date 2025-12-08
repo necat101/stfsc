@@ -6,7 +6,7 @@ use glam;
 
 pub struct GameWorld {
     pub ecs: World,
-    pub runtime: Runtime,
+    // pub runtime: Runtime, // Removed unused runtime
     pub chunk_receiver: mpsc::Receiver<ChunkData>,
     pub chunk_sender: mpsc::Sender<ChunkData>,
     pub command_receiver: mpsc::Receiver<SceneUpdate>,
@@ -54,13 +54,50 @@ impl GameWorld {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(10);
         let (cmd_tx, cmd_rx) = mpsc::channel(100);
-        Self {
+        let mut world = Self {
             ecs: World::new(),
-            runtime: Runtime::new().unwrap(),
+            // runtime: Runtime::new().unwrap(),
             chunk_receiver: rx,
             chunk_sender: tx,
             command_receiver: cmd_rx,
             command_sender: cmd_tx,
+        };
+        world.spawn_default_scene();
+        world
+    }
+
+    pub fn spawn_default_scene(&mut self) {
+        // Spawn a few cubes
+        for i in 0..5 {
+            let x = (i as f32) * 1.5 - 3.0;
+            let color = [0.5 + (i as f32) * 0.1, 0.2, 0.2]; // Gradient red
+            self.ecs.spawn((
+                Transform {
+                    position: glam::Vec3::new(x, 0.0, -3.0),
+                    rotation: glam::Quat::IDENTITY,
+                    scale: glam::Vec3::ONE * 0.5,
+                },
+                Mesh {
+                    vertices: vec![
+                        Vertex { position: [-0.5, -0.5, 0.5], color },
+                        Vertex { position: [0.5, -0.5, 0.5], color },
+                        Vertex { position: [0.5, 0.5, 0.5], color },
+                        Vertex { position: [-0.5, 0.5, 0.5], color },
+                        Vertex { position: [-0.5, -0.5, -0.5], color },
+                        Vertex { position: [0.5, -0.5, -0.5], color },
+                        Vertex { position: [0.5, 0.5, -0.5], color },
+                        Vertex { position: [-0.5, 0.5, -0.5], color },
+                    ],
+                    indices: vec![
+                        0, 1, 2, 2, 3, 0, // Front
+                        4, 5, 6, 6, 7, 4, // Back
+                        4, 5, 1, 1, 0, 4, // Bottom
+                        7, 6, 2, 2, 3, 7, // Top
+                        4, 7, 3, 3, 0, 4, // Left
+                        5, 6, 2, 2, 1, 5, // Right
+                    ],
+                },
+            ));
         }
     }
 
@@ -104,6 +141,7 @@ impl GameWorld {
                             ],
                         },
                     ));
+                    // info!("Spawn command received (ECS spawn disabled)");
                 }
                 SceneUpdate::Move { id, position } => {
                     // TODO: Find entity by ID and update transform
@@ -120,16 +158,8 @@ impl GameWorld {
     }
 
     pub fn request_chunk(&self, chunk_id: u32) {
-        let tx = self.chunk_sender.clone();
-        self.runtime.spawn(async move {
-            // Simulate IO
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            
-            // "Load" data
-            let chunk = ChunkData { id: chunk_id, mesh: None, transform: None };
-            
-            // Send back
-            let _ = tx.send(chunk).await;
-        });
+        // let tx = self.chunk_sender.clone();
+        // self.runtime.spawn(async move { ... });
+        // NOTE: Runtime removed. If async IO is needed, pass a handle or use a separate IO system.
     }
 }

@@ -12,9 +12,13 @@ pub struct XrContext {
     pub frame_waiter: xr::FrameWaiter,
     pub swapchain: xr::Swapchain<xr::Vulkan>,
     pub swapchain_images: Vec<vk::Image>,
-    pub swapchain_image_views: Vec<vk::ImageView>,
-    pub framebuffers: Vec<vk::Framebuffer>,
+    pub swapchain_image_views: Vec<Vec<vk::ImageView>>, // [swapchain_image_index][eye_index]
+    pub framebuffers: Vec<Vec<vk::Framebuffer>>,       // [swapchain_image_index][eye_index]
     pub resolution: vk::Extent2D,
+    pub depth_image: vk::Image,
+    pub depth_image_memory: vk::DeviceMemory,
+    pub depth_image_views: Vec<vk::ImageView>, // [eye_index]
+    pub stage_space: xr::Space,
 }
 
 impl XrContext {
@@ -99,7 +103,7 @@ impl XrContext {
             width: resolution.width,
             height: resolution.height,
             face_count: 1,
-            array_size: 2, 
+            array_size: 2, // Stereo
             mip_count: 1,
         };
 
@@ -112,46 +116,58 @@ impl XrContext {
             .map(|i| vk::Image::from_raw(i))
             .collect(); 
 
+        // Create Depth Resources (Array Layers = 2)
+        let (depth_image, depth_image_memory, depth_image_views) = graphics.create_depth_resources(resolution, 2)?;
+
         // Create Image Views and Framebuffers
         let mut swapchain_image_views = Vec::new();
         let mut framebuffers = Vec::new();
 
         for image in &swapchain_images {
-            let create_view_info = vk::ImageViewCreateInfo::builder()
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(vk::Format::R8G8B8A8_SRGB) // Must match swapchain format
-                .components(vk::ComponentMapping {
-                    r: vk::ComponentSwizzle::R,
-                    g: vk::ComponentSwizzle::G,
-                    b: vk::ComponentSwizzle::B,
-                    a: vk::ComponentSwizzle::A,
-                })
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 2, // Stereo array
-                })
-                .image(*image);
-            
-            let image_view = unsafe { graphics.device.create_image_view(&create_view_info, None)? };
-            swapchain_image_views.push(image_view);
+            let mut image_views_per_eye = Vec::new();
+            let mut framebuffers_per_eye = Vec::new();
 
-            let framebuffer_attachments = [image_view];
-            let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
-                .render_pass(graphics.render_pass)
-                .attachments(&framebuffer_attachments)
-                .width(resolution.width)
-                .height(resolution.height)
-                .layers(1); // Multiview is handled inside the render pass usually, but for array swapchain we might need layers=1 if we render to array? 
-                // Actually for stereo array swapchain, we usually render to a 2D array image.
-                // If we use multiview, layers=1. If we use geometry shader or multiple passes, it depends.
-                // For simplicity, let's assume we render to the array image.
-            
-            let framebuffer = unsafe { graphics.device.create_framebuffer(&framebuffer_create_info, None)? };
-            framebuffers.push(framebuffer);
+            for eye_index in 0..2 {
+                let create_view_info = vk::ImageViewCreateInfo::builder()
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(vk::Format::R8G8B8A8_SRGB) // Must match swapchain format
+                    .components(vk::ComponentMapping {
+                        r: vk::ComponentSwizzle::R,
+                        g: vk::ComponentSwizzle::G,
+                        b: vk::ComponentSwizzle::B,
+                        a: vk::ComponentSwizzle::A,
+                    })
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: eye_index, // Select layer for this eye
+                        layer_count: 1,
+                    })
+                    .image(*image);
+                
+                let image_view = unsafe { graphics.device.create_image_view(&create_view_info, None)? };
+                image_views_per_eye.push(image_view);
+
+                let framebuffer_attachments = [image_view, depth_image_views[eye_index as usize]];
+                let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
+                    .render_pass(graphics.render_pass)
+                    .attachments(&framebuffer_attachments)
+                    .width(resolution.width)
+                    .height(resolution.height)
+                    .layers(1); 
+                
+                let framebuffer = unsafe { graphics.device.create_framebuffer(&framebuffer_create_info, None)? };
+                framebuffers_per_eye.push(framebuffer);
+            }
+            swapchain_image_views.push(image_views_per_eye);
+            framebuffers.push(framebuffers_per_eye);
         }
+
+        let stage_space = session.create_reference_space(
+            xr::ReferenceSpaceType::LOCAL,
+            xr::Posef::IDENTITY,
+        )?;
 
         Ok(Self {
             instance: instance.clone(),
@@ -164,6 +180,10 @@ impl XrContext {
             swapchain_image_views,
             framebuffers,
             resolution,
+            depth_image,
+            depth_image_memory,
+            depth_image_views,
+            stage_space,
         })
     }
 }

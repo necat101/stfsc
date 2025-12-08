@@ -2912,6 +2912,7 @@ dependencies = [
  "ash",
  "ash-window",
  "bincode",
+ "bytemuck",
  "eframe",
  "env_logger",
  "glam",
