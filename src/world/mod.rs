@@ -26,16 +26,18 @@ pub struct Transform {
     pub scale: glam::Vec3,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Vertex {
     pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub uv: [f32; 2],
     pub color: [f32; 3],
 }
 
@@ -47,6 +49,7 @@ pub struct Material {
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub enum SceneUpdate {
     Spawn { id: u32, position: [f32; 3], color: [f32; 3] },
+    SpawnMesh { id: u32, mesh: Mesh, position: [f32; 3] },
     Move { id: u32, position: [f32; 3] },
 }
 
@@ -79,14 +82,14 @@ impl GameWorld {
                 },
                 Mesh {
                     vertices: vec![
-                        Vertex { position: [-0.5, -0.5, 0.5], color },
-                        Vertex { position: [0.5, -0.5, 0.5], color },
-                        Vertex { position: [0.5, 0.5, 0.5], color },
-                        Vertex { position: [-0.5, 0.5, 0.5], color },
-                        Vertex { position: [-0.5, -0.5, -0.5], color },
-                        Vertex { position: [0.5, -0.5, -0.5], color },
-                        Vertex { position: [0.5, 0.5, -0.5], color },
-                        Vertex { position: [-0.5, 0.5, -0.5], color },
+                        Vertex { position: [-0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0], color },
+                        Vertex { position: [0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0], color },
+                        Vertex { position: [0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 1.0], color },
+                        Vertex { position: [-0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 1.0], color },
+                        Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 0.0], color },
+                        Vertex { position: [0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 0.0], color },
+                        Vertex { position: [0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 1.0], color },
+                        Vertex { position: [-0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 1.0], color },
                     ],
                     indices: vec![
                         0, 1, 2, 2, 3, 0, // Front
@@ -122,14 +125,14 @@ impl GameWorld {
                         },
                         Mesh {
                             vertices: vec![
-                                Vertex { position: [-0.5, -0.5, 0.5], color },
-                                Vertex { position: [0.5, -0.5, 0.5], color },
-                                Vertex { position: [0.5, 0.5, 0.5], color },
-                                Vertex { position: [-0.5, 0.5, 0.5], color },
-                                Vertex { position: [-0.5, -0.5, -0.5], color },
-                                Vertex { position: [0.5, -0.5, -0.5], color },
-                                Vertex { position: [0.5, 0.5, -0.5], color },
-                                Vertex { position: [-0.5, 0.5, -0.5], color },
+                                Vertex { position: [-0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0], color },
+                                Vertex { position: [0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0], color },
+                                Vertex { position: [0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 1.0], color },
+                                Vertex { position: [-0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 1.0], color },
+                                Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 0.0], color },
+                                Vertex { position: [0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 0.0], color },
+                                Vertex { position: [0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 1.0], color },
+                                Vertex { position: [-0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 1.0], color },
                             ],
                             indices: vec![
                                 0, 1, 2, 2, 3, 0, // Front
@@ -142,6 +145,16 @@ impl GameWorld {
                         },
                     ));
                     // info!("Spawn command received (ECS spawn disabled)");
+                }
+                SceneUpdate::SpawnMesh { id, mesh, position } => {
+                     self.ecs.spawn((
+                        Transform {
+                            position: glam::Vec3::from(position),
+                            rotation: glam::Quat::IDENTITY,
+                            scale: glam::Vec3::ONE,
+                        },
+                        mesh,
+                    ));
                 }
                 SceneUpdate::Move { id, position } => {
                     // TODO: Find entity by ID and update transform
@@ -157,9 +170,67 @@ impl GameWorld {
         // self.request_chunk(1);
     }
 
-    pub fn request_chunk(&self, chunk_id: u32) {
+    pub fn request_chunk(&self, _chunk_id: u32) {
         // let tx = self.chunk_sender.clone();
         // self.runtime.spawn(async move { ... });
         // NOTE: Runtime removed. If async IO is needed, pass a handle or use a separate IO system.
     }
+}
+
+pub fn load_obj_model(path: &str) -> anyhow::Result<Mesh> {
+    let (models, _materials) = tobj::load_obj(
+        path,
+        &tobj::LoadOptions {
+            single_index: true,
+            triangulate: true,
+            ..Default::default()
+        }
+    )?;
+
+    if models.is_empty() {
+        anyhow::bail!("No models found in {}", path);
+    }
+
+    // Take the first model
+    let mesh = &models[0].mesh;
+    let mut vertices = Vec::new();
+    
+    for i in 0..mesh.positions.len() / 3 {
+        let pos = [
+            mesh.positions[i * 3],
+            mesh.positions[i * 3 + 1],
+            mesh.positions[i * 3 + 2],
+        ];
+        
+        let normal = if !mesh.normals.is_empty() {
+            [
+                mesh.normals[i * 3],
+                mesh.normals[i * 3 + 1],
+                mesh.normals[i * 3 + 2],
+            ]
+        } else {
+            [0.0, 1.0, 0.0] // Default normal (up)
+        };
+        
+        let uv = if !mesh.texcoords.is_empty() {
+            [
+                mesh.texcoords[i * 2],
+                1.0 - mesh.texcoords[i * 2 + 1], // Flip V for Vulkan/OBJ mismatch
+            ]
+        } else {
+            [0.0, 0.0]
+        };
+        
+        vertices.push(Vertex {
+            position: pos,
+            normal,
+            uv,
+            color: [1.0, 1.0, 1.0], // Default white color
+        });
+    }
+
+    Ok(Mesh {
+        vertices,
+        indices: mesh.indices.clone(),
+    })
 }

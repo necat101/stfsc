@@ -1,0 +1,149 @@
+Using package `stfsc_engine` in `/home/netcat/Downloads/STFSC engine/Cargo.toml`
+warning: unused import: `debug`
+ --> src/lib.rs:3:24
+  |
+3 | ...r, debug};
+  |       ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::ptr`
+ --> src/graphics/mod.rs:7:5
+  |
+7 | use std::ptr;
+  |     ^^^^^^^^
+
+warning: unused import: `tokio::runtime::Runtime`
+ --> src/world/mod.rs:2:5
+  |
+2 | use tokio::runtime::Runti...
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Posef` and `ReferenceSpaceType`
+  --> src/lib.rs:30:5
+   |
+30 |     ReferenceSpaceType, Posef, C...
+   |     ^^^^^^^^^^^^^^^^^^  ^^^^^
+
+warning: unused variable: `vertex_input_info`
+   --> src/graphics/mod.rs:771:13
+    |
+771 | ...et vertex_input_info = ...
+    |       ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vertex_input_info`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:119:38
+    |
+119 | ... { id, p...
+    |       ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:149:42
+    |
+149 | ... { id, m...
+    |       ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:159:37
+    |
+159 | ... { id, p...
+    |       ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `position`
+   --> src/world/mod.rs:159:41
+    |
+159 | ...d, position } ...
+    |       ^^^^^^^^ help: try ignoring the field: `position: _`
+
+warning: variable does not need to be mutable
+   --> src/lib.rs:250:9
+    |
+250 | ...et mut game_quit = ...
+    |       ----^^^^^^^^^
+    |       |
+    |       help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: fields `image` and `image_memory` are never read
+  --> src/graphics/mod.rs:10:9
+   |
+9  | ...truct Texture {
+   |          ------- fields in this struct
+10 | ...ub image: vk::Ima...
+   |       ^^^^^
+11 | ...ub image_memory: v...
+   |       ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: field `entry` is never read
+  --> src/graphics/mod.rs:22:9
+   |
+21 | ...truct GraphicsContex...
+   |          --------------- field in this struct
+22 | ...ub entry: Entry,
+   |       ^^^^^
+
+warning: fields `system`, `swapchain_images`, `swapchain_image_views`, `depth_image`, `depth_image_memory`, and `depth_image_views` are never read
+  --> src/xr/mod.rs:9:9
+   |
+7  | ...truct XrContext {
+   |          --------- fields in this struct
+8  | ...ub instance: xr::Instan...
+9  | ...ub system: xr::SystemId,
+   |       ^^^^^^
+...
+14 | ...ub swapchain_images: Vec<vk...
+   |       ^^^^^^^^^^^^^^^^
+15 | ...ub swapchain_image_views: V...
+   |       ^^^^^^^^^^^^^^^^^^^^^
+...
+18 | ...ub depth_image: vk::Ima...
+   |       ^^^^^^^^^^^
+19 | ...ub depth_image_memory: vk::...
+   |       ^^^^^^^^^^^^^^^^^^
+20 | ...ub depth_image_views: Vec<v...
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: creating a shared reference to mutable static is discouraged
+   --> src/lib.rs:369:46
+    |
+369 | ...", FRAME_COUN...
+    |       ^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/static-mut-references.html>
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+    = note: `#[warn(static_mut_refs)]` on by default
+
+warning: `stfsc_engine` (lib) generated 14 warnings (run `cargo fix --lib -p stfsc_engine` to apply 5 suggestions)
+warning: value assigned to `indices` is never read
+   --> src/bin/editor.rs:124:29
+    |
+124 | ...ut indices = ...
+    |       ^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` on by default
+
+warning: `stfsc_engine` (bin "editor") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s
+ 'lib/arm64-v8a/libstfsc_engine.so'...
+ 'lib/arm64-v8a/libopenxr_loader.so'...
+Verifying alignment of /home/netcat/Downloads/STFSC engine/target/debug/apk/stfsc_engine.apk (4)...
+      49 AndroidManifest.xml (OK - compressed)
+    1260 assets/cube.obj (OK)
+    1668 lib/arm64-v8a/libstfsc_engine.so (OK)
+100298636 lib/arm64-v8a/libopenxr_loader.so (OK)
+Verification succesful
+Signing `/home/netcat/Downloads/STFSC engine/target/debug/apk/stfsc_engine.apk` with keystore `/home/netcat/.android/debug.keystore`
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::loadLibrary has been called by org.conscrypt.NativeLibraryUtil in an unnamed module (file:/home/netcat/android-sdk/build-tools/34.0.0/lib/apksigner.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+thread 'main' panicked at /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/cargo-subcommand-0.12.0/src/artifact.rs:51:23:
+Bin is not compatible with Cdylib
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

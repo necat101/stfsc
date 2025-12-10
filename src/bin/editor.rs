@@ -1,9 +1,10 @@
 use eframe::egui;
 use std::net::TcpStream;
 use std::io::Write;
-use stfsc_engine::world::SceneUpdate;
+use stfsc_engine::world::{SceneUpdate, Mesh, Vertex};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
+use std::path::PathBuf;
 
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions::default();
@@ -32,6 +33,8 @@ struct MyApp {
     command_tx: Sender<AppCommand>,
     event_rx: Receiver<AppEvent>,
     is_connected: bool,
+    loaded_mesh: Option<(String, Mesh)>, // (Filename, Mesh data)
+    input_path: String,
 }
 
 impl MyApp {
@@ -100,6 +103,74 @@ impl MyApp {
             command_tx,
             event_rx,
             is_connected: false,
+            loaded_mesh: None,
+            input_path: "model.obj".to_owned(),
+        }
+    }
+
+    fn load_obj(&mut self, path_str: String) {
+        let path = PathBuf::from(&path_str);
+        let load_options = tobj::LoadOptions {
+            triangulate: true,
+            single_index: true,
+            ..Default::default()
+        };
+
+        match tobj::load_obj(&path, &load_options) {
+            Ok((models, _materials)) => {
+                for model in models {
+                    let mesh = model.mesh;
+                    let mut vertices = Vec::new();
+                    let mut indices = Vec::new();
+
+                    for i in 0..mesh.positions.len() / 3 {
+                        vertices.push(Vertex {
+                            position: [
+                                mesh.positions[i * 3],
+                                mesh.positions[i * 3 + 1],
+                                mesh.positions[i * 3 + 2],
+                            ],
+                            normal: if !mesh.normals.is_empty() {
+                                [
+                                    mesh.normals[i * 3],
+                                    mesh.normals[i * 3 + 1],
+                                    mesh.normals[i * 3 + 2],
+                                ]
+                            } else {
+                                [0.0, 1.0, 0.0]
+                            },
+                            uv: if !mesh.texcoords.is_empty() {
+                                [
+                                    mesh.texcoords[i * 2],
+                                    1.0 - mesh.texcoords[i * 2 + 1],
+                                ]
+                            } else {
+                                [0.0, 0.0]
+                            },
+                            color: [1.0, 1.0, 1.0], // Default white
+                        });
+                    }
+
+                    indices = mesh.indices;
+
+                    if !vertices.is_empty() && !indices.is_empty() {
+                        let mesh_data = Mesh {
+                            vertices,
+                            indices,
+                        };
+                        self.loaded_mesh = Some((
+                            model.name,
+                            mesh_data
+                        ));
+                        self.status = format!("Loaded OBJ: {}", path.display());
+                        return; // Load first model
+                    }
+                }
+                self.status = "No valid mesh found in OBJ".to_string();
+            }
+            Err(e) => {
+                self.status = format!("Failed to load OBJ: {}", e);
+            }
         }
     }
 }
@@ -140,8 +211,38 @@ impl eframe::App for MyApp {
             
             ui.label(&self.status);
             
+            ui.separator();
+            
+            ui.heading("Model Import");
+            ui.horizontal(|ui| {
+                ui.label("Path:");
+                ui.text_edit_singleline(&mut self.input_path);
+                if ui.button("Load OBJ").clicked() {
+                    self.load_obj(self.input_path.clone());
+                }
+            });
+
+            if let Some((name, mesh)) = &self.loaded_mesh {
+                ui.label(format!("Loaded: {} ({} vertices)", name, mesh.vertices.len()));
+                
+                if self.is_connected {
+                    if ui.button("Spawn Loaded Model").clicked() {
+                        let update = SceneUpdate::SpawnMesh {
+                            id: rand::random(),
+                            mesh: mesh.clone(),
+                            position: [0.0, 0.0, -2.0],
+                        };
+                        let _ = self.command_tx.send(AppCommand::Send(update));
+                    }
+                } else {
+                    ui.label("Connect to spawn model");
+                }
+            }
+
+            ui.separator();
+
             if self.is_connected {
-                if ui.button("Spawn Cube").clicked() {
+                if ui.button("Spawn Cube (Test)").clicked() {
                     let update = SceneUpdate::Spawn {
                         id: rand::random(),
                         position: [0.0, 0.0, -2.0],

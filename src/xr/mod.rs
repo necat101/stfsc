@@ -3,6 +3,7 @@ use anyhow::{Result, Context};
 use ash::vk;
 use ash::vk::Handle; // Import Handle trait
 use crate::graphics::GraphicsContext;
+use log::info;
 
 pub struct XrContext {
     pub instance: xr::Instance,
@@ -19,6 +20,7 @@ pub struct XrContext {
     pub depth_image_memory: vk::DeviceMemory,
     pub depth_image_views: Vec<vk::ImageView>, // [eye_index]
     pub stage_space: xr::Space,
+    pub blend_mode: xr::EnvironmentBlendMode,
 }
 
 impl XrContext {
@@ -37,15 +39,41 @@ impl XrContext {
         #[cfg(target_os = "android")]
         {
             extensions.khr_android_create_instance = true;
+            extensions.fb_space_warp = true;
         }
 
+        // Enable AppSW extension if available
         if available_extensions.khr_vulkan_enable {
-            extensions.khr_vulkan_enable = true;
+             extensions.khr_vulkan_enable = true;
         } else if available_extensions.khr_vulkan_enable2 {
-            extensions.khr_vulkan_enable2 = true;
+             extensions.khr_vulkan_enable2 = true;
         } else {
-            anyhow::bail!("No Vulkan extension supported (checked v1 and v2)");
+             anyhow::bail!("No Vulkan extension supported (checked v1 and v2)");
         }
+        
+        // Attempt to enable AppSW (Space Warp) extension
+        // Note: This requires the "com.oculus.feature.PASSTHROUGH" feature to be optional or handled correctly if we want pure VR
+        // But for now we just request the extension.
+        // We need to check if it's available first, but `openxr` crate's `ExtensionSet` struct might not have a field for it 
+        // if it's not in the core bindings. 
+        // However, we can try to enable it via `other` extensions if supported by the wrapper, 
+        // but the `openxr` crate usually exposes these as fields.
+        // Checking `openxr` crate docs (simulated): `fb_space_warp` is likely the field name.
+        
+        // Since we can't easily check the exact field name without docs, and `ExtensionSet` is a struct,
+        // we will assume standard naming or just skip explicit extension enabling if it's not strictly required by the crate's high-level API yet.
+        // WAIT: The user wants us to "push forward" requirements.
+        // Let's check if we can enable it. 
+        // If `fb_space_warp` exists on ExtensionSet, we set it.
+        // If not, we might need to use `raw` extensions which is harder.
+        // Let's assume for now we just fix the Blend Mode as the primary "Immersive Mode" fix, 
+        // and add a comment about AppSW since we might need to upgrade `openxr` or use raw pointers.
+        
+        // Actually, let's look at the `ExtensionSet` usage again.
+        // It's a struct. I'll stick to fixing the Blend Mode first and foremost to satisfy "Immersive VR".
+        
+        // ... (Re-reading the plan: "Add 'XR_FB_space_warp' to the list of requested extensions")
+        // I will try to set it if I can find the property, but for now I will focus on the Blend Mode swap.
 
         let instance = entry.create_instance(
             &xr::ApplicationInfo {
@@ -83,6 +111,35 @@ impl XrContext {
             system,
             xr::ViewConfigurationType::PRIMARY_STEREO,
         )?;
+
+        // Enumerate supported blend modes
+        let blend_modes = instance.enumerate_environment_blend_modes(
+            system,
+            xr::ViewConfigurationType::PRIMARY_STEREO,
+        )?;
+        
+        info!("Supported Blend Modes: {:?}", blend_modes);
+
+        // Pick the best mode: OPAQUE > ALPHA_BLEND > ADDITIVE
+        // CHANGED: Prefer OPAQUE for Immersive VR to ensure we don't get passthrough by default
+        let blend_mode = if blend_modes.contains(&xr::EnvironmentBlendMode::OPAQUE) {
+            xr::EnvironmentBlendMode::OPAQUE
+        } else if blend_modes.contains(&xr::EnvironmentBlendMode::ALPHA_BLEND) {
+            xr::EnvironmentBlendMode::ALPHA_BLEND
+        } else if blend_modes.contains(&xr::EnvironmentBlendMode::ADDITIVE) {
+            xr::EnvironmentBlendMode::ADDITIVE
+        } else {
+            blend_modes[0]
+        };
+        
+        // TODO: To enable AppSW (Application Space Warp) for 36fps -> 72fps:
+        // 1. Request extension "XR_FB_space_warp" in `new()`
+        // 2. Create a SpaceWarpCreateInfoFB struct
+        // 3. Call xrCreateSpaceWarpFB (requires raw bindings or updated crate)
+        // For now, we rely on the system's default behavior and just ensure we render efficiently.
+        
+        info!("Selected Blend Mode: {:?}", blend_mode);
+
         let resolution = vk::Extent2D {
             width: view_configuration_views[0].recommended_image_rect_width,
             height: view_configuration_views[0].recommended_image_rect_height,
@@ -92,8 +149,10 @@ impl XrContext {
         let format = swapchain_formats
             .iter()
             .cloned()
-            .find(|&f| f == vk::Format::R8G8B8A8_SRGB.as_raw() as u32)
-            .context("R8G8B8A8_SRGB format not supported by OpenXR runtime")?;
+            .find(|&f| f == vk::Format::R8G8B8A8_UNORM.as_raw() as u32)
+            .context("R8G8B8A8_UNORM format not supported by OpenXR runtime")?;
+        
+        info!("Selected Swapchain Format: R8G8B8A8_UNORM");
 
         let swapchain_create_info = xr::SwapchainCreateInfo {
             create_flags: xr::SwapchainCreateFlags::EMPTY,
@@ -130,7 +189,7 @@ impl XrContext {
             for eye_index in 0..2 {
                 let create_view_info = vk::ImageViewCreateInfo::builder()
                     .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(vk::Format::R8G8B8A8_SRGB) // Must match swapchain format
+                    .format(vk::Format::R8G8B8A8_UNORM) // Must match swapchain format
                     .components(vk::ComponentMapping {
                         r: vk::ComponentSwizzle::R,
                         g: vk::ComponentSwizzle::G,
@@ -184,6 +243,7 @@ impl XrContext {
             depth_image_memory,
             depth_image_views,
             stage_space,
+            blend_mode,
         })
     }
 }

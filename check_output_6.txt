@@ -1,0 +1,85 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+warning: unused import: `debug`
+ --> src/lib.rs:3:24
+  |
+3 | use log::{info, error, debug};
+  |                        ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::ptr`
+ --> src/graphics/mod.rs:7:5
+  |
+7 | use std::ptr;
+  |     ^^^^^^^^
+
+warning: unused import: `tokio::runtime::Runtime`
+ --> src/world/mod.rs:2:5
+  |
+2 | use tokio::runtime::Runtime;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `EnvironmentBlendMode`, `Posef`, and `ReferenceSpaceType`
+  --> src/lib.rs:30:5
+   |
+30 |     ReferenceSpaceType, Posef, CompositionLayerProjectionView,
+   |     ^^^^^^^^^^^^^^^^^^  ^^^^^
+31 |     SwapchainSubImage, Rect2Di, Offset2Di, Extent2Di,
+32 |     CompositionLayerProjection, EnvironmentBlendMode, Duration
+   |                                 ^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: the method `clone` exists for struct `CompositionLayerProjection<'_, Vulkan>`, but its trait bounds were not satisfied
+    --> src/lib.rs:728:72
+     |
+728  |                         .map(|&l| oxr::CompositionLayerBase::from((*l).clone()))
+     |                                                                        ^^^^^ method cannot be called on `CompositionLayerProjection<'_, Vulkan>` due to unsatisfied trait bounds
+     |
+    ::: /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/openxr-0.18.0/src/generated.rs:5967:5
+     |
+5967 |     pub struct CompositionLayerProjection<'a, G: Graphics> {
+     |     ------------------------------------------------------ doesn't satisfy `_: Clone`
+     |
+    ::: /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/openxr-0.18.0/src/graphics/vulkan.rs:12:1
+     |
+12   | pub enum Vulkan {}
+     | --------------- doesn't satisfy `Vulkan: Clone`
+     |
+     = note: the following trait bounds were not satisfied:
+             `Vulkan: Clone`
+             which is required by `openxr::CompositionLayerProjection<'_, Vulkan>: Clone`
+
+warning: unused variable: `vertex_input_info`
+   --> src/graphics/mod.rs:771:13
+    |
+771 |         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
+    |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vertex_input_info`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:119:38
+    |
+119 |                 SceneUpdate::Spawn { id, position, color } => {
+    |                                      ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:149:42
+    |
+149 |                 SceneUpdate::SpawnMesh { id, mesh, position } => {
+    |                                          ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:159:37
+    |
+159 |                 SceneUpdate::Move { id, position } => {
+    |                                     ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `position`
+   --> src/world/mod.rs:159:41
+    |
+159 |                 SceneUpdate::Move { id, position } => {
+    |                                         ^^^^^^^^ help: try ignoring the field: `position: _`
+
+For more information about this error, try `rustc --explain E0599`.
+warning: `stfsc_engine` (lib) generated 9 warnings
+error: could not compile `stfsc_engine` (lib) due to 1 previous error; 9 warnings emitted

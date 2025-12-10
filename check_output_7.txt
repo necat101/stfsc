@@ -1,0 +1,84 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+warning: unused import: `debug`
+ --> src/lib.rs:3:24
+  |
+3 | use log::{info, error, debug};
+  |                        ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::ptr`
+ --> src/graphics/mod.rs:7:5
+  |
+7 | use std::ptr;
+  |     ^^^^^^^^
+
+warning: unused import: `tokio::runtime::Runtime`
+ --> src/world/mod.rs:2:5
+  |
+2 | use tokio::runtime::Runtime;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CompositionLayerProjectionView`, `CompositionLayerProjection`, `EnvironmentBlendMode`, `Extent2Di`, `Offset2Di`, `Posef`, `Rect2Di`, `ReferenceSpaceType`, and `SwapchainSubImage`
+  --> src/lib.rs:30:5
+   |
+30 |     ReferenceSpaceType, Posef, CompositionLayerProjectionView,
+   |     ^^^^^^^^^^^^^^^^^^  ^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+31 |     SwapchainSubImage, Rect2Di, Offset2Di, Extent2Di,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^  ^^^^^^^^^  ^^^^^^^^^
+32 |     CompositionLayerProjection, EnvironmentBlendMode, Duration
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src/lib.rs:709:37
+    |
+708 |   ...                   layers.push(oxr::CompositionLayerBase::from(
+    |                                     ------------------------------- arguments to this function are incorrect
+709 | / ...                       oxr::CompositionLayerProjection::new()
+710 | | ...                           .space(&xr_context.stage_space)
+711 | | ...                           .views(&projection_views)
+    | |_______________________________________________________^ expected `CompositionLayerBase<'_, Vulkan>`, found `CompositionLayerProjection<'_, Vulkan>`
+    |
+    = note: expected struct `CompositionLayerBase<'_, Vulkan>`
+               found struct `openxr::CompositionLayerProjection<'_, Vulkan>`
+note: associated function defined here
+   --> /home/netcat/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/convert/mod.rs:585:8
+    |
+585 |     fn from(value: T) -> Self;
+    |        ^^^^
+
+warning: unused variable: `vertex_input_info`
+   --> src/graphics/mod.rs:771:13
+    |
+771 |         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
+    |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vertex_input_info`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:119:38
+    |
+119 |                 SceneUpdate::Spawn { id, position, color } => {
+    |                                      ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:149:42
+    |
+149 |                 SceneUpdate::SpawnMesh { id, mesh, position } => {
+    |                                          ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:159:37
+    |
+159 |                 SceneUpdate::Move { id, position } => {
+    |                                     ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `position`
+   --> src/world/mod.rs:159:41
+    |
+159 |                 SceneUpdate::Move { id, position } => {
+    |                                         ^^^^^^^^ help: try ignoring the field: `position: _`
+
+For more information about this error, try `rustc --explain E0308`.
+warning: `stfsc_engine` (lib) generated 9 warnings
+error: could not compile `stfsc_engine` (lib) due to 1 previous error; 9 warnings emitted

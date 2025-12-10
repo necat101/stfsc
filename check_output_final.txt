@@ -1,0 +1,180 @@
+warning: unused import: `debug`
+ --> src/lib.rs:3:24
+  |
+3 | ...r, debug};
+  |       ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::ptr`
+ --> src/graphics/mod.rs:7:5
+  |
+7 | use std::ptr;
+  |     ^^^^^^^^
+
+warning: unused import: `tokio::runtime::Runtime`
+ --> src/world/mod.rs:2:5
+  |
+2 | use tokio::runtime::Runti...
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CompositionLayerProjectionView`, `CompositionLayerProjection`, `EnvironmentBlendMode`, `Extent2Di`, `Offset2Di`, `Posef`, `Rect2Di`, `ReferenceSpaceType`, and `SwapchainSubImage`
+  --> src/lib.rs:30:5
+   |
+30 |     ReferenceSpaceType, Posef, CompositionLayerProjectionVi...
+   |     ^^^^^^^^^^^^^^^^^^  ^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+31 |     SwapchainSubImage, Rect2Di, Offset2Di, Extent2Di,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^  ^^^^^^^^^  ^^^^^^^^^
+32 |     CompositionLayerProjection, EnvironmentBlendMode, Durat...
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `vertex_input_info`
+   --> src/graphics/mod.rs:771:13
+    |
+771 | ...et vertex_input_info = ...
+    |       ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vertex_input_info`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:119:38
+    |
+119 | ... { id, p...
+    |       ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:149:42
+    |
+149 | ... { id, m...
+    |       ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:159:37
+    |
+159 | ... { id, p...
+    |       ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `position`
+   --> src/world/mod.rs:159:41
+    |
+159 | ...d, position } ...
+    |       ^^^^^^^^ help: try ignoring the field: `position: _`
+
+warning: unused variable: `skybox_renderer`
+  --> src/lib.rs:77:9
+   |
+77 | ...et skybox_renderer = ...
+   |       ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_renderer`
+
+warning: unused variable: `skybox_vertex_buffer`
+   --> src/lib.rs:198:10
+    |
+198 | ...t (skybox_vertex_buffer, s...
+    |       ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_vertex_buffer`
+
+warning: unused variable: `skybox_index_buffer`
+   --> src/lib.rs:210:10
+    |
+210 | ...t (skybox_index_buffer, s...
+    |       ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_index_buffer`
+
+warning: value assigned to `projection_layer_storage` is never read
+   --> src/lib.rs:716:29
+    |
+716 | ...   projection_layer_storage = ...
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` on by default
+
+warning: value assigned to `projection_layer_storage` is never read
+   --> src/lib.rs:719:25
+    |
+719 | ...   projection_layer_storage = ...
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+   --> src/lib.rs:250:9
+    |
+250 | ...et mut game_quit = ...
+    |       ----^^^^^^^^^
+    |       |
+    |       help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: fields `image` and `image_memory` are never read
+  --> src/graphics/mod.rs:10:9
+   |
+9  | ...truct Texture {
+   |          ------- fields in this struct
+10 | ...ub image: vk::Ima...
+   |       ^^^^^
+11 | ...ub image_memory: v...
+   |       ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: fields `pipeline` and `pipeline_layout` are never read
+  --> src/graphics/mod.rs:17:9
+   |
+16 | ...truct SkyboxRendere...
+   |          -------------- fields in this struct
+17 | ...ub pipeline: vk::Pipeli...
+   |       ^^^^^^^^
+18 | ...ub pipeline_layout: vk:...
+   |       ^^^^^^^^^^^^^^^
+
+warning: field `entry` is never read
+  --> src/graphics/mod.rs:22:9
+   |
+21 | ...truct GraphicsContex...
+   |          --------------- field in this struct
+22 | ...ub entry: Entry,
+   |       ^^^^^
+
+warning: fields `system`, `swapchain_images`, `swapchain_image_views`, `depth_image`, `depth_image_memory`, and `depth_image_views` are never read
+  --> src/xr/mod.rs:10:9
+   |
+8  | ...truct XrContext {
+   |          --------- fields in this struct
+9  | ...ub instance: xr::Instan...
+10 | ...ub system: xr::SystemId,
+   |       ^^^^^^
+...
+15 | ...ub swapchain_images: Vec<vk...
+   |       ^^^^^^^^^^^^^^^^
+16 | ...ub swapchain_image_views: V...
+   |       ^^^^^^^^^^^^^^^^^^^^^
+...
+19 | ...ub depth_image: vk::Ima...
+   |       ^^^^^^^^^^^
+20 | ...ub depth_image_memory: vk::...
+   |       ^^^^^^^^^^^^^^^^^^
+21 | ...ub depth_image_views: Vec<v...
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: creating a shared reference to mutable static is discouraged
+   --> src/lib.rs:369:46
+    |
+369 | ...", FRAME_COUN...
+    |       ^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/static-mut-references.html>
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+    = note: `#[warn(static_mut_refs)]` on by default
+
+warning: `stfsc_engine` (lib) generated 20 warnings (run `cargo fix --lib -p stfsc_engine` to apply 5 suggestions)
+warning: value assigned to `indices` is never read
+   --> src/bin/editor.rs:124:29
+    |
+124 | ...ut indices = ...
+    |       ^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` on by default
+
+warning: `stfsc_engine` (bin "editor") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.72s

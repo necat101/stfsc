@@ -50,7 +50,7 @@ fn main() {
                     Some(&options)
                 ).unwrap();
 
-                let out_name = format!("{}.spv", path.file_stem().unwrap().to_str().unwrap());
+                let out_name = format!("{}.spv", path.file_name().unwrap().to_str().unwrap());
                 std::fs::write(out_path.join(out_name), binary_result.as_binary_u8()).unwrap();
             }
         }
