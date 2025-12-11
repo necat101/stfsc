@@ -1,0 +1,14 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+error: mismatched closing delimiter: `}`
+   --> src/world/mod.rs:129:36
+    |
+127 |                 SceneUpdate::Spawn { id, position, color } => {
+    |                                                               - closing delimiter possibly meant for this
+128 |                     let tangent = [1.0, 0.0, 0.0, 1.0];
+129 |                     self.ecs.spawn((
+    |                                    ^ unclosed delimiter
+...
+159 |                 }
+    |                 ^ mismatched closing delimiter
+
+error: could not compile `stfsc_engine` (lib) due to 1 previous error

@@ -22,6 +22,10 @@ use xr::XrContext;
 #[cfg(target_os = "android")]
 use physics::PhysicsWorld;
 use world::GameWorld;
+#[cfg(target_os = "android")]
+use graphics::Texture;
+#[cfg(target_os = "android")]
+use image::io::Reader as ImageReader;
 
 // Import commonly used OpenXR types
 #[cfg(target_os = "android")]
@@ -33,13 +37,15 @@ use oxr::{
 };
 
 #[cfg(target_os = "android")]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct GpuMesh {
     pub vertex_buffer: vk::Buffer,
     pub vertex_memory: vk::DeviceMemory,
     pub index_buffer: vk::Buffer,
     pub index_memory: vk::DeviceMemory,
     pub index_count: u32,
+    pub material_descriptor_set: vk::DescriptorSet,
+    pub custom_textures: Vec<Texture>,
 }
 
 #[cfg(target_os = "android")]
@@ -82,42 +88,79 @@ fn android_main(app: AndroidApp) {
         }
     };
     
-    // Create Default Texture
-    let default_texture = match graphics_context.create_default_texture() {
-        Ok(tex) => tex,
+    // Create Default Textures
+    let (albedo_tex, normal_tex, mr_tex) = match graphics_context.create_default_pbr_textures() {
+        Ok(texs) => texs,
         Err(e) => {
-            error!("Failed to create default texture: {:?}", e);
+            error!("Failed to create default textures: {:?}", e);
             return;
         }
     };
     
-    let default_descriptor_set = match graphics_context.create_descriptor_set(&default_texture) {
+    let global_descriptor_set = match graphics_context.create_global_descriptor_set(
+        graphics_context.shadow_depth_view,
+        graphics_context.shadow_sampler
+        ) {
         Ok(set) => set,
         Err(e) => {
-            error!("Failed to create descriptor set: {:?}", e);
+            error!("Failed to create global descriptor set: {:?}", e);
             return;
         }
     };
 
-    // Load Model
-    let mesh = match world::load_obj_model("cube.obj") {
-        Ok(m) => {
-            info!("Loaded cube.obj successfully");
-            m
-        },
+    let material_descriptor_set = match graphics_context.create_material_descriptor_set(
+        &albedo_tex, 
+        &normal_tex, 
+        &mr_tex
+        ) {
+        Ok(set) => set,
         Err(e) => {
-            error!("Failed to load cube.obj: {:?}. Using fallback cube.", e);
-            // Fallback Cube
+            error!("Failed to create material descriptor set: {:?}", e);
+            return;
+        }
+    };
+
+    // Load Model (Android Asset Manager)
+    #[cfg(target_os = "android")]
+    let mesh = {
+        use std::io::Read;
+        let asset_manager = app.asset_manager();
+        let filename = std::ffi::CString::new("cube.obj").unwrap();
+        
+        let loaded_mesh = if let Some(mut asset) = asset_manager.open(&filename) {
+            let mut buffer = Vec::new();
+            if asset.read_to_end(&mut buffer).is_ok() {
+                match world::load_obj_from_bytes(&buffer) {
+                    Ok(m) => {
+                        info!("Loaded cube.obj successfully from assets");
+                        Some(m)
+                    },
+                    Err(e) => {
+                        error!("Failed to parse cube.obj: {:?}", e);
+                        None
+                    }
+                }
+            } else {
+                error!("Failed to read cube.obj asset");
+                None
+            }
+        } else {
+            error!("Failed to open cube.obj asset");
+            None
+        };
+
+        loaded_mesh.unwrap_or_else(|| {
+            info!("Using fallback cube");
             world::Mesh {
                 vertices: vec![
-                    world::Vertex { position: [-0.5, -0.5,  0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0], color: [1.0, 0.0, 0.0] },
-                    world::Vertex { position: [ 0.5, -0.5,  0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0], color: [0.0, 1.0, 0.0] },
-                    world::Vertex { position: [ 0.5,  0.5,  0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 1.0], color: [0.0, 0.0, 1.0] },
-                    world::Vertex { position: [-0.5,  0.5,  0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 1.0], color: [1.0, 1.0, 0.0] },
-                    world::Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 0.0], color: [0.0, 1.0, 1.0] },
-                    world::Vertex { position: [ 0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 0.0], color: [1.0, 0.0, 1.0] },
-                    world::Vertex { position: [ 0.5,  0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 1.0], color: [1.0, 1.0, 1.0] },
-                    world::Vertex { position: [-0.5,  0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 1.0], color: [0.0, 0.0, 0.0] },
+                    world::Vertex { position: [-0.5, -0.5,  0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0], color: [1.0, 0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+                    world::Vertex { position: [ 0.5, -0.5,  0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0], color: [0.0, 1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+                    world::Vertex { position: [ 0.5,  0.5,  0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 1.0], color: [0.0, 0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+                    world::Vertex { position: [-0.5,  0.5,  0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 1.0], color: [1.0, 1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+                    world::Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 0.0], color: [0.0, 1.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+                    world::Vertex { position: [ 0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 0.0], color: [1.0, 0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+                    world::Vertex { position: [ 0.5,  0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 1.0], color: [1.0, 1.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+                    world::Vertex { position: [-0.5,  0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 1.0], color: [0.0, 0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
                 ],
                 indices: vec![
                     0u32, 1, 2, 2, 3, 0,
@@ -127,8 +170,11 @@ fn android_main(app: AndroidApp) {
                     4, 7, 3, 3, 0, 4,
                     5, 6, 2, 2, 1, 5,
                 ],
+                albedo: None,
+                normal: None,
+                metallic_roughness: None,
             }
-        }
+        })
     };
 
     let (vertex_buffer, vertex_memory) = match graphics_context.create_buffer(
@@ -177,14 +223,14 @@ fn android_main(app: AndroidApp) {
 
     // Skybox Mesh (Hardcoded Cube)
     let skybox_vertices = [
-        world::Vertex { position: [-1.0, -1.0,  1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0] },
-        world::Vertex { position: [ 1.0, -1.0,  1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0] },
-        world::Vertex { position: [ 1.0,  1.0,  1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0] },
-        world::Vertex { position: [-1.0,  1.0,  1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0] },
-        world::Vertex { position: [-1.0, -1.0, -1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0] },
-        world::Vertex { position: [ 1.0, -1.0, -1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0] },
-        world::Vertex { position: [ 1.0,  1.0, -1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0] },
-        world::Vertex { position: [-1.0,  1.0, -1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0] },
+        world::Vertex { position: [-1.0, -1.0,  1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0], tangent: [0.0, 0.0, 0.0, 0.0] },
+        world::Vertex { position: [ 1.0, -1.0,  1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0], tangent: [0.0, 0.0, 0.0, 0.0] },
+        world::Vertex { position: [ 1.0,  1.0,  1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0], tangent: [0.0, 0.0, 0.0, 0.0] },
+        world::Vertex { position: [-1.0,  1.0,  1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0], tangent: [0.0, 0.0, 0.0, 0.0] },
+        world::Vertex { position: [-1.0, -1.0, -1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0], tangent: [0.0, 0.0, 0.0, 0.0] },
+        world::Vertex { position: [ 1.0, -1.0, -1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0], tangent: [0.0, 0.0, 0.0, 0.0] },
+        world::Vertex { position: [ 1.0,  1.0, -1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0], tangent: [0.0, 0.0, 0.0, 0.0] },
+        world::Vertex { position: [-1.0,  1.0, -1.0], normal: [0.0, 0.0, 0.0], uv: [0.0, 0.0], color: [0.0, 0.0, 0.0], tangent: [0.0, 0.0, 0.0, 0.0] },
     ];
     let skybox_indices = [
         0u32, 1, 2, 2, 3, 0,
@@ -324,6 +370,10 @@ fn android_main(app: AndroidApp) {
 
     let mut session_running = false;
     let mut activity_resumed = false;
+    
+    // State for AppSW (Motion Vectors)
+    // Store previous frame's View Projection Matrix per eye
+    let mut prev_view_projs = [glam::Mat4::IDENTITY; 2];
 
     while !quit {
         let timeout = if session_running {
@@ -477,12 +527,68 @@ fn android_main(app: AndroidApp) {
                         graphics_context.device.unmap_memory(ibo_mem);
                     }
 
-                    let gpu_mesh = GpuMesh {
+                        let mut custom_textures = Vec::new();
+                        
+                        // Helper to load texture or use default
+                        // We need to handle potential errors gracefully or just log and use default
+                        
+                        // Retry strategy: Create all 3 optionals first.
+                        let mut tex_albedo_opt = None;
+                        let mut tex_normal_opt = None;
+                        let mut tex_mr_opt = None;
+                        
+                        if let Some(data) = &mesh.albedo {
+                             if let Ok(img) = image::load_from_memory(data) {
+                                if let Ok(tex) = graphics_context.create_texture_from_image(&img.to_rgba8()) {
+                                    tex_albedo_opt = Some(tex);
+                                }
+                             }
+                        }
+                         if let Some(data) = &mesh.normal {
+                             if let Ok(img) = image::load_from_memory(data) {
+                                if let Ok(tex) = graphics_context.create_texture_from_image(&img.to_rgba8()) {
+                                    tex_normal_opt = Some(tex);
+                                }
+                             }
+                        }
+                         if let Some(data) = &mesh.metallic_roughness {
+                             if let Ok(img) = image::load_from_memory(data) {
+                                if let Ok(tex) = graphics_context.create_texture_from_image(&img.to_rgba8()) {
+                                    tex_mr_opt = Some(tex);
+                                }
+                             }
+                        }
+                        
+                        let final_albedo = tex_albedo_opt.as_ref().unwrap_or(&albedo_tex);
+                        let final_normal = tex_normal_opt.as_ref().unwrap_or(&normal_tex);
+                        let final_mr = tex_mr_opt.as_ref().unwrap_or(&mr_tex);
+                        
+                        // Decide if we need a new descriptor set
+                        let final_descriptor_set = if tex_albedo_opt.is_some() || tex_normal_opt.is_some() || tex_mr_opt.is_some() {
+                             match graphics_context.create_material_descriptor_set(final_albedo, final_normal, final_mr) {
+                                 Ok(set) => set,
+                                 Err(e) => {
+                                     error!("Failed to create custom descriptor set: {:?}", e);
+                                     material_descriptor_set // Fallback
+                                 }
+                             }
+                        } else {
+                            material_descriptor_set
+                        };
+                        
+                        // Move ownership to vector for GpuMesh
+                        if let Some(t) = tex_albedo_opt { custom_textures.push(t); }
+                        if let Some(t) = tex_normal_opt { custom_textures.push(t); }
+                        if let Some(t) = tex_mr_opt { custom_textures.push(t); }
+
+                        let gpu_mesh = GpuMesh {
                         vertex_buffer: vbo,
                         vertex_memory: vbo_mem,
                         index_buffer: ibo,
                         index_memory: ibo_mem,
                         index_count: mesh.indices.len() as u32,
+                        material_descriptor_set: final_descriptor_set,
+                        custom_textures,
                     };
 
                     if let Err(e) = state.world.ecs.insert_one(id, gpu_mesh) {
@@ -530,14 +636,26 @@ fn android_main(app: AndroidApp) {
                         if stream_idx != 9999 {
                             info!("swapchain.acquire_image succeeded: {}", stream_idx);
                             
+                            // Acquire Depth and Motion images (assume synced)
+                            let _depth_idx = xr_context.depth_swapchain.acquire_image().unwrap_or(0);
+                            let _motion_idx = xr_context.motion_swapchain.acquire_image().unwrap_or(0);
+
                             info!("Calling swapchain.wait_image");
                             if let Err(e) = xr_context.swapchain.wait_image(Duration::INFINITE) {
                                  error!("Failed to wait image: {:?}", e);
-                            } else {
-                                info!("swapchain.wait_image succeeded");
+                            }
+                            if let Err(e) = xr_context.depth_swapchain.wait_image(Duration::INFINITE) {
+                                 error!("Failed to wait depth image: {:?}", e);
+                            }
+                            if let Err(e) = xr_context.motion_swapchain.wait_image(Duration::INFINITE) {
+                                 error!("Failed to wait motion image: {:?}", e);
+                            }
+                            
+                            info!("swapchain.wait_image succeeded");
 
                                 // Record Command Buffer
                                 unsafe {
+                                    info!("Resetting Command Buffer: {:?}", graphics_context.command_buffer);
                                     let _ = graphics_context.device.reset_command_buffer(graphics_context.command_buffer, vk::CommandBufferResetFlags::empty());
 
                                     let begin_info = vk::CommandBufferBeginInfo::builder()
@@ -546,8 +664,80 @@ fn android_main(app: AndroidApp) {
                                     let _ = graphics_context.device.begin_command_buffer(graphics_context.command_buffer, &begin_info);
 
                                     // Render Loop for Stereo (2 Eyes)
-                                    for eye_index in 0..2 {
+                                    // Calculate Light Matrices once per frame (or here to be safe)
+                                    let light_pos = glam::Vec3::new(10.0, 20.0, 4.0);
+                                    let light_proj = glam::Mat4::orthographic_rh(-10.0, 10.0, -10.0, 10.0, 1.0, 50.0);
+                                    let light_view = glam::Mat4::look_at_rh(light_pos, glam::Vec3::ZERO, glam::Vec3::Y);
+
+                                    // --- Shadow Pass (Moved Outside Eye Loop) ---
+                                    {
                                         let clear_values = [
+                                            vk::ClearValue {
+                                                depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 },
+                                            }
+                                        ];
+                                        
+                                        let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
+                                            .render_pass(graphics_context.shadow_render_pass)
+                                            .framebuffer(graphics_context.shadow_framebuffer)
+                                            .render_area(vk::Rect2D {
+                                                offset: vk::Offset2D { x: 0, y: 0 },
+                                                extent: graphics_context.shadow_extent,
+                                            })
+                                            .clear_values(&clear_values);
+
+                                        info!("Shadow Pass: RP={:?}, FB={:?}, CB={:?}", graphics_context.shadow_render_pass, graphics_context.shadow_framebuffer, graphics_context.command_buffer);
+                                        if graphics_context.command_buffer == vk::CommandBuffer::null() {
+                                            error!("CRITICAL: Command Buffer is NULL before Shadow Pass!");
+                                        }
+
+                                        unsafe {
+                                            graphics_context.device.cmd_begin_render_pass(
+                                                graphics_context.command_buffer,
+                                                &render_pass_begin_info,
+                                                vk::SubpassContents::INLINE,
+                                            );
+                                            
+                                            graphics_context.device.cmd_bind_pipeline(
+                                                graphics_context.command_buffer, 
+                                                vk::PipelineBindPoint::GRAPHICS, 
+                                                graphics_context.shadow_pipeline
+                                            );
+                                        }
+                                        
+                                        // Draw entities for shadow
+                                        if let Ok(state) = game_state.read() {
+                                            for (_id, (transform, gpu_mesh)) in state.world.ecs.query::<(&world::Transform, &GpuMesh)>().iter() {
+                                                let model = glam::Mat4::from_scale_rotation_translation(transform.scale, transform.rotation, transform.position);
+                                                
+                                                let mut shadow_push = Vec::new();
+                                                shadow_push.extend_from_slice(bytemuck::bytes_of(&model));
+                                                shadow_push.extend_from_slice(bytemuck::bytes_of(&light_view));
+                                                shadow_push.extend_from_slice(bytemuck::bytes_of(&light_proj));
+                                                
+                                                graphics_context.device.cmd_push_constants(
+                                                    graphics_context.command_buffer,
+                                                    graphics_context.shadow_pipeline_layout,
+                                                    vk::ShaderStageFlags::VERTEX,
+                                                    0,
+                                                    &shadow_push
+                                                );
+                                                
+                                                graphics_context.device.cmd_bind_vertex_buffers(graphics_context.command_buffer, 0, &[gpu_mesh.vertex_buffer], &[0]);
+                                                graphics_context.device.cmd_bind_index_buffer(graphics_context.command_buffer, gpu_mesh.index_buffer, 0, vk::IndexType::UINT32);
+                                                graphics_context.device.cmd_draw_indexed(graphics_context.command_buffer, gpu_mesh.index_count, 1, 0, 0, 0);
+                                            }
+                                        }
+                                        
+                                        unsafe {
+                                            graphics_context.device.cmd_end_render_pass(graphics_context.command_buffer);
+                                        }
+                                    }
+
+                                    for eye_index in 0..2 {
+
+
+                    let clear_values = [
                                             vk::ClearValue {
                                                 color: vk::ClearColorValue {
                                                     float32: [0.1, 0.1, 0.2, 1.0], // Dark Blue Opaque for Immersive VR
@@ -557,6 +747,11 @@ fn android_main(app: AndroidApp) {
                                                 depth_stencil: vk::ClearDepthStencilValue {
                                                     depth: 1.0,
                                                     stencil: 0,
+                                                },
+                                            },
+                                            vk::ClearValue { // Motion Vector Clear (0,0 = no motion)
+                                                color: vk::ClearColorValue {
+                                                    float32: [0.0, 0.0, 0.0, 0.0],
                                                 },
                                             }
                                         ];
@@ -582,24 +777,28 @@ fn android_main(app: AndroidApp) {
                                             })
                                             .clear_values(&clear_values);
 
+                                        info!("Main Pass (Eye {}): RP={:?}, FB={:?}, CB={:?}", eye_index, graphics_context.render_pass, xr_context.framebuffers[stream_idx as usize][eye_index], graphics_context.command_buffer);
                                         graphics_context.device.cmd_begin_render_pass(graphics_context.command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE);
                                         
                                         // Render Entities
                                         graphics_context.device.cmd_bind_pipeline(graphics_context.command_buffer, vk::PipelineBindPoint::GRAPHICS, graphics_context.pipeline);
                                         
-                                        graphics_context.device.cmd_bind_vertex_buffers(graphics_context.command_buffer, 0, &[vertex_buffer], &[0]);
-                                        graphics_context.device.cmd_bind_index_buffer(graphics_context.command_buffer, index_buffer, 0, vk::IndexType::UINT32);
-
-                                        // Bind Descriptor Set (Texture)
+                                        // Bind Global Descriptor Set (Set 0)
                                         graphics_context.device.cmd_bind_descriptor_sets(
                                             graphics_context.command_buffer,
                                             vk::PipelineBindPoint::GRAPHICS,
                                             graphics_context.pipeline_layout,
                                             0,
-                                            &[default_descriptor_set],
+                                            &[global_descriptor_set],
                                             &[],
                                         );
 
+                                        // Bind Material Descriptor Set (Per Object)
+                                        // But here we are iterating.
+                                        // Wait, the previous replacement was:
+                                        // graphics_context.device.cmd_bind_descriptor_sets(..., 1, &[material_descriptor_set], ...);
+                                        // We should now use `gpu_mesh.material_descriptor_set`.
+                                        
                                         // Viewport and Scissor
                                         let viewport = vk::Viewport {
                                             x: 0.0,
@@ -616,6 +815,9 @@ fn android_main(app: AndroidApp) {
                                         graphics_context.device.cmd_set_viewport(graphics_context.command_buffer, 0, &[viewport]);
                                         graphics_context.device.cmd_set_scissor(graphics_context.command_buffer, 0, &[scissor]);
 
+                                        // Update ViewProj
+                                        let view_proj = proj_matrix * view_matrix;
+                                        
                                         // Render ECS objects
                                         if let Ok(state) = game_state.read() {
                                             for (_id, (transform, gpu_mesh)) in state.world.ecs.query::<(&world::Transform, &GpuMesh)>().iter() {
@@ -624,32 +826,50 @@ fn android_main(app: AndroidApp) {
                                                     transform.rotation,
                                                     transform.position
                                                 );
-
-                                                let mut push_constants = Vec::new();
-                                                push_constants.extend_from_slice(bytemuck::bytes_of(&model_matrix));
-                                                push_constants.extend_from_slice(bytemuck::bytes_of(&view_matrix));
-                                                push_constants.extend_from_slice(bytemuck::bytes_of(&proj_matrix));
-
+                                                
+                                                // Prepare PushConstants: Model, ViewProj, PrevViewProj, LightSpace
+                                                // 64 bytes each => 256 total
+                                                let mut push_data = Vec::with_capacity(256);
+                                                push_data.extend_from_slice(bytemuck::bytes_of(&model_matrix));
+                                                push_data.extend_from_slice(bytemuck::bytes_of(&view_proj));
+                                                push_data.extend_from_slice(bytemuck::bytes_of(&prev_view_projs[eye_index]));
+                                                
+                                                // Light Space (Placeholder or calculated)
+                                                 let light_space_matrix = light_proj * light_view * model_matrix; // Just one example
+                                                push_data.extend_from_slice(bytemuck::bytes_of(&light_space_matrix));
+                                                
                                                 graphics_context.device.cmd_push_constants(
                                                     graphics_context.command_buffer,
                                                     graphics_context.pipeline_layout,
                                                     vk::ShaderStageFlags::VERTEX,
                                                     0,
-                                                    &push_constants,
+                                                    &push_data
                                                 );
                                                 
-                                                // Bind entity buffers
+                                                // Bind Material Descriptor Set (Set 1)
+                                                graphics_context.device.cmd_bind_descriptor_sets(
+                                                    graphics_context.command_buffer,
+                                                    vk::PipelineBindPoint::GRAPHICS,
+                                                    graphics_context.pipeline_layout,
+                                                    1,
+                                                    &[gpu_mesh.material_descriptor_set],
+                                                    &[],
+                                                );
+                                                
                                                 graphics_context.device.cmd_bind_vertex_buffers(graphics_context.command_buffer, 0, &[gpu_mesh.vertex_buffer], &[0]);
                                                 graphics_context.device.cmd_bind_index_buffer(graphics_context.command_buffer, gpu_mesh.index_buffer, 0, vk::IndexType::UINT32);
-                                                
-                                                if _id.id() % 100 == 0 { info!("Drawing entity {:?} with {} indices", _id, gpu_mesh.index_count); }
                                                 graphics_context.device.cmd_draw_indexed(graphics_context.command_buffer, gpu_mesh.index_count, 1, 0, 0, 0);
                                             }
                                         }
 
-                                        graphics_context.device.cmd_end_render_pass(graphics_context.command_buffer);
-                                    }
+                                        // Update Prev ViewProj for next frame
+                                        prev_view_projs[eye_index] = view_proj; 
+                                        
+                                        unsafe {
+                                            graphics_context.device.cmd_end_render_pass(graphics_context.command_buffer);
+                                        }
                                     
+                                    }
                                     let _ = graphics_context.device.end_command_buffer(graphics_context.command_buffer);
 
                                     let command_buffers = [graphics_context.command_buffer];
@@ -672,6 +892,12 @@ fn android_main(app: AndroidApp) {
                                 info!("Calling swapchain.release_image");
                                 if let Err(e) = xr_context.swapchain.release_image() {
                                     error!("Failed to release image: {:?}", e);
+                                }
+                                if let Err(e) = xr_context.depth_swapchain.release_image() {
+                                    error!("Failed to release depth image: {:?}", e);
+                                }
+                                if let Err(e) = xr_context.motion_swapchain.release_image() {
+                                    error!("Failed to release motion image: {:?}", e);
                                 }
                                 info!("swapchain.release_image succeeded");
 
@@ -720,10 +946,11 @@ fn android_main(app: AndroidApp) {
                                     .views(&projection_views));
                                 
                                 layers.push(projection_layer_storage.as_ref().unwrap());
-                            }
+
                         } else {
                             projection_layer_storage = None;
                         }
+
                     } else {
                         projection_layer_storage = None;
                     }

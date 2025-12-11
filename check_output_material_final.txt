@@ -1,0 +1,14 @@
+   Compiling stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+error: unexpected closing delimiter: `}`
+   --> src/lib.rs:883:1
+    |
+593 |                                     for eye_index in 0..2 {
+    |                                                           - this delimiter might not be properly closed...
+...
+657 |                     }
+    |                     - ...as it matches this but it has different indentation
+...
+883 | }
+    | ^ unexpected closing delimiter
+
+error: could not compile `stfsc_engine` (lib) due to 1 previous error

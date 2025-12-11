@@ -30,6 +30,9 @@ pub struct Transform {
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    pub albedo: Option<Vec<u8>>, // Raw image bytes (png/jpg)
+    pub normal: Option<Vec<u8>>,
+    pub metallic_roughness: Option<Vec<u8>>,
 }
 
 #[repr(C)]
@@ -39,6 +42,7 @@ pub struct Vertex {
     pub normal: [f32; 3],
     pub uv: [f32; 2],
     pub color: [f32; 3],
+    pub tangent: [f32; 4], // xyz + w (handedness)
 }
 
 #[derive(Clone, Debug)]
@@ -48,8 +52,8 @@ pub struct Material {
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub enum SceneUpdate {
-    Spawn { id: u32, position: [f32; 3], color: [f32; 3] },
-    SpawnMesh { id: u32, mesh: Mesh, position: [f32; 3] },
+    Spawn { id: u32, position: [f32; 3], rotation: [f32; 4], color: [f32; 3] },
+    SpawnMesh { id: u32, mesh: Mesh, position: [f32; 3], rotation: [f32; 4] },
     Move { id: u32, position: [f32; 3] },
 }
 
@@ -74,6 +78,7 @@ impl GameWorld {
         for i in 0..5 {
             let x = (i as f32) * 1.5 - 3.0;
             let color = [0.5 + (i as f32) * 0.1, 0.2, 0.2]; // Gradient red
+            let tangent = [1.0, 0.0, 0.0, 1.0]; // Default tangent
             self.ecs.spawn((
                 Transform {
                     position: glam::Vec3::new(x, 0.0, -3.0),
@@ -82,14 +87,14 @@ impl GameWorld {
                 },
                 Mesh {
                     vertices: vec![
-                        Vertex { position: [-0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0], color },
-                        Vertex { position: [0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0], color },
-                        Vertex { position: [0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 1.0], color },
-                        Vertex { position: [-0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 1.0], color },
-                        Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 0.0], color },
-                        Vertex { position: [0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 0.0], color },
-                        Vertex { position: [0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 1.0], color },
-                        Vertex { position: [-0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 1.0], color },
+                        Vertex { position: [-0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0], color, tangent },
+                        Vertex { position: [0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0], color, tangent },
+                        Vertex { position: [0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 1.0], color, tangent },
+                        Vertex { position: [-0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 1.0], color, tangent },
+                        Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 0.0], color, tangent },
+                        Vertex { position: [0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 0.0], color, tangent },
+                        Vertex { position: [0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 1.0], color, tangent },
+                        Vertex { position: [-0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 1.0], color, tangent },
                     ],
                     indices: vec![
                         0, 1, 2, 2, 3, 0, // Front
@@ -99,6 +104,9 @@ impl GameWorld {
                         4, 7, 3, 3, 0, 4, // Left
                         5, 6, 2, 2, 1, 5, // Right
                     ],
+                    albedo: None,
+                    normal: None,
+                    metallic_roughness: None,
                 },
             ));
         }
@@ -116,23 +124,24 @@ impl GameWorld {
         while let Ok(cmd) = self.command_receiver.try_recv() {
             info!("Processing command: {:?}", cmd);
             match cmd {
-                SceneUpdate::Spawn { id, position, color } => {
+                SceneUpdate::Spawn { id, position, rotation, color } => {
+                    let tangent = [1.0, 0.0, 0.0, 1.0];
                     self.ecs.spawn((
                         Transform {
                             position: glam::Vec3::from(position),
-                            rotation: glam::Quat::IDENTITY,
+                            rotation: glam::Quat::from_array(rotation),
                             scale: glam::Vec3::ONE,
                         },
                         Mesh {
                             vertices: vec![
-                                Vertex { position: [-0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0], color },
-                                Vertex { position: [0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0], color },
-                                Vertex { position: [0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 1.0], color },
-                                Vertex { position: [-0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 1.0], color },
-                                Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 0.0], color },
-                                Vertex { position: [0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 0.0], color },
-                                Vertex { position: [0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 1.0], color },
-                                Vertex { position: [-0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 1.0], color },
+                                Vertex { position: [-0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0], color, tangent },
+                                Vertex { position: [0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0], color, tangent },
+                                Vertex { position: [0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 1.0], color, tangent },
+                                Vertex { position: [-0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 1.0], color, tangent },
+                                Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 0.0], color, tangent },
+                                Vertex { position: [0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 0.0], color, tangent },
+                                Vertex { position: [0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 1.0], color, tangent },
+                                Vertex { position: [-0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 1.0], color, tangent },
                             ],
                             indices: vec![
                                 0, 1, 2, 2, 3, 0, // Front
@@ -142,15 +151,18 @@ impl GameWorld {
                                 4, 7, 3, 3, 0, 4, // Left
                                 5, 6, 2, 2, 1, 5, // Right
                             ],
+                            albedo: None,
+                            normal: None,
+                            metallic_roughness: None,
                         },
                     ));
                     // info!("Spawn command received (ECS spawn disabled)");
                 }
-                SceneUpdate::SpawnMesh { id, mesh, position } => {
+                SceneUpdate::SpawnMesh { id, mesh, position, rotation } => {
                      self.ecs.spawn((
                         Transform {
                             position: glam::Vec3::from(position),
-                            rotation: glam::Quat::IDENTITY,
+                            rotation: glam::Quat::from_array(rotation),
                             scale: glam::Vec3::ONE,
                         },
                         mesh,
@@ -177,18 +189,20 @@ impl GameWorld {
     }
 }
 
-pub fn load_obj_model(path: &str) -> anyhow::Result<Mesh> {
-    let (models, _materials) = tobj::load_obj(
-        path,
+pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
+    let mut reader = std::io::Cursor::new(data);
+    let (models, _materials) = tobj::load_obj_buf(
+        &mut reader,
         &tobj::LoadOptions {
             single_index: true,
             triangulate: true,
             ..Default::default()
-        }
+        },
+        |p| tobj::load_mtl_buf(&mut std::io::Cursor::new(Vec::new())) // Ignore materials for now
     )?;
 
     if models.is_empty() {
-        anyhow::bail!("No models found in {}", path);
+        anyhow::bail!("No models found in buffer");
     }
 
     // Take the first model
@@ -221,16 +235,23 @@ pub fn load_obj_model(path: &str) -> anyhow::Result<Mesh> {
             [0.0, 0.0]
         };
         
+        // TODO: Calc tangents
+        let tangent = [1.0, 0.0, 0.0, 1.0];
+
         vertices.push(Vertex {
             position: pos,
             normal,
             uv,
             color: [1.0, 1.0, 1.0], // Default white color
+            tangent,
         });
     }
 
     Ok(Mesh {
         vertices,
         indices: mesh.indices.clone(),
+        albedo: None,
+        normal: None,
+        metallic_roughness: None,
     })
 }

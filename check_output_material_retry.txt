@@ -1,0 +1,20 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+error: mismatched closing delimiter: `]`
+   --> src/graphics/mod.rs:53:85
+    |
+53  |     pub fn new(xr_instance: &xr::Instance, xr_system: xr::SystemId) -> Result<Self> {
+    |                                                                                     ^ unclosed delimiter
+...
+304 |         ];
+    |         ^ mismatched closing delimiter
+
+error: unexpected closing delimiter: `}`
+    --> src/graphics/mod.rs:1223:1
+     |
+304  |         ];
+     |         - missing open `[` for this delimiter
+...
+1223 | }
+     | ^ unexpected closing delimiter
+
+error: could not compile `stfsc_engine` (lib) due to 2 previous errors

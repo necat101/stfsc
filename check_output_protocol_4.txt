@@ -1,0 +1,232 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+warning: unused import: `debug`
+ --> src/lib.rs:3:24
+  |
+3 | use log::{info, error, debug};
+  |                        ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::ptr`
+ --> src/graphics/mod.rs:7:5
+  |
+7 | use std::ptr;
+  |     ^^^^^^^^
+
+warning: unused import: `tokio::runtime::Runtime`
+ --> src/world/mod.rs:2:5
+  |
+2 | use tokio::runtime::Runtime;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CompositionLayerProjectionView`, `CompositionLayerProjection`, `EnvironmentBlendMode`, `Extent2Di`, `Offset2Di`, `Posef`, `Rect2Di`, `ReferenceSpaceType`, and `SwapchainSubImage`
+  --> src/lib.rs:30:5
+   |
+30 |     ReferenceSpaceType, Posef, CompositionLayerProjectionView,
+   |     ^^^^^^^^^^^^^^^^^^  ^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+31 |     SwapchainSubImage, Rect2Di, Offset2Di, Extent2Di,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^  ^^^^^^^^^  ^^^^^^^^^
+32 |     CompositionLayerProjection, EnvironmentBlendMode, Duration
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `binding_descriptions`
+    --> src/graphics/mod.rs:1128:13
+     |
+1128 |         let binding_descriptions = [vk::VertexInputBindingDescription::builder()
+     |             ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_binding_descriptions`
+     |
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `attribute_descriptions`
+    --> src/graphics/mod.rs:1134:13
+     |
+1134 |         let attribute_descriptions = [
+     |             ^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attribute_descriptions`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:127:38
+    |
+127 |                 SceneUpdate::Spawn { id, position, color } => {
+    |                                      ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:161:42
+    |
+161 |                 SceneUpdate::SpawnMesh { id, mesh, position } => {
+    |                                          ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:171:37
+    |
+171 |                 SceneUpdate::Move { id, position } => {
+    |                                     ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `position`
+   --> src/world/mod.rs:171:41
+    |
+171 |                 SceneUpdate::Move { id, position } => {
+    |                                         ^^^^^^^^ help: try ignoring the field: `position: _`
+
+warning: unused variable: `p`
+   --> src/world/mod.rs:201:10
+    |
+201 |         |p| tobj::load_mtl_buf(&mut std::io::Cursor::new(Vec::new())) // Ignore materials for now
+    |          ^ help: if this is intentional, prefix it with an underscore: `_p`
+
+warning: unused variable: `skybox_renderer`
+  --> src/lib.rs:78:9
+   |
+78 |     let skybox_renderer = match graphics_context.create_skybox_pipeline(graphics_context.render_pass) {
+   |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_renderer`
+
+warning: unused variable: `vertex_buffer`
+   --> src/lib.rs:175:10
+    |
+175 |     let (vertex_buffer, vertex_memory) = match graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vertex_buffer`
+
+warning: unused variable: `index_buffer`
+   --> src/lib.rs:197:10
+    |
+197 |     let (index_buffer, index_memory) = match graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_index_buffer`
+
+warning: unused variable: `skybox_vertex_buffer`
+   --> src/lib.rs:239:10
+    |
+239 |     let (skybox_vertex_buffer, skybox_vertex_memory) = graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_vertex_buffer`
+
+warning: unused variable: `skybox_index_buffer`
+   --> src/lib.rs:251:10
+    |
+251 |     let (skybox_index_buffer, skybox_index_memory) = graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_index_buffer`
+
+warning: value assigned to `projection_layer_storage` is never read
+   --> src/lib.rs:853:29
+    |
+853 | ...                   projection_layer_storage = None;
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` on by default
+
+warning: value assigned to `projection_layer_storage` is never read
+   --> src/lib.rs:856:25
+    |
+856 |                         projection_layer_storage = None;
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:475:42
+    |
+475 |                     let (vbo, vbo_mem) = unsafe {
+    |                                          ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` on by default
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:498:42
+    |
+498 |                     let (ibo, ibo_mem) = unsafe {
+    |                                          ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:614:25
+    |
+582 |                                 unsafe {
+    |                                 ------ because it's nested under this `unsafe` block
+...
+614 |                         unsafe {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:656:26
+    |
+582 |                                 unsafe {
+    |                                 ------ because it's nested under this `unsafe` block
+...
+656 |                          unsafe {
+    |                          ^^^^^^ unnecessary `unsafe` block
+
+warning: variable does not need to be mutable
+   --> src/lib.rs:291:9
+    |
+291 |     let mut game_quit = false; // TODO: Handle quit signal properly across threads
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: fields `image` and `image_memory` are never read
+  --> src/graphics/mod.rs:10:9
+   |
+9  | pub struct Texture {
+   |            ------- fields in this struct
+10 |     pub image: vk::Image,
+   |         ^^^^^
+11 |     pub image_memory: vk::DeviceMemory,
+   |         ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: fields `pipeline` and `pipeline_layout` are never read
+  --> src/graphics/mod.rs:17:9
+   |
+16 | pub struct SkyboxRenderer {
+   |            -------------- fields in this struct
+17 |     pub pipeline: vk::Pipeline,
+   |         ^^^^^^^^
+18 |     pub pipeline_layout: vk::PipelineLayout,
+   |         ^^^^^^^^^^^^^^^
+
+warning: fields `entry`, `shadow_depth_image`, and `shadow_depth_memory` are never read
+  --> src/graphics/mod.rs:22:9
+   |
+21 | pub struct GraphicsContext {
+   |            --------------- fields in this struct
+22 |     pub entry: Entry,
+   |         ^^^^^
+...
+43 |     pub shadow_depth_image: vk::Image,
+   |         ^^^^^^^^^^^^^^^^^^
+44 |     pub shadow_depth_memory: vk::DeviceMemory,
+   |         ^^^^^^^^^^^^^^^^^^^
+
+warning: fields `system`, `swapchain_images`, `swapchain_image_views`, `depth_image`, `depth_image_memory`, and `depth_image_views` are never read
+  --> src/xr/mod.rs:10:9
+   |
+8  | pub struct XrContext {
+   |            --------- fields in this struct
+9  |     pub instance: xr::Instance,
+10 |     pub system: xr::SystemId,
+   |         ^^^^^^
+...
+15 |     pub swapchain_images: Vec<vk::Image>,
+   |         ^^^^^^^^^^^^^^^^
+16 |     pub swapchain_image_views: Vec<Vec<vk::ImageView>>, // [swapchain_image_index][eye_index]
+   |         ^^^^^^^^^^^^^^^^^^^^^
+...
+19 |     pub depth_image: vk::Image,
+   |         ^^^^^^^^^^^
+20 |     pub depth_image_memory: vk::DeviceMemory,
+   |         ^^^^^^^^^^^^^^^^^^
+21 |     pub depth_image_views: Vec<vk::ImageView>, // [eye_index]
+   |         ^^^^^^^^^^^^^^^^^
+
+warning: creating a shared reference to mutable static is discouraged
+   --> src/lib.rs:418:46
+    |
+418 |                 info!("Heartbeat: Frame {}", FRAME_COUNT);
+    |                                              ^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/static-mut-references.html>
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+    = note: `#[warn(static_mut_refs)]` on by default
+
+warning: `stfsc_engine` (lib) generated 28 warnings (run `cargo fix --lib -p stfsc_engine` to apply 5 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.23s

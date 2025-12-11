@@ -6,6 +6,7 @@ use openxr as xr;
 use glam;
 use std::ptr;
 
+#[derive(Clone, Copy, Debug)]
 pub struct Texture {
     pub image: vk::Image,
     pub image_memory: vk::DeviceMemory,
@@ -32,8 +33,20 @@ pub struct GraphicsContext {
     pub pipeline_layout: vk::PipelineLayout,
     pub pipeline: vk::Pipeline,
     pub depth_format: vk::Format,
-    pub descriptor_set_layout: vk::DescriptorSetLayout,
+    pub global_set_layout: vk::DescriptorSetLayout,
+    pub material_set_layout: vk::DescriptorSetLayout,
     pub descriptor_pool: vk::DescriptorPool,
+    
+    // Shadow Resources
+    pub shadow_render_pass: vk::RenderPass,
+    pub shadow_pipeline_layout: vk::PipelineLayout,
+    pub shadow_pipeline: vk::Pipeline,
+    pub shadow_depth_image: vk::Image,
+    pub shadow_depth_memory: vk::DeviceMemory,
+    pub shadow_depth_view: vk::ImageView,
+    pub shadow_framebuffer: vk::Framebuffer,
+    pub shadow_sampler: vk::Sampler,
+    pub shadow_extent: vk::Extent2D,
 }
 
 impl GraphicsContext {
@@ -147,58 +160,113 @@ impl GraphicsContext {
                 .format(depth_format) // Depth
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .store_op(vk::AttachmentStoreOp::STORE) // Changed to STORE for AppSW
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
                 .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .build()
+                .build(),
+            vk::AttachmentDescription::builder()
+                .format(vk::Format::R16G16_SFLOAT) // Motion Vectors
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .build(),
         ];
-        let color_attachment_refs = [
-            vk::AttachmentReference::builder()
-                .attachment(0)
-                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .build()
-        ];
+        let color_attachment_ref = vk::AttachmentReference::builder()
+            .attachment(0)
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .build();
+            
         let depth_attachment_ref = vk::AttachmentReference::builder()
             .attachment(1)
-            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .build();
+
+        let motion_attachment_ref = vk::AttachmentReference::builder()
+            .attachment(2)
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .build();
+
+        let color_attachments = [color_attachment_ref, motion_attachment_ref];
 
         let subpasses = [
             vk::SubpassDescription::builder()
                 .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-                .color_attachments(&color_attachment_refs)
+                .color_attachments(&color_attachments)
                 .depth_stencil_attachment(&depth_attachment_ref)
                 .build()
         ];
+        
+        let dependencies = [
+            vk::SubpassDependency::builder()
+                .src_subpass(vk::SUBPASS_EXTERNAL)
+                .dst_subpass(0)
+                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .build()
+        ];
+        
         let render_pass_create_info = vk::RenderPassCreateInfo::builder()
             .attachments(&render_pass_attachments)
-            .subpasses(&subpasses);
+            .subpasses(&subpasses)
+            .dependencies(&dependencies);
+            
         let render_pass = unsafe { device.create_render_pass(&render_pass_create_info, None)? };
 
-        // 8.5 Create Descriptor Set Layout
-        let bindings = [
-            // Binding 0: Uniform Buffer (if we used one, but we use push constants for now, so maybe just sampler?)
-            // Actually, for this phase, let's just use Push Constants for matrices and Descriptor Set for Texture.
-            // So Binding 1 (in shader) will be the texture. Let's make it Binding 0 in the set.
-            vk::DescriptorSetLayoutBinding::builder()
+        // 8.5 Create Descriptor Set Layouts
+        
+        // Global Set (Set 0): Shadows, maybe EnvMap later
+        let global_bindings = [
+             vk::DescriptorSetLayoutBinding::builder()
                 .binding(0)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT)
                 .build(),
         ];
+        let global_layout_info = vk::DescriptorSetLayoutCreateInfo::builder()
+            .bindings(&global_bindings);
+        let global_set_layout = unsafe { device.create_descriptor_set_layout(&global_layout_info, None)? };
+
+        // Material Set (Set 1): Albedo, Normal, MetallicRoughness
+        let material_bindings = [
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+        ];
         
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::builder()
-            .bindings(&bindings);
+        let material_layout_info = vk::DescriptorSetLayoutCreateInfo::builder()
+            .bindings(&material_bindings);
             
-        let descriptor_set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
+        let material_set_layout = unsafe { device.create_descriptor_set_layout(&material_layout_info, None)? };
 
         // 8.6 Create Descriptor Pool
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 100, // Enough for 100 textures
+                descriptor_count: 300, // Enough for 100 materials * 3 textures
             }
         ];
         
@@ -208,15 +276,62 @@ impl GraphicsContext {
             
         let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None)? };
 
+        // 8.7 Create Shadow Resources
+        let shadow_extent = vk::Extent2D { width: 2048, height: 2048 };
+        // Create Shadow Render Pass
+        let shadow_render_pass = Self::create_shadow_render_pass_internal(&device)?;
+        
+        // Create Shadow Pipeline Layout (Just PushConstants)
+        let push_constant_ranges = [
+            vk::PushConstantRange::builder()
+                .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .offset(0)
+                .size(std::mem::size_of::<glam::Mat4>() as u32 * 3) // Model, View, Proj
+                .build()
+        ];
+        let shadow_pipeline_layout_info = vk::PipelineLayoutCreateInfo::builder()
+            .push_constant_ranges(&push_constant_ranges);
+        let shadow_pipeline_layout = unsafe { device.create_pipeline_layout(&shadow_pipeline_layout_info, None)? };
+
+        // Create Shadow Pipeline
+        let shadow_pipeline = Self::create_shadow_pipeline_internal(&device, shadow_pipeline_layout, shadow_render_pass)?;
+
+        // Create Shadow Image/Memory/View
+        let (shadow_depth_image, shadow_depth_memory, shadow_depth_view) = Self::create_shadow_image_resources_internal(&instance, &device, physical_device, shadow_extent)?;
+
+        // Create Shadow Framebuffer
+        let framebuffer_attachments = [shadow_depth_view];
+        let framebuffer_info = vk::FramebufferCreateInfo::builder()
+            .render_pass(shadow_render_pass)
+            .attachments(&framebuffer_attachments)
+            .width(shadow_extent.width)
+            .height(shadow_extent.height)
+            .layers(1);
+        let shadow_framebuffer = unsafe { device.create_framebuffer(&framebuffer_info, None)? };
+
+        // Create Shadow Sampler (Clamp to Border usually required for shadows)
+        let sampler_info = vk::SamplerCreateInfo::builder()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_BORDER)
+            .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE) // Shadow: 1.0 means far (light), so clamping to white means outside is lit? 
+            .compare_enable(false) // Or true for hardware PCF? Let's do manual PCF in shader for now or standard comp.
+            .mip_lod_bias(0.0)
+            .min_lod(0.0)
+            .max_lod(1.0);
+        let shadow_sampler = unsafe { device.create_sampler(&sampler_info, None)? };
+
         // 9. Create Pipeline Layout
         let push_constant_ranges = [
             vk::PushConstantRange::builder()
                 .stage_flags(vk::ShaderStageFlags::VERTEX)
                 .offset(0)
-                .size(std::mem::size_of::<glam::Mat4>() as u32 * 3)
+                .size(std::mem::size_of::<glam::Mat4>() as u32 * 4)
                 .build()
         ];
-        let set_layouts = [descriptor_set_layout];
+        let set_layouts = [global_set_layout, material_set_layout];
         let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::builder()
             .push_constant_ranges(&push_constant_ranges)
             .set_layouts(&set_layouts);
@@ -285,6 +400,12 @@ impl GraphicsContext {
                 binding: 0,
                 format: vk::Format::R32G32B32_SFLOAT,
                 offset: 32, // color
+            },
+            vk::VertexInputAttributeDescription {
+                location: 4,
+                binding: 0,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: 44, // tangent
             }
         ];
 
@@ -318,9 +439,16 @@ impl GraphicsContext {
             .blend_enable(false)
             .build();
 
+        let motion_blend_attachment = vk::PipelineColorBlendAttachmentState::builder()
+             .color_write_mask(vk::ColorComponentFlags::R | vk::ColorComponentFlags::G | vk::ColorComponentFlags::B | vk::ColorComponentFlags::A)
+             .blend_enable(false)
+             .build();
+             
+        let attachments = [color_blend_attachment, motion_blend_attachment];
+
         let color_blending = vk::PipelineColorBlendStateCreateInfo::builder()
             .logic_op_enable(false)
-            .attachments(std::slice::from_ref(&color_blend_attachment));
+            .attachments(&attachments);
 
         let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::builder()
             .depth_test_enable(true)
@@ -371,8 +499,18 @@ impl GraphicsContext {
             pipeline_layout,
             pipeline,
             depth_format,
-            descriptor_set_layout,
+            global_set_layout,
+            material_set_layout,
             descriptor_pool,
+            shadow_render_pass,
+            shadow_pipeline_layout,
+            shadow_pipeline,
+            shadow_depth_image,
+            shadow_depth_memory,
+            shadow_depth_view,
+            shadow_framebuffer,
+            shadow_sampler,
+            shadow_extent,
         })
     }
 
@@ -594,27 +732,46 @@ impl GraphicsContext {
         Ok(())
     }
 
-    pub fn create_default_texture(&self) -> Result<Texture> {
+    pub fn create_default_pbr_textures(&self) -> Result<(Texture, Texture, Texture)> {
+        // Albedo: Checkerboard
         let width = 256;
         let height = 256;
-        let mut img = image::RgbaImage::new(width, height);
-        
+        let mut albedo_img = image::RgbaImage::new(width, height);
         for x in 0..width {
             for y in 0..height {
                 let color = if (x / 32 + y / 32) % 2 == 0 {
                     image::Rgba([255, 255, 255, 255])
                 } else {
-                    image::Rgba([0, 0, 0, 255])
+                    image::Rgba([128, 128, 128, 255]) // Grey instead of black for better lighting test
                 };
-                img.put_pixel(x, y, color);
+                albedo_img.put_pixel(x, y, color);
             }
         }
+        let albedo = self.create_texture_from_image(&albedo_img)?;
+
+        // Normal: Flat (0.5, 0.5, 1.0)
+        let mut normal_img = image::RgbaImage::new(width, height);
+        for x in 0..width {
+            for y in 0..height {
+                normal_img.put_pixel(x, y, image::Rgba([128, 128, 255, 255]));
+            }
+        }
+        let normal = self.create_texture_from_image(&normal_img)?;
+
+        // MetallicRoughness: R=Metallic, G=Roughness.
+        // Let's make it shiny metal? Or plastic?
+        // Checkerboard roughness?
+        let mut mr_img = image::RgbaImage::new(width, height);
+        for x in 0..width {
+            for y in 0..height {
+                // Metal = 0.0 (Plastic), Roughness = 0.2 (Shiny) or 0.8 (Rough) based on checker
+                let roughness = if (x / 64 + y / 64) % 2 == 0 { 50 } else { 200 };
+                mr_img.put_pixel(x, y, image::Rgba([0, roughness, 0, 255]));
+            }
+        }
+        let mr = self.create_texture_from_image(&mr_img)?;
         
-        // We can reuse the logic from create_texture_from_memory but we need to refactor or duplicate.
-        // Let's just duplicate the upload logic for now to avoid breaking the previous function signature 
-        // or just call this "create_texture_from_image" and make the other one call it.
-        
-        self.create_texture_from_image(&img)
+        Ok((albedo, normal, mr))
     }
 
     pub fn create_texture_from_image(&self, img: &image::RgbaImage) -> Result<Texture> {
@@ -711,32 +868,268 @@ impl GraphicsContext {
         })
     }
 
-    pub fn create_descriptor_set(&self, texture: &Texture) -> Result<vk::DescriptorSet> {
-        let layouts = [self.descriptor_set_layout];
+    pub fn create_global_descriptor_set(&self, shadow_view: vk::ImageView, shadow_sampler: vk::Sampler) -> Result<vk::DescriptorSet> {
+        let layouts = [self.global_set_layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::builder()
             .descriptor_pool(self.descriptor_pool)
             .set_layouts(&layouts);
-            
+
         let descriptor_set = unsafe { self.device.allocate_descriptor_sets(&alloc_info)?[0] };
-        
-        let image_info = vk::DescriptorImageInfo::builder()
+
+        let shadow_info = vk::DescriptorImageInfo::builder()
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .image_view(texture.image_view)
-            .sampler(texture.sampler);
-            
+            .image_view(shadow_view)
+            .sampler(shadow_sampler);
+
         let descriptor_writes = [
             vk::WriteDescriptorSet::builder()
                 .dst_set(descriptor_set)
                 .dst_binding(0)
                 .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(std::slice::from_ref(&image_info))
-                .build()
+                .image_info(std::slice::from_ref(&shadow_info))
+                .build(),
+        ];
+
+        unsafe { self.device.update_descriptor_sets(&descriptor_writes, &[]) };
+        Ok(descriptor_set)
+    }
+
+    pub fn create_material_descriptor_set(&self, albedo: &Texture, normal: &Texture, mr: &Texture) -> Result<vk::DescriptorSet> {
+        let layouts = [self.material_set_layout];
+        let alloc_info = vk::DescriptorSetAllocateInfo::builder()
+            .descriptor_pool(self.descriptor_pool)
+            .set_layouts(&layouts);
+            
+        let descriptor_set = unsafe { self.device.allocate_descriptor_sets(&alloc_info)?[0] };
+        
+        let albedo_info = vk::DescriptorImageInfo::builder()
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image_view(albedo.image_view)
+            .sampler(albedo.sampler);
+            
+        let normal_info = vk::DescriptorImageInfo::builder()
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image_view(normal.image_view)
+            .sampler(normal.sampler);
+            
+        let mr_info = vk::DescriptorImageInfo::builder()
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image_view(mr.image_view)
+            .sampler(mr.sampler);
+
+        let descriptor_writes = [
+            vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(0)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&albedo_info))
+                .build(),
+            vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(1)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&normal_info))
+                .build(),
+            vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(2)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&mr_info))
+                .build(),
         ];
         
         unsafe { self.device.update_descriptor_sets(&descriptor_writes, &[]) };
         
         Ok(descriptor_set)
+    }
+    // Internal helpers for Shadow Init (Static because called before Self exists fully or just easier)
+    fn create_shadow_render_pass_internal(device: &Device) -> Result<vk::RenderPass> {
+        let attachment = vk::AttachmentDescription::builder()
+            .format(vk::Format::D32_SFLOAT)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .build();
+
+        let depth_ref = vk::AttachmentReference {
+            attachment: 0,
+            layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        };
+
+        let subpass = vk::SubpassDescription::builder()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .depth_stencil_attachment(&depth_ref)
+            .build();
+
+        let dependencies = [
+            vk::SubpassDependency::builder()
+                .src_subpass(vk::SUBPASS_EXTERNAL)
+                .dst_subpass(0)
+                .src_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
+                .dst_stage_mask(vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
+                .src_access_mask(vk::AccessFlags::SHADER_READ)
+                .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .build(),
+            vk::SubpassDependency::builder()
+                .src_subpass(0)
+                .dst_subpass(vk::SUBPASS_EXTERNAL)
+                .src_stage_mask(vk::PipelineStageFlags::LATE_FRAGMENT_TESTS)
+                .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
+                .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .build(),
+        ];
+
+        let attachments = [attachment];
+        let subpasses = [subpass];
+        let create_info = vk::RenderPassCreateInfo::builder()
+            .attachments(&attachments)
+            .subpasses(&subpasses)
+            .dependencies(&dependencies);
+
+        unsafe { device.create_render_pass(&create_info, None).map_err(Into::into) }
+    }
+
+    fn create_shadow_pipeline_internal(device: &Device, layout: vk::PipelineLayout, render_pass: vk::RenderPass) -> Result<vk::Pipeline> {
+        let vert_code = include_bytes!(concat!(env!("OUT_DIR"), "/shadow.vert.spv"));
+        let vert_module = unsafe {
+            let code = ash::util::read_spv(&mut std::io::Cursor::new(&vert_code[..]))?;
+            let create_info = vk::ShaderModuleCreateInfo::builder().code(&code);
+            device.create_shader_module(&create_info, None)?
+        };
+
+        let main = std::ffi::CString::new("main").unwrap();
+        let stages = [vk::PipelineShaderStageCreateInfo::builder()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vert_module)
+            .name(&main)
+            .build()];
+
+        // Vertex Input: Reuse standard vertex format but only use position (Binding 0, Loc 0)
+        let binding_descriptions = [vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: std::mem::size_of::<crate::world::Vertex>() as u32,
+            input_rate: vk::VertexInputRate::VERTEX,
+        }];
+        let attribute_descriptions = [vk::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: vk::Format::R32G32B32_SFLOAT,
+            offset: 0,
+        }];
+        let vertex_input = vk::PipelineVertexInputStateCreateInfo::builder()
+            .vertex_binding_descriptions(&binding_descriptions)
+            .vertex_attribute_descriptions(&attribute_descriptions);
+
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::builder()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+
+        let viewport = vk::PipelineViewportStateCreateInfo::builder()
+            .viewport_count(1)
+            .scissor_count(1);
+
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::builder()
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::BACK) // Back face culling for shadows usually OK, or Front face to prevent peter panning
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .depth_bias_enable(true) // Enable depth bias
+            .depth_bias_constant_factor(1.25)
+            .depth_bias_slope_factor(1.75);
+
+        let multisample = vk::PipelineMultisampleStateCreateInfo::builder()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::builder()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
+
+        // No Color Blend State
+        let color_blend = vk::PipelineColorBlendStateCreateInfo::builder(); // Empty
+
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR, vk::DynamicState::DEPTH_BIAS];
+        let dynamic_state = vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
+
+        let info = vk::GraphicsPipelineCreateInfo::builder()
+            .stages(&stages)
+            .vertex_input_state(&vertex_input)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisample)
+            .depth_stencil_state(&depth_stencil)
+            .color_blend_state(&color_blend)
+            .dynamic_state(&dynamic_state)
+            .layout(layout)
+            .render_pass(render_pass)
+            .subpass(0);
+
+        let pipeline = unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &[info.build()], None).map_err(|e| e.1).unwrap()[0] };
+
+        unsafe { device.destroy_shader_module(vert_module, None); }
+        Ok(pipeline)
+    }
+
+    fn create_shadow_image_resources_internal(instance: &Instance, device: &Device, physical_device: vk::PhysicalDevice, extent: vk::Extent2D) 
+        -> Result<(vk::Image, vk::DeviceMemory, vk::ImageView)> {
+        
+        let info = vk::ImageCreateInfo::builder()
+            .image_type(vk::ImageType::TYPE_2D)
+            .extent(vk::Extent3D { width: extent.width, height: extent.height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .format(vk::Format::D32_SFLOAT)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED) // Changed to SAMPLED for shadow map
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .samples(vk::SampleCountFlags::TYPE_1);
+
+        let image = unsafe { device.create_image(&info, None)? };
+        let reqs = unsafe { device.get_image_memory_requirements(image) };
+        
+        // Use a simple find_memory_type helper - need to pass `instance` and `physical_device` or just duplicate logic for static
+        let mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        let mut type_index = 0;
+        let mut found = false;
+        for i in 0..mem_props.memory_type_count {
+             if (reqs.memory_type_bits & (1 << i)) != 0 && (mem_props.memory_types[i as usize].property_flags & vk::MemoryPropertyFlags::DEVICE_LOCAL) == vk::MemoryPropertyFlags::DEVICE_LOCAL {
+                 type_index = i;
+                 found = true;
+                 break;
+             }
+        }
+        if !found { anyhow::bail!("No suitable memory for shadow map"); }
+
+        let alloc = vk::MemoryAllocateInfo::builder().allocation_size(reqs.size).memory_type_index(type_index);
+        let mem = unsafe { device.allocate_memory(&alloc, None)? };
+        unsafe { device.bind_image_memory(image, mem, 0)? };
+
+        let view_info = vk::ImageViewCreateInfo::builder()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::D32_SFLOAT)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1
+            });
+        let view = unsafe { device.create_image_view(&view_info, None)? };
+
+        Ok((image, mem, view))
     }
 
     pub fn create_skybox_pipeline(&self, render_pass: vk::RenderPass) -> Result<SkyboxRenderer> {
@@ -788,9 +1181,6 @@ impl GraphicsContext {
                 .build(),
         ];
         
-        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
-            .vertex_binding_descriptions(&binding_descriptions)
-            .vertex_attribute_descriptions(&attribute_descriptions);
             
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::builder()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)

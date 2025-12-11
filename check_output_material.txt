@@ -1,6 +1,3 @@
-    Blocking waiting for file lock on build directory
-   Compiling shaderc-sys v0.9.1
-   Compiling shaderc v0.9.1
    Compiling stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
 error: failed to run custom build command for `stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)`
 

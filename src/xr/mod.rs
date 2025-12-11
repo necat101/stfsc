@@ -14,11 +14,18 @@ pub struct XrContext {
     pub swapchain: xr::Swapchain<xr::Vulkan>,
     pub swapchain_images: Vec<vk::Image>,
     pub swapchain_image_views: Vec<Vec<vk::ImageView>>, // [swapchain_image_index][eye_index]
+    pub depth_swapchain: xr::Swapchain<xr::Vulkan>,
+    pub depth_swapchain_images: Vec<vk::Image>,
+    pub depth_swapchain_image_views: Vec<Vec<vk::ImageView>>, // [swapchain_image_index][eye_index]
+    pub motion_swapchain: xr::Swapchain<xr::Vulkan>,
+    pub motion_swapchain_images: Vec<vk::Image>,
+    pub motion_swapchain_image_views: Vec<Vec<vk::ImageView>>, // [swapchain_image_index][eye_index]
     pub framebuffers: Vec<Vec<vk::Framebuffer>>,       // [swapchain_image_index][eye_index]
     pub resolution: vk::Extent2D,
-    pub depth_image: vk::Image,
-    pub depth_image_memory: vk::DeviceMemory,
-    pub depth_image_views: Vec<vk::ImageView>, // [eye_index]
+    // Removed raw depth image fields as we now use swapchain
+    // pub depth_image: vk::Image,
+    // pub depth_image_memory: vk::DeviceMemory, 
+    // pub depth_image_views: Vec<vk::ImageView>,
     pub stage_space: xr::Space,
     pub blend_mode: xr::EnvironmentBlendMode,
 }
@@ -175,52 +182,102 @@ impl XrContext {
             .map(|i| vk::Image::from_raw(i))
             .collect(); 
 
-        // Create Depth Resources (Array Layers = 2)
-        let (depth_image, depth_image_memory, depth_image_views) = graphics.create_depth_resources(resolution, 2)?;
+        // Create Depth Swapchain
+        let depth_format = graphics.depth_format;
+        let depth_swapchain_create_info = xr::SwapchainCreateInfo {
+            create_flags: xr::SwapchainCreateFlags::EMPTY,
+            usage_flags: xr::SwapchainUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            format: depth_format.as_raw() as u32,
+            sample_count: 1,
+            width: resolution.width,
+            height: resolution.height,
+            face_count: 1,
+            array_size: 2,
+            mip_count: 1,
+        };
+        
+        let depth_swapchain = session.create_swapchain(&depth_swapchain_create_info)?;
+        let depth_images = depth_swapchain.enumerate_images()?;
+        let depth_swapchain_images: Vec<vk::Image> = depth_images.into_iter().map(|i| vk::Image::from_raw(i)).collect();
 
-        // Create Image Views and Framebuffers
+        // Create Motion Vector Swapchain
+        let motion_format = vk::Format::R16G16_SFLOAT;
+        let motion_swapchain_create_info = xr::SwapchainCreateInfo {
+            create_flags: xr::SwapchainCreateFlags::EMPTY,
+            usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT | xr::SwapchainUsageFlags::SAMPLED,
+            format: motion_format.as_raw() as u32,
+            sample_count: 1,
+            width: resolution.width,
+            height: resolution.height,
+            face_count: 1,
+            array_size: 2,
+            mip_count: 1,
+        };
+
+        let motion_swapchain = session.create_swapchain(&motion_swapchain_create_info)?;
+        let motion_images = motion_swapchain.enumerate_images()?;
+        let motion_swapchain_images: Vec<vk::Image> = motion_images.into_iter().map(|i| vk::Image::from_raw(i)).collect();
+
+        // Create Image Views (Color, Depth, Motion)
         let mut swapchain_image_views = Vec::new();
+        let mut depth_swapchain_image_views = Vec::new();
+        let mut motion_swapchain_image_views = Vec::new();
+        
+        // Helper to create views for a swapchain list
+        // Note: We create per-eye views (array_layer 0 and 1)
+        
+        let create_views = |images: &Vec<vk::Image>, format: vk::Format, aspect: vk::ImageAspectFlags| -> Result<Vec<Vec<vk::ImageView>>> {
+            let mut all_views = Vec::new();
+            for image in images {
+                 let mut views_per_eye = Vec::new();
+                 for eye in 0..2 {
+                     let create_info = vk::ImageViewCreateInfo::builder()
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(format)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: aspect,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: eye, 
+                            layer_count: 1,
+                        })
+                        .image(*image);
+                     let view = unsafe { graphics.device.create_image_view(&create_info, None)? };
+                     views_per_eye.push(view);
+                 }
+                 all_views.push(views_per_eye);
+            }
+            Ok(all_views)
+        };
+
+        swapchain_image_views = create_views(&swapchain_images, vk::Format::R8G8B8A8_UNORM, vk::ImageAspectFlags::COLOR)?;
+        depth_swapchain_image_views = create_views(&depth_swapchain_images, depth_format, vk::ImageAspectFlags::DEPTH)?;
+        motion_swapchain_image_views = create_views(&motion_swapchain_images, motion_format, vk::ImageAspectFlags::COLOR)?;
+
+        // Create Framebuffers
+        // Assumption: Swapchains map 1:1 by index.
         let mut framebuffers = Vec::new();
+        
+        for i in 0..swapchain_images.len() {
+             let mut framebuffers_per_eye = Vec::new();
+             for eye in 0..2 {
+                 let color_view = swapchain_image_views[i][eye];
+                 // Fallback if depth/motion count mismatch (should verify length, but assuming safe for now)
+                 let depth_view = depth_swapchain_image_views[i % depth_swapchain_images.len()][eye]; 
+                 let motion_view = motion_swapchain_image_views[i % motion_swapchain_images.len()][eye];
 
-        for image in &swapchain_images {
-            let mut image_views_per_eye = Vec::new();
-            let mut framebuffers_per_eye = Vec::new();
-
-            for eye_index in 0..2 {
-                let create_view_info = vk::ImageViewCreateInfo::builder()
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(vk::Format::R8G8B8A8_UNORM) // Must match swapchain format
-                    .components(vk::ComponentMapping {
-                        r: vk::ComponentSwizzle::R,
-                        g: vk::ComponentSwizzle::G,
-                        b: vk::ComponentSwizzle::B,
-                        a: vk::ComponentSwizzle::A,
-                    })
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: eye_index, // Select layer for this eye
-                        layer_count: 1,
-                    })
-                    .image(*image);
-                
-                let image_view = unsafe { graphics.device.create_image_view(&create_view_info, None)? };
-                image_views_per_eye.push(image_view);
-
-                let framebuffer_attachments = [image_view, depth_image_views[eye_index as usize]];
-                let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
+                 let attachments = [color_view, depth_view, motion_view];
+                 let create_info = vk::FramebufferCreateInfo::builder()
                     .render_pass(graphics.render_pass)
-                    .attachments(&framebuffer_attachments)
+                    .attachments(&attachments)
                     .width(resolution.width)
                     .height(resolution.height)
-                    .layers(1); 
-                
-                let framebuffer = unsafe { graphics.device.create_framebuffer(&framebuffer_create_info, None)? };
-                framebuffers_per_eye.push(framebuffer);
-            }
-            swapchain_image_views.push(image_views_per_eye);
-            framebuffers.push(framebuffers_per_eye);
+                    .layers(1);
+                 
+                 let fb = unsafe { graphics.device.create_framebuffer(&create_info, None)? };
+                 framebuffers_per_eye.push(fb);
+             }
+             framebuffers.push(framebuffers_per_eye);
         }
 
         let stage_space = session.create_reference_space(
@@ -239,9 +296,12 @@ impl XrContext {
             swapchain_image_views,
             framebuffers,
             resolution,
-            depth_image,
-            depth_image_memory,
-            depth_image_views,
+            depth_swapchain,
+            depth_swapchain_images,
+            depth_swapchain_image_views,
+            motion_swapchain,
+            motion_swapchain_images,
+            motion_swapchain_image_views,
             stage_space,
             blend_mode,
         })

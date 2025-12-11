@@ -1,0 +1,277 @@
+   Compiling stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+warning: unused import: `debug`
+ --> src/lib.rs:3:24
+  |
+3 | use log::{info, error, debug};
+  |                        ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::ptr`
+ --> src/graphics/mod.rs:7:5
+  |
+7 | use std::ptr;
+  |     ^^^^^^^^
+
+warning: unused import: `tokio::runtime::Runtime`
+ --> src/world/mod.rs:2:5
+  |
+2 | use tokio::runtime::Runtime;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CompositionLayerProjectionView`, `CompositionLayerProjection`, `EnvironmentBlendMode`, `Extent2Di`, `Offset2Di`, `Posef`, `Rect2Di`, `ReferenceSpaceType`, and `SwapchainSubImage`
+  --> src/lib.rs:30:5
+   |
+30 |     ReferenceSpaceType, Posef, CompositionLayerProjectionView,
+   |     ^^^^^^^^^^^^^^^^^^  ^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+31 |     SwapchainSubImage, Rect2Di, Offset2Di, Extent2Di,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^  ^^^^^^^^^  ^^^^^^^^^
+32 |     CompositionLayerProjection, EnvironmentBlendMode, Duration
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+error[E0124]: field `depth_format` is already declared
+  --> src/graphics/mod.rs:35:5
+   |
+34 |     pub depth_format: vk::Format,
+   |     ---------------------------- `depth_format` first declared here
+35 |     pub depth_format: vk::Format,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field already declared
+
+error[E0599]: no function or associated item named `create_shadow_render_pass_internal` found for struct `GraphicsContext` in the current scope
+   --> src/graphics/mod.rs:251:40
+    |
+21  | pub struct GraphicsContext {
+    | -------------------------- function or associated item `create_shadow_render_pass_internal` not found for this struct
+...
+251 |         let shadow_render_pass = Self::create_shadow_render_pass_internal(&device)?;
+    |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function or associated item not found in `GraphicsContext`
+    |
+note: if you're trying to build a new `GraphicsContext`, consider using `GraphicsContext::new` which returns `std::result::Result<GraphicsContext, anyhow::Error>`
+   --> src/graphics/mod.rs:53:5
+    |
+53  |     pub fn new(xr_instance: &xr::Instance, xr_system: xr::SystemId) -> Result<Self> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no function or associated item named `create_shadow_pipeline_internal` found for struct `GraphicsContext` in the current scope
+   --> src/graphics/mod.rs:266:37
+    |
+21  | pub struct GraphicsContext {
+    | -------------------------- function or associated item `create_shadow_pipeline_internal` not found for this struct
+...
+266 |         let shadow_pipeline = Self::create_shadow_pipeline_internal(&device, shadow_pipeline_layout, shadow_render_pass)?;
+    |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function or associated item not found in `GraphicsContext`
+    |
+note: if you're trying to build a new `GraphicsContext`, consider using `GraphicsContext::new` which returns `std::result::Result<GraphicsContext, anyhow::Error>`
+   --> src/graphics/mod.rs:53:5
+    |
+53  |     pub fn new(xr_instance: &xr::Instance, xr_system: xr::SystemId) -> Result<Self> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is a method `create_skybox_pipeline` with a similar name, but with different arguments
+   --> src/graphics/mod.rs:913:5
+    |
+913 |     pub fn create_skybox_pipeline(&self, render_pass: vk::RenderPass) -> Result<SkyboxRenderer> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no function or associated item named `create_shadow_image_resources_internal` found for struct `GraphicsContext` in the current scope
+   --> src/graphics/mod.rs:269:82
+    |
+21  | pub struct GraphicsContext {
+    | -------------------------- function or associated item `create_shadow_image_resources_internal` not found for this struct
+...
+269 |         let (shadow_depth_image, shadow_depth_memory, shadow_depth_view) = Self::create_shadow_image_resources_internal(&instance, &devic...
+    |                                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function or associated item not found in `GraphicsContext`
+    |
+note: if you're trying to build a new `GraphicsContext`, consider using `GraphicsContext::new` which returns `std::result::Result<GraphicsContext, anyhow::Error>`
+   --> src/graphics/mod.rs:53:5
+    |
+53  |     pub fn new(xr_instance: &xr::Instance, xr_system: xr::SystemId) -> Result<Self> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is a method `create_depth_resources` with a similar name, but with different arguments
+   --> src/graphics/mod.rs:496:5
+    |
+496 |     pub fn create_depth_resources(&self, extent: vk::Extent2D, array_layers: u32) -> Result<(vk::Image, vk::DeviceMemory, Vec<vk::ImageView>)...
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0062]: field `depth_format` specified more than once
+   --> src/graphics/mod.rs:464:13
+    |
+463 |             depth_format,
+    |             ------------ first use of `depth_format`
+464 |             depth_format,
+    |             ^^^^^^^^^^^^ used more than once
+
+warning: unused variable: `binding_descriptions`
+   --> src/graphics/mod.rs:947:13
+    |
+947 |         let binding_descriptions = [vk::VertexInputBindingDescription::builder()
+    |             ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_binding_descriptions`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `attribute_descriptions`
+   --> src/graphics/mod.rs:953:13
+    |
+953 |         let attribute_descriptions = [
+    |             ^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attribute_descriptions`
+
+error[E0716]: temporary value dropped while borrowed
+    --> src/graphics/mod.rs:1003:27
+     |
+1003 |             .attachments(&[attachment])
+     |                           ^^^^^^^^^^^^ creates a temporary value which is freed while still in use
+1004 |             .subpasses(&[subpass])
+1005 |             .dependencies(&dependencies);
+     |                                         - temporary value is freed at the end of this statement
+1006 |
+1007 |         unsafe { device.create_render_pass(&create_info, None).map_err(Into::into) }
+     |                                            ------------ borrow later used here
+     |
+help: consider using a `let` binding to create a longer lived value
+     |
+1002 ~         let binding = [attachment];
+1003 ~         let create_info = vk::RenderPassCreateInfo::builder()
+1004 ~             .attachments(&binding)
+     |
+
+error[E0716]: temporary value dropped while borrowed
+    --> src/graphics/mod.rs:1004:25
+     |
+1004 |             .subpasses(&[subpass])
+     |                         ^^^^^^^^^ creates a temporary value which is freed while still in use
+1005 |             .dependencies(&dependencies);
+     |                                         - temporary value is freed at the end of this statement
+1006 |
+1007 |         unsafe { device.create_render_pass(&create_info, None).map_err(Into::into) }
+     |                                            ------------ borrow later used here
+     |
+help: consider using a `let` binding to create a longer lived value
+     |
+1002 ~         let binding = [subpass];
+1003 ~         let create_info = vk::RenderPassCreateInfo::builder()
+1004 |             .attachments(&[attachment])
+1005 ~             .subpasses(&binding)
+     |
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:121:38
+    |
+121 |                 SceneUpdate::Spawn { id, position, color } => {
+    |                                      ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:152:42
+    |
+152 |                 SceneUpdate::SpawnMesh { id, mesh, position } => {
+    |                                          ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:162:37
+    |
+162 |                 SceneUpdate::Move { id, position } => {
+    |                                     ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `position`
+   --> src/world/mod.rs:162:41
+    |
+162 |                 SceneUpdate::Move { id, position } => {
+    |                                         ^^^^^^^^ help: try ignoring the field: `position: _`
+
+warning: unused variable: `p`
+   --> src/world/mod.rs:192:10
+    |
+192 |         |p| tobj::load_mtl_buf(&mut std::io::Cursor::new(Vec::new())) // Ignore materials for now
+    |          ^ help: if this is intentional, prefix it with an underscore: `_p`
+
+warning: unused variable: `skybox_renderer`
+  --> src/lib.rs:78:9
+   |
+78 |     let skybox_renderer = match graphics_context.create_skybox_pipeline(graphics_context.render_pass) {
+   |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_renderer`
+
+warning: unused variable: `vertex_buffer`
+   --> src/lib.rs:172:10
+    |
+172 |     let (vertex_buffer, vertex_memory) = match graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vertex_buffer`
+
+warning: unused variable: `index_buffer`
+   --> src/lib.rs:194:10
+    |
+194 |     let (index_buffer, index_memory) = match graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_index_buffer`
+
+warning: unused variable: `skybox_vertex_buffer`
+   --> src/lib.rs:236:10
+    |
+236 |     let (skybox_vertex_buffer, skybox_vertex_memory) = graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_vertex_buffer`
+
+warning: unused variable: `skybox_index_buffer`
+   --> src/lib.rs:248:10
+    |
+248 |     let (skybox_index_buffer, skybox_index_memory) = graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_index_buffer`
+
+warning: value assigned to `projection_layer_storage` is never read
+   --> src/lib.rs:850:29
+    |
+850 | ...                   projection_layer_storage = None;
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` on by default
+
+warning: value assigned to `projection_layer_storage` is never read
+   --> src/lib.rs:853:25
+    |
+853 |                         projection_layer_storage = None;
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:472:42
+    |
+472 |                     let (vbo, vbo_mem) = unsafe {
+    |                                          ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` on by default
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:495:42
+    |
+495 |                     let (ibo, ibo_mem) = unsafe {
+    |                                          ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:611:25
+    |
+579 |                                 unsafe {
+    |                                 ------ because it's nested under this `unsafe` block
+...
+611 |                         unsafe {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:653:26
+    |
+579 |                                 unsafe {
+    |                                 ------ because it's nested under this `unsafe` block
+...
+653 |                          unsafe {
+    |                          ^^^^^^ unnecessary `unsafe` block
+
+warning: variable does not need to be mutable
+   --> src/lib.rs:288:9
+    |
+288 |     let mut game_quit = false; // TODO: Handle quit signal properly across threads
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+Some errors have detailed explanations: E0062, E0124, E0599, E0716.
+For more information about an error, try `rustc --explain E0062`.
+warning: `stfsc_engine` (lib) generated 23 warnings
+error: could not compile `stfsc_engine` (lib) due to 7 previous errors; 23 warnings emitted

@@ -7,6 +7,16 @@ use std::thread;
 use std::path::PathBuf;
 
 fn main() -> Result<(), eframe::Error> {
+    // Automatically forward ports for user convenience
+    if let Err(e) = std::process::Command::new("adb")
+        .args(&["forward", "tcp:8080", "tcp:8080"])
+        .output() 
+    {
+        println!("Warning: Failed to run 'adb forward': {}", e);
+    } else {
+        println!("Successfully forwarded tcp:8080 to device.");
+    }
+
     let options = eframe::NativeOptions::default();
     eframe::run_native(
         "STFSC Editor",
@@ -35,6 +45,13 @@ struct MyApp {
     is_connected: bool,
     loaded_mesh: Option<(String, Mesh)>, // (Filename, Mesh data)
     input_path: String,
+    albedo_path: String,
+    normal_path: String,
+    mr_path: String,
+    
+    // Spawn controls
+    spawn_pos: [f32; 3],
+    spawn_rot: [f32; 3], // Euler angles (Pitch, Yaw, Roll) in degrees
 }
 
 impl MyApp {
@@ -105,6 +122,11 @@ impl MyApp {
             is_connected: false,
             loaded_mesh: None,
             input_path: "model.obj".to_owned(),
+            albedo_path: "".to_owned(),
+            normal_path: "".to_owned(),
+            mr_path: "".to_owned(),
+            spawn_pos: [0.0, 0.0, -2.0],
+            spawn_rot: [0.0, 0.0, 0.0],
         }
     }
 
@@ -148,6 +170,7 @@ impl MyApp {
                                 [0.0, 0.0]
                             },
                             color: [1.0, 1.0, 1.0], // Default white
+                            tangent: [1.0, 0.0, 0.0, 1.0],
                         });
                     }
 
@@ -157,6 +180,9 @@ impl MyApp {
                         let mesh_data = Mesh {
                             vertices,
                             indices,
+                            albedo: None,
+                            normal: None,
+                            metallic_roughness: None,
                         };
                         self.loaded_mesh = Some((
                             model.name,
@@ -172,6 +198,11 @@ impl MyApp {
                 self.status = format!("Failed to load OBJ: {}", e);
             }
         }
+    }
+    
+    fn read_file_ignoring_errors(&self, path: &str) -> Option<Vec<u8>> {
+        if path.is_empty() { return None; }
+        std::fs::read(path).ok()
     }
 }
 
@@ -213,24 +244,69 @@ impl eframe::App for MyApp {
             
             ui.separator();
             
+            ui.heading("Spawn Settings");
+            ui.horizontal(|ui| {
+                ui.label("Position (X, Y, Z):");
+                ui.add(egui::DragValue::new(&mut self.spawn_pos[0]).speed(0.1));
+                ui.add(egui::DragValue::new(&mut self.spawn_pos[1]).speed(0.1));
+                ui.add(egui::DragValue::new(&mut self.spawn_pos[2]).speed(0.1));
+            });
+             ui.horizontal(|ui| {
+                ui.label("Rotation (Pitch, Yaw, Roll):");
+                ui.add(egui::DragValue::new(&mut self.spawn_rot[0]).speed(1.0).suffix("°"));
+                ui.add(egui::DragValue::new(&mut self.spawn_rot[1]).speed(1.0).suffix("°"));
+                ui.add(egui::DragValue::new(&mut self.spawn_rot[2]).speed(1.0).suffix("°"));
+            });
+
+            ui.separator();
+            
             ui.heading("Model Import");
             ui.horizontal(|ui| {
-                ui.label("Path:");
+                ui.label("OBJ Path:");
                 ui.text_edit_singleline(&mut self.input_path);
                 if ui.button("Load OBJ").clicked() {
                     self.load_obj(self.input_path.clone());
                 }
             });
 
-            if let Some((name, mesh)) = &self.loaded_mesh {
+            if let Some((name, mesh)) = &mut self.loaded_mesh {
                 ui.label(format!("Loaded: {} ({} vertices)", name, mesh.vertices.len()));
+                
+                ui.separator();
+                ui.label("Textures (Optional)");
+                ui.horizontal(|ui| {
+                    ui.label("Albedo:");
+                    ui.text_edit_singleline(&mut self.albedo_path);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Normal:");
+                    ui.text_edit_singleline(&mut self.normal_path);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Metal/Rough:");
+                    ui.text_edit_singleline(&mut self.mr_path);
+                });
                 
                 if self.is_connected {
                     if ui.button("Spawn Loaded Model").clicked() {
+                        let mut final_mesh = mesh.clone();
+                        final_mesh.albedo = self.read_file_ignoring_errors(&self.albedo_path);
+                        final_mesh.normal = self.read_file_ignoring_errors(&self.normal_path);
+                        final_mesh.metallic_roughness = self.read_file_ignoring_errors(&self.mr_path);
+                        
+                        // Convert Euler to Quat
+                        let q = glam::Quat::from_euler(
+                            glam::EulerRot::XYZ,
+                            self.spawn_rot[0].to_radians(),
+                            self.spawn_rot[1].to_radians(),
+                            self.spawn_rot[2].to_radians(),
+                        );
+
                         let update = SceneUpdate::SpawnMesh {
                             id: rand::random(),
-                            mesh: mesh.clone(),
-                            position: [0.0, 0.0, -2.0],
+                            mesh: final_mesh,
+                            position: self.spawn_pos,
+                            rotation: q.to_array(),
                         };
                         let _ = self.command_tx.send(AppCommand::Send(update));
                     }
@@ -243,9 +319,18 @@ impl eframe::App for MyApp {
 
             if self.is_connected {
                 if ui.button("Spawn Cube (Test)").clicked() {
+                     // Convert Euler to Quat
+                    let q = glam::Quat::from_euler(
+                        glam::EulerRot::XYZ,
+                        self.spawn_rot[0].to_radians(),
+                        self.spawn_rot[1].to_radians(),
+                        self.spawn_rot[2].to_radians(),
+                    );
+                    
                     let update = SceneUpdate::Spawn {
                         id: rand::random(),
-                        position: [0.0, 0.0, -2.0],
+                        position: self.spawn_pos,
+                        rotation: q.to_array(),
                         color: [1.0, 1.0, 1.0],
                     };
                     let _ = self.command_tx.send(AppCommand::Send(update));

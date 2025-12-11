@@ -1,0 +1,84 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+warning: unused import: `debug`
+ --> src/lib.rs:3:24
+  |
+3 | use log::{info, error, debug};
+  |                        ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::ptr`
+ --> src/graphics/mod.rs:7:5
+  |
+7 | use std::ptr;
+  |     ^^^^^^^^
+
+warning: unused import: `tokio::runtime::Runtime`
+ --> src/world/mod.rs:2:5
+  |
+2 | use tokio::runtime::Runtime;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CompositionLayerProjectionView`, `CompositionLayerProjection`, `EnvironmentBlendMode`, `Extent2Di`, `Offset2Di`, `Posef`, `Rect2Di`, `ReferenceSpaceType`, and `SwapchainSubImage`
+  --> src/lib.rs:30:5
+   |
+30 |     ReferenceSpaceType, Posef, CompositionLayerProjectionView,
+   |     ^^^^^^^^^^^^^^^^^^  ^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+31 |     SwapchainSubImage, Rect2Di, Offset2Di, Extent2Di,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^  ^^^^^^^^^  ^^^^^^^^^
+32 |     CompositionLayerProjection, EnvironmentBlendMode, Duration
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+error[E0063]: missing fields `albedo`, `metallic_roughness` and `normal` in initializer of `world::Mesh`
+   --> src/lib.rs:149:13
+    |
+149 |             world::Mesh {
+    |             ^^^^^^^^^^^ missing `albedo`, `metallic_roughness` and `normal`
+
+warning: unused variable: `binding_descriptions`
+    --> src/graphics/mod.rs:1128:13
+     |
+1128 |         let binding_descriptions = [vk::VertexInputBindingDescription::builder()
+     |             ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_binding_descriptions`
+     |
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `attribute_descriptions`
+    --> src/graphics/mod.rs:1134:13
+     |
+1134 |         let attribute_descriptions = [
+     |             ^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attribute_descriptions`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:127:38
+    |
+127 |                 SceneUpdate::Spawn { id, position, color } => {
+    |                                      ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:161:42
+    |
+161 |                 SceneUpdate::SpawnMesh { id, mesh, position } => {
+    |                                          ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:171:37
+    |
+171 |                 SceneUpdate::Move { id, position } => {
+    |                                     ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `position`
+   --> src/world/mod.rs:171:41
+    |
+171 |                 SceneUpdate::Move { id, position } => {
+    |                                         ^^^^^^^^ help: try ignoring the field: `position: _`
+
+warning: unused variable: `p`
+   --> src/world/mod.rs:201:10
+    |
+201 |         |p| tobj::load_mtl_buf(&mut std::io::Cursor::new(Vec::new())) // Ignore materials for now
+    |          ^ help: if this is intentional, prefix it with an underscore: `_p`
+
+For more information about this error, try `rustc --explain E0063`.
+warning: `stfsc_engine` (lib) generated 11 warnings
+error: could not compile `stfsc_engine` (lib) due to 1 previous error; 11 warnings emitted

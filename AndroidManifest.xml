@@ -1,22 +1,19 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           package="com.stfsc.engine"
-          android:versionCode="1"
+          android:versionCode="4"
           android:versionName="0.1.0">
 
-    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="33" />
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
 
-    <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" />
+    <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
     <uses-feature android:name="android.hardware.vr.high_performance" android:required="true" />
     <uses-feature android:name="android.software.vr.mode" android:required="true" />
     <uses-feature android:name="com.oculus.feature.HAND_TRACKING" android:required="true" />
     <uses-feature android:name="com.oculus.software.hand_tracking" android:required="true" />
     <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true" />
 
-    <uses-permission android:name="android.permission.BODY_SENSORS" />
     <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
     <uses-permission android:name="horizonos.permission.HAND_TRACKING" />
-    <uses-permission android:name="horizonos.permission.FACE_TRACKING" />
-    <uses-permission android:name="horizonos.permission.EYE_TRACKING" />
     <uses-permission android:name="com.oculus.permission.USE_ANCHOR_API" />
     <uses-permission android:name="com.oculus.permission.USE_SCENE" />
     <uses-permission android:name="com.oculus.permission.BOUNDARY_VISIBILITY" />
@@ -29,24 +26,27 @@
                  android:label="STFSC Engine"
                  android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
 
-        <meta-data android:name="com.samsung.android.vr.application.mode" android:value="vr_only" />
-        <meta-data android:name="com.oculus.vr.mode" android:value="vr_only" />
-        <meta-data android:name="com.oculus.supportedDevices" android:value="quest|quest2|cambria|quest3" />
+        <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|questpro|quest3|quest3s" />
 
         <activity android:name="android.app.NativeActivity"
                   android:label="STFSC Engine"
                   android:launchMode="singleTask"
                   android:screenOrientation="landscape"
+                  android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
                   android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|density|uiMode"
+                  android:excludeFromRecents="true"
                   android:exported="true"
                   android:resizeableActivity="false">
 
+            <meta-data android:name="com.samsung.android.vr.application.mode" android:value="vr_only" />
+            <meta-data android:name="com.oculus.vr.mode" android:value="vr_only" />
             <meta-data android:name="android.app.lib_name" android:value="stfsc_engine" />
             <meta-data android:name="com.oculus.vr.focusaware" android:value="true" />
 
+            <!-- CRITICAL: This is the correct filter for OpenXR immersive apps -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-                <category android:name="com.oculus.intent.category.VR" />
+                <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>

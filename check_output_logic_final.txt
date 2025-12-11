@@ -1,0 +1,246 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+warning: unused import: `debug`
+ --> src/lib.rs:3:24
+  |
+3 | use log::{info, error, debug};
+  |                        ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::ptr`
+ --> src/graphics/mod.rs:7:5
+  |
+7 | use std::ptr;
+  |     ^^^^^^^^
+
+warning: unused import: `tokio::runtime::Runtime`
+ --> src/world/mod.rs:2:5
+  |
+2 | use tokio::runtime::Runtime;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `image::io::Reader as ImageReader`
+  --> src/lib.rs:28:5
+   |
+28 | use image::io::Reader as ImageReader;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CompositionLayerProjectionView`, `CompositionLayerProjection`, `EnvironmentBlendMode`, `Extent2Di`, `Offset2Di`, `Posef`, `Rect2Di`, `ReferenceSpaceType`, and `SwapchainSubImage`
+  --> src/lib.rs:34:5
+   |
+34 |     ReferenceSpaceType, Posef, CompositionLayerProjectionView,
+   |     ^^^^^^^^^^^^^^^^^^  ^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+35 |     SwapchainSubImage, Rect2Di, Offset2Di, Extent2Di,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^  ^^^^^^^^^  ^^^^^^^^^
+36 |     CompositionLayerProjection, EnvironmentBlendMode, Duration
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+error[E0204]: the trait `std::marker::Copy` cannot be implemented for this type
+  --> src/lib.rs:40:17
+   |
+40 | #[derive(Clone, Copy, Debug)]
+   |                 ^^^^
+...
+48 |     pub custom_textures: Vec<Texture>,
+   |     --------------------------------- this field does not implement `std::marker::Copy`
+   |
+   = note: this error originates in the derive macro `Copy` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `Texture: Clone` is not satisfied
+   --> src/lib.rs:48:5
+    |
+40  | #[derive(Clone, Copy, Debug)]
+    |          ----- in this derive macro expansion
+...
+48  |     pub custom_textures: Vec<Texture>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `Texture`
+    |
+    = note: required for `Vec<Texture>` to implement `Clone`
+note: required by a bound in `AssertParamIsClone`
+   --> /home/netcat/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/clone.rs:198:34
+    |
+198 | pub struct AssertParamIsClone<T: Clone + ?Sized> {
+    |                                  ^^^^^ required by this bound in `AssertParamIsClone`
+    = note: this error originates in the derive macro `Clone` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `Texture` with `#[derive(Clone)]`
+   --> src/graphics/mod.rs:9:1
+    |
+9   + #[derive(Clone)]
+10  | pub struct Texture {
+    |
+
+error[E0277]: `Texture` doesn't implement `std::fmt::Debug`
+  --> src/lib.rs:48:5
+   |
+40 | #[derive(Clone, Copy, Debug)]
+   |                       ----- in this derive macro expansion
+...
+48 |     pub custom_textures: Vec<Texture>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Texture` cannot be formatted using `{:?}`
+   |
+   = help: the trait `std::fmt::Debug` is not implemented for `Texture`
+   = note: add `#[derive(Debug)]` to `Texture` or manually `impl std::fmt::Debug for Texture`
+   = help: the trait `std::fmt::Debug` is implemented for `Vec<T, A>`
+   = note: this error originates in the derive macro `Debug` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `Texture` with `#[derive(Debug)]`
+  --> src/graphics/mod.rs:9:1
+   |
+9  + #[derive(Debug)]
+10 | pub struct Texture {
+   |
+
+warning: unused variable: `binding_descriptions`
+    --> src/graphics/mod.rs:1128:13
+     |
+1128 |         let binding_descriptions = [vk::VertexInputBindingDescription::builder()
+     |             ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_binding_descriptions`
+     |
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `attribute_descriptions`
+    --> src/graphics/mod.rs:1134:13
+     |
+1134 |         let attribute_descriptions = [
+     |             ^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attribute_descriptions`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:127:38
+    |
+127 |                 SceneUpdate::Spawn { id, position, color } => {
+    |                                      ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:161:42
+    |
+161 |                 SceneUpdate::SpawnMesh { id, mesh, position } => {
+    |                                          ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:171:37
+    |
+171 |                 SceneUpdate::Move { id, position } => {
+    |                                     ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `position`
+   --> src/world/mod.rs:171:41
+    |
+171 |                 SceneUpdate::Move { id, position } => {
+    |                                         ^^^^^^^^ help: try ignoring the field: `position: _`
+
+warning: unused variable: `p`
+   --> src/world/mod.rs:201:10
+    |
+201 |         |p| tobj::load_mtl_buf(&mut std::io::Cursor::new(Vec::new())) // Ignore materials for now
+    |          ^ help: if this is intentional, prefix it with an underscore: `_p`
+
+warning: unused variable: `skybox_renderer`
+  --> src/lib.rs:83:9
+   |
+83 |     let skybox_renderer = match graphics_context.create_skybox_pipeline(graphics_context.render_pass) {
+   |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_renderer`
+
+warning: unused variable: `vertex_buffer`
+   --> src/lib.rs:180:10
+    |
+180 |     let (vertex_buffer, vertex_memory) = match graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vertex_buffer`
+
+warning: unused variable: `index_buffer`
+   --> src/lib.rs:202:10
+    |
+202 |     let (index_buffer, index_memory) = match graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_index_buffer`
+
+warning: unused variable: `skybox_vertex_buffer`
+   --> src/lib.rs:244:10
+    |
+244 |     let (skybox_vertex_buffer, skybox_vertex_memory) = graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_vertex_buffer`
+
+warning: unused variable: `skybox_index_buffer`
+   --> src/lib.rs:256:10
+    |
+256 |     let (skybox_index_buffer, skybox_index_memory) = graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_index_buffer`
+
+warning: unused variable: `current_albedo`
+   --> src/lib.rs:531:29
+    |
+531 |                         let current_albedo = if let Some(data) = &mesh.albedo {
+    |                             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_current_albedo`
+
+warning: unused variable: `current_normal`
+   --> src/lib.rs:545:29
+    |
+545 |                         let current_normal = if let Some(data) = &mesh.normal {
+    |                             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_current_normal`
+
+warning: unused variable: `current_mr`
+   --> src/lib.rs:554:29
+    |
+554 |                         let current_mr = if let Some(data) = &mesh.metallic_roughness {
+    |                             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_current_mr`
+
+warning: value assigned to `projection_layer_storage` is never read
+   --> src/lib.rs:954:29
+    |
+954 | ...                   projection_layer_storage = None;
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` on by default
+
+warning: value assigned to `projection_layer_storage` is never read
+   --> src/lib.rs:957:25
+    |
+957 |                         projection_layer_storage = None;
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:480:42
+    |
+480 |                     let (vbo, vbo_mem) = unsafe {
+    |                                          ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` on by default
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:503:42
+    |
+503 |                     let (ibo, ibo_mem) = unsafe {
+    |                                          ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:715:25
+    |
+683 |                                 unsafe {
+    |                                 ------ because it's nested under this `unsafe` block
+...
+715 |                         unsafe {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:757:26
+    |
+683 |                                 unsafe {
+    |                                 ------ because it's nested under this `unsafe` block
+...
+757 |                          unsafe {
+    |                          ^^^^^^ unnecessary `unsafe` block
+
+warning: variable does not need to be mutable
+   --> src/lib.rs:296:9
+    |
+296 |     let mut game_quit = false; // TODO: Handle quit signal properly across threads
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+Some errors have detailed explanations: E0204, E0277.
+For more information about an error, try `rustc --explain E0204`.
+warning: `stfsc_engine` (lib) generated 27 warnings
+error: could not compile `stfsc_engine` (lib) due to 3 previous errors; 27 warnings emitted
