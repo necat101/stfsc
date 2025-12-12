@@ -1,0 +1,213 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+warning: unused import: `debug`
+ --> src/lib.rs:3:24
+  |
+3 | use log::{info, error, debug};
+  |                        ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::ptr`
+ --> src/graphics/mod.rs:7:5
+  |
+7 | use std::ptr;
+  |     ^^^^^^^^
+
+warning: unused import: `tokio::runtime::Runtime`
+ --> src/world/mod.rs:2:5
+  |
+2 | use tokio::runtime::Runtime;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `image::io::Reader as ImageReader`
+  --> src/lib.rs:28:5
+   |
+28 | use image::io::Reader as ImageReader;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CompositionLayerProjectionView`, `CompositionLayerProjection`, `EnvironmentBlendMode`, `Extent2Di`, `Offset2Di`, `Posef`, `Rect2Di`, `ReferenceSpaceType`, and `SwapchainSubImage`
+  --> src/lib.rs:34:5
+   |
+34 |     ReferenceSpaceType, Posef, CompositionLayerProjectionView,
+   |     ^^^^^^^^^^^^^^^^^^  ^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+35 |     SwapchainSubImage, Rect2Di, Offset2Di, Extent2Di,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^  ^^^^^^^^^  ^^^^^^^^^
+36 |     CompositionLayerProjection, EnvironmentBlendMode, Duration
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `binding_descriptions`
+    --> src/graphics/mod.rs:1169:13
+     |
+1169 |         let binding_descriptions = [vk::VertexInputBindingDescription::builder()
+     |             ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_binding_descriptions`
+     |
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `attribute_descriptions`
+    --> src/graphics/mod.rs:1175:13
+     |
+1175 |         let attribute_descriptions = [
+     |             ^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attribute_descriptions`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:127:38
+    |
+127 |                 SceneUpdate::Spawn { id, position, rotation, color } => {
+    |                                      ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:161:42
+    |
+161 |                 SceneUpdate::SpawnMesh { id, mesh, position, rotation } => {
+    |                                          ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:171:37
+    |
+171 |                 SceneUpdate::Move { id, position } => {
+    |                                     ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `position`
+   --> src/world/mod.rs:171:41
+    |
+171 |                 SceneUpdate::Move { id, position } => {
+    |                                         ^^^^^^^^ help: try ignoring the field: `position: _`
+
+warning: unused variable: `p`
+   --> src/world/mod.rs:201:10
+    |
+201 |         |p| tobj::load_mtl_buf(&mut std::io::Cursor::new(Vec::new())) // Ignore materials for now
+    |          ^ help: if this is intentional, prefix it with an underscore: `_p`
+
+warning: value assigned to `swapchain_image_views` is never read
+   --> src/xr/mod.rs:222:17
+    |
+222 |         let mut swapchain_image_views = Vec::new();
+    |                 ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` on by default
+
+warning: value assigned to `depth_swapchain_image_views` is never read
+   --> src/xr/mod.rs:223:17
+    |
+223 |         let mut depth_swapchain_image_views = Vec::new();
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `motion_swapchain_image_views` is never read
+   --> src/xr/mod.rs:224:17
+    |
+224 |         let mut motion_swapchain_image_views = Vec::new();
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `skybox_renderer`
+  --> src/lib.rs:83:9
+   |
+83 |     let skybox_renderer = match graphics_context.create_skybox_pipeline(graphics_context.render_pass) {
+   |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_renderer`
+
+warning: unused variable: `vertex_buffer`
+   --> src/lib.rs:180:10
+    |
+180 |     let (vertex_buffer, vertex_memory) = match graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vertex_buffer`
+
+warning: unused variable: `index_buffer`
+   --> src/lib.rs:202:10
+    |
+202 |     let (index_buffer, index_memory) = match graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_index_buffer`
+
+warning: unused variable: `skybox_vertex_buffer`
+   --> src/lib.rs:244:10
+    |
+244 |     let (skybox_vertex_buffer, skybox_vertex_memory) = graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_vertex_buffer`
+
+warning: unused variable: `skybox_index_buffer`
+   --> src/lib.rs:256:10
+    |
+256 |     let (skybox_index_buffer, skybox_index_memory) = graphics_context.create_buffer(
+    |          ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skybox_index_buffer`
+
+warning: unused variable: `proj_layer`
+   --> src/lib.rs:955:77
+    |
+955 |                         let mut space_warp_layer_info = if let Some(ref mut proj_layer) = projection_layer_storage {
+    |                                                                             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_proj_layer`
+
+warning: unused variable: `proj_layer`
+    --> src/lib.rs:1004:68
+     |
+1004 |                         let projection_layer_sys = if let Some(ref proj_layer) = projection_layer_storage {
+     |                                                                    ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_proj_layer`
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:484:42
+    |
+484 |                     let (vbo, vbo_mem) = unsafe {
+    |                                          ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` on by default
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:507:42
+    |
+507 |                     let (ibo, ibo_mem) = unsafe {
+    |                                          ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:694:41
+    |
+657 | ...                   unsafe {
+    |                       ------ because it's nested under this `unsafe` block
+...
+694 | ...                           unsafe {
+    |                               ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:732:41
+    |
+657 | ...                   unsafe {
+    |                       ------ because it's nested under this `unsafe` block
+...
+732 | ...                           unsafe {
+    |                               ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/lib.rs:868:41
+    |
+657 | ...                   unsafe {
+    |                       ------ because it's nested under this `unsafe` block
+...
+868 | ...                           unsafe {
+    |                               ^^^^^^ unnecessary `unsafe` block
+
+warning: variable does not need to be mutable
+   --> src/lib.rs:296:9
+    |
+296 |     let mut game_quit = false; // TODO: Handle quit signal properly across threads
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+error[E0596]: cannot borrow `projection_layer_storage.0` as mutable, as `projection_layer_storage` is not declared as mutable
+   --> src/lib.rs:955:69
+    |
+955 |                         let mut space_warp_layer_info = if let Some(ref mut proj_layer) = projection_layer_storage {
+    |                                                                     ^^^^^^^^^^^^^^^^^^ cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+616 |                     let mut projection_layer_storage: Option<oxr::CompositionLayerProjection<oxr::Vulkan>>;
+    |                         +++
+
+For more information about this error, try `rustc --explain E0596`.
+warning: `stfsc_engine` (lib) generated 28 warnings
+error: could not compile `stfsc_engine` (lib) due to 1 previous error; 28 warnings emitted

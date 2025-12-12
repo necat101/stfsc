@@ -1,0 +1,237 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+error[E0425]: cannot find value `i` in this scope
+    --> src/lib.rs:1066:61
+     |
+1066 | ...                   image_array_index: i as u32,
+     |                                          ^ help: a local variable with a similar name exists: `v`
+
+warning: unused import: `debug`
+ --> src/lib.rs:3:24
+  |
+3 | use log::{info, error, debug};
+  |                        ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::ptr`
+ --> src/graphics/mod.rs:7:5
+  |
+7 | use std::ptr;
+  |     ^^^^^^^^
+
+warning: unused import: `tokio::runtime::Runtime`
+ --> src/world/mod.rs:2:5
+  |
+2 | use tokio::runtime::Runtime;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `image::io::Reader as ImageReader`
+  --> src/lib.rs:28:5
+   |
+28 | use image::io::Reader as ImageReader;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CompositionLayerProjectionView`, `CompositionLayerProjection`, `EnvironmentBlendMode`, `Extent2Di`, `Offset2Di`, `Posef`, `Rect2Di`, `ReferenceSpaceType`, and `SwapchainSubImage`
+  --> src/lib.rs:34:5
+   |
+34 |     ReferenceSpaceType, Posef, CompositionLayerProjectionView,
+   |     ^^^^^^^^^^^^^^^^^^  ^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+35 |     SwapchainSubImage, Rect2Di, Offset2Di, Extent2Di,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^  ^^^^^^^^^  ^^^^^^^^^
+36 |     CompositionLayerProjection, EnvironmentBlendMode, Duration
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+error[E0615]: attempted to take value of method `pose` on type `&openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1036:50
+     |
+1036 | ...                   x: v.pose.orientation.x,
+     |                            ^^^^ method, not a field
+     |
+help: use parentheses to call the method
+     |
+1036 |                                             x: v.pose(_).orientation.x,
+     |                                                      +++
+
+error[E0615]: attempted to take value of method `pose` on type `&openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1037:50
+     |
+1037 | ...                   y: v.pose.orientation.y,
+     |                            ^^^^ method, not a field
+     |
+help: use parentheses to call the method
+     |
+1037 |                                             y: v.pose(_).orientation.y,
+     |                                                      +++
+
+error[E0615]: attempted to take value of method `pose` on type `&openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1038:50
+     |
+1038 | ...                   z: v.pose.orientation.z,
+     |                            ^^^^ method, not a field
+     |
+help: use parentheses to call the method
+     |
+1038 |                                             z: v.pose(_).orientation.z,
+     |                                                      +++
+
+error[E0615]: attempted to take value of method `pose` on type `&openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1039:50
+     |
+1039 | ...                   w: v.pose.orientation.w,
+     |                            ^^^^ method, not a field
+     |
+help: use parentheses to call the method
+     |
+1039 |                                             w: v.pose(_).orientation.w,
+     |                                                      +++
+
+error[E0615]: attempted to take value of method `pose` on type `&openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1042:50
+     |
+1042 | ...                   x: v.pose.position.x,
+     |                            ^^^^ method, not a field
+     |
+help: use parentheses to call the method
+     |
+1042 |                                             x: v.pose(_).position.x,
+     |                                                      +++
+
+error[E0615]: attempted to take value of method `pose` on type `&openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1043:50
+     |
+1043 | ...                   y: v.pose.position.y,
+     |                            ^^^^ method, not a field
+     |
+help: use parentheses to call the method
+     |
+1043 |                                             y: v.pose(_).position.y,
+     |                                                      +++
+
+error[E0615]: attempted to take value of method `pose` on type `&openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1044:50
+     |
+1044 | ...                   z: v.pose.position.z,
+     |                            ^^^^ method, not a field
+     |
+help: use parentheses to call the method
+     |
+1044 |                                             z: v.pose(_).position.z,
+     |                                                      +++
+
+error[E0615]: attempted to take value of method `fov` on type `&openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1048:55
+     |
+1048 | ...                   angle_left: v.fov.angle_left,
+     |                                     ^^^ method, not a field
+     |
+help: use parentheses to call the method
+     |
+1048 |                                         angle_left: v.fov(_).angle_left,
+     |                                                          +++
+
+error[E0615]: attempted to take value of method `fov` on type `&openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1049:56
+     |
+1049 | ...                   angle_right: v.fov.angle_right,
+     |                                      ^^^ method, not a field
+     |
+help: use parentheses to call the method
+     |
+1049 |                                         angle_right: v.fov(_).angle_right,
+     |                                                           +++
+
+error[E0615]: attempted to take value of method `fov` on type `&openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1050:53
+     |
+1050 | ...                   angle_up: v.fov.angle_up,
+     |                                   ^^^ method, not a field
+     |
+help: use parentheses to call the method
+     |
+1050 |                                         angle_up: v.fov(_).angle_up,
+     |                                                        +++
+
+error[E0615]: attempted to take value of method `fov` on type `&openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1051:55
+     |
+1051 | ...                   angle_down: v.fov.angle_down,
+     |                                     ^^^ method, not a field
+     |
+help: use parentheses to call the method
+     |
+1051 |                                         angle_down: v.fov(_).angle_down,
+     |                                                          +++
+
+warning: unused variable: `binding_descriptions`
+    --> src/graphics/mod.rs:1169:13
+     |
+1169 |         let binding_descriptions = [vk::VertexInputBindingDescription::builder()
+     |             ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_binding_descriptions`
+     |
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `attribute_descriptions`
+    --> src/graphics/mod.rs:1175:13
+     |
+1175 |         let attribute_descriptions = [
+     |             ^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attribute_descriptions`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:127:38
+    |
+127 |                 SceneUpdate::Spawn { id, position, rotation, color } => {
+    |                                      ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:161:42
+    |
+161 |                 SceneUpdate::SpawnMesh { id, mesh, position, rotation } => {
+    |                                          ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:171:37
+    |
+171 |                 SceneUpdate::Move { id, position } => {
+    |                                     ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `position`
+   --> src/world/mod.rs:171:41
+    |
+171 |                 SceneUpdate::Move { id, position } => {
+    |                                         ^^^^^^^^ help: try ignoring the field: `position: _`
+
+warning: unused variable: `p`
+   --> src/world/mod.rs:201:10
+    |
+201 |         |p| tobj::load_mtl_buf(&mut std::io::Cursor::new(Vec::new())) // Ignore materials for now
+    |          ^ help: if this is intentional, prefix it with an underscore: `_p`
+
+warning: value assigned to `swapchain_image_views` is never read
+   --> src/xr/mod.rs:222:17
+    |
+222 |         let mut swapchain_image_views = Vec::new();
+    |                 ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` on by default
+
+warning: value assigned to `depth_swapchain_image_views` is never read
+   --> src/xr/mod.rs:223:17
+    |
+223 |         let mut depth_swapchain_image_views = Vec::new();
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `motion_swapchain_image_views` is never read
+   --> src/xr/mod.rs:224:17
+    |
+224 |         let mut motion_swapchain_image_views = Vec::new();
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+Some errors have detailed explanations: E0425, E0615.
+For more information about an error, try `rustc --explain E0425`.
+warning: `stfsc_engine` (lib) generated 15 warnings
+error: could not compile `stfsc_engine` (lib) due to 12 previous errors; 15 warnings emitted

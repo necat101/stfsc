@@ -183,6 +183,9 @@ impl MyApp {
                             albedo: None,
                             normal: None,
                             metallic_roughness: None,
+                            decoded_albedo: None,
+                            decoded_normal: None,
+                            decoded_mr: None,
                         };
                         self.loaded_mesh = Some((
                             model.name,

@@ -774,6 +774,105 @@ impl GraphicsContext {
         Ok((albedo, normal, mr))
     }
 
+    pub fn create_texture_from_raw(&self, width: u32, height: u32, data: &[u8]) -> Result<Texture> {
+        let size = (width * height * 4) as u64;
+        
+        // Staging Buffer
+        let (staging_buffer, staging_memory) = self.create_buffer(
+            size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        
+        unsafe {
+            let ptr = self.device.map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty())?;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, size as usize);
+            self.device.unmap_memory(staging_memory);
+        }
+        
+        // Create Image
+        let image_info = vk::ImageCreateInfo::builder()
+            .image_type(vk::ImageType::TYPE_2D)
+            .extent(vk::Extent3D { width, height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .format(vk::Format::R8G8B8A8_UNORM)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let image = unsafe { self.device.create_image(&image_info, None)? };
+        
+        let mem_reqs = unsafe { self.device.get_image_memory_requirements(image) };
+        let memory_type_index = self.find_memory_type(mem_reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+        
+        let alloc_info = vk::MemoryAllocateInfo::builder()
+            .allocation_size(mem_reqs.size)
+            .memory_type_index(memory_type_index);
+            
+        let image_memory = unsafe { self.device.allocate_memory(&alloc_info, None)? };
+        
+        unsafe { self.device.bind_image_memory(image, image_memory, 0)? };
+
+        // Transition layout to Transfer Dst
+        self.transition_image_layout(image, vk::Format::R8G8B8A8_UNORM, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL)?;
+        
+        // Copy buffer to image
+        self.copy_buffer_to_image(staging_buffer, image, width, height)?;
+        
+        // Transition layout to Shader Read Only
+        self.transition_image_layout(image, vk::Format::R8G8B8A8_UNORM, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
+
+        // Cleanup Staging
+        unsafe {
+            self.device.destroy_buffer(staging_buffer, None);
+            self.device.free_memory(staging_memory, None);
+        }
+
+        // Create Image View
+        let view_info = vk::ImageViewCreateInfo::builder()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_UNORM)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+            
+        let image_view = unsafe { self.device.create_image_view(&view_info, None)? };
+
+        // Create Sampler
+        let sampler_info = vk::SamplerCreateInfo::builder()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .anisotropy_enable(true) // Enable Anisotropy for better quality
+            .max_anisotropy(16.0)
+            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+            .unnormalized_coordinates(false)
+            .compare_enable(false)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .mip_lod_bias(0.0)
+            .min_lod(0.0)
+            .max_lod(0.0); // We only have 1 mip level for now
+
+        let sampler = unsafe { self.device.create_sampler(&sampler_info, None)? };
+
+        Ok(Texture {
+            image,
+            image_memory,
+            image_view,
+            sampler,
+        })
+    }
+
     pub fn create_texture_from_image(&self, img: &image::RgbaImage) -> Result<Texture> {
         let (width, height) = img.dimensions();
         let size = (width * height * 4) as u64;

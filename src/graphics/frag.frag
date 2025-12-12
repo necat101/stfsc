@@ -148,5 +148,5 @@ void main() {
     
     // Note: Some engines subtract Jitter. We don't have TAA jitter here.
     
-    outMotionVector = vec4(motion, 0.0, 1.0); // xy = motion, zw = unused
+    outMotionVector = vec4(motion, 0.0, 1.0); // xy = motion, zw = unused (alpha 1.0 just in case)
 }

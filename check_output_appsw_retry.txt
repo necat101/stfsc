@@ -1,0 +1,352 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+warning: unused import: `debug`
+ --> src/lib.rs:3:24
+  |
+3 | use log::{info, error, debug};
+  |                        ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::ptr`
+ --> src/graphics/mod.rs:7:5
+  |
+7 | use std::ptr;
+  |     ^^^^^^^^
+
+warning: unused import: `tokio::runtime::Runtime`
+ --> src/world/mod.rs:2:5
+  |
+2 | use tokio::runtime::Runtime;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `image::io::Reader as ImageReader`
+  --> src/lib.rs:28:5
+   |
+28 | use image::io::Reader as ImageReader;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CompositionLayerProjectionView`, `CompositionLayerProjection`, `EnvironmentBlendMode`, `Extent2Di`, `Offset2Di`, `Posef`, `Rect2Di`, `ReferenceSpaceType`, and `SwapchainSubImage`
+  --> src/lib.rs:34:5
+   |
+34 |     ReferenceSpaceType, Posef, CompositionLayerProjectionView,
+   |     ^^^^^^^^^^^^^^^^^^  ^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+35 |     SwapchainSubImage, Rect2Di, Offset2Di, Extent2Di,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^  ^^^^^^^^^  ^^^^^^^^^
+36 |     CompositionLayerProjection, EnvironmentBlendMode, Duration
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+    --> src/lib.rs:1038:50
+     |
+1038 | ...                   x: v.pose().orientation.x,
+     |                            ^^^^-- argument #1 of type `Posef` is missing
+     |
+note: method defined here
+    --> /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/openxr-0.18.0/src/generated.rs:5816:16
+     |
+5816 |         pub fn pose(mut self, value: Posef) -> Self {
+     |                ^^^^
+help: provide the argument
+     |
+1038 |                                             x: v.pose(/* Posef */).orientation.x,
+     |                                                      ~~~~~~~~~~~~~
+
+error[E0609]: no field `orientation` on type `openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1038:57
+     |
+1038 | ...                   x: v.pose().orientation.x,
+     |                                   ^^^^^^^^^^^ unknown field
+
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+    --> src/lib.rs:1039:50
+     |
+1039 | ...                   y: v.pose().orientation.y,
+     |                            ^^^^-- argument #1 of type `Posef` is missing
+     |
+note: method defined here
+    --> /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/openxr-0.18.0/src/generated.rs:5816:16
+     |
+5816 |         pub fn pose(mut self, value: Posef) -> Self {
+     |                ^^^^
+help: provide the argument
+     |
+1039 |                                             y: v.pose(/* Posef */).orientation.y,
+     |                                                      ~~~~~~~~~~~~~
+
+error[E0609]: no field `orientation` on type `openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1039:57
+     |
+1039 | ...                   y: v.pose().orientation.y,
+     |                                   ^^^^^^^^^^^ unknown field
+
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+    --> src/lib.rs:1040:50
+     |
+1040 | ...                   z: v.pose().orientation.z,
+     |                            ^^^^-- argument #1 of type `Posef` is missing
+     |
+note: method defined here
+    --> /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/openxr-0.18.0/src/generated.rs:5816:16
+     |
+5816 |         pub fn pose(mut self, value: Posef) -> Self {
+     |                ^^^^
+help: provide the argument
+     |
+1040 |                                             z: v.pose(/* Posef */).orientation.z,
+     |                                                      ~~~~~~~~~~~~~
+
+error[E0609]: no field `orientation` on type `openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1040:57
+     |
+1040 | ...                   z: v.pose().orientation.z,
+     |                                   ^^^^^^^^^^^ unknown field
+
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+    --> src/lib.rs:1041:50
+     |
+1041 | ...                   w: v.pose().orientation.w,
+     |                            ^^^^-- argument #1 of type `Posef` is missing
+     |
+note: method defined here
+    --> /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/openxr-0.18.0/src/generated.rs:5816:16
+     |
+5816 |         pub fn pose(mut self, value: Posef) -> Self {
+     |                ^^^^
+help: provide the argument
+     |
+1041 |                                             w: v.pose(/* Posef */).orientation.w,
+     |                                                      ~~~~~~~~~~~~~
+
+error[E0609]: no field `orientation` on type `openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1041:57
+     |
+1041 | ...                   w: v.pose().orientation.w,
+     |                                   ^^^^^^^^^^^ unknown field
+
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+    --> src/lib.rs:1044:50
+     |
+1044 | ...                   x: v.pose().position.x,
+     |                            ^^^^-- argument #1 of type `Posef` is missing
+     |
+note: method defined here
+    --> /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/openxr-0.18.0/src/generated.rs:5816:16
+     |
+5816 |         pub fn pose(mut self, value: Posef) -> Self {
+     |                ^^^^
+help: provide the argument
+     |
+1044 |                                             x: v.pose(/* Posef */).position.x,
+     |                                                      ~~~~~~~~~~~~~
+
+error[E0609]: no field `position` on type `openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1044:57
+     |
+1044 | ...                   x: v.pose().position.x,
+     |                                   ^^^^^^^^ unknown field
+
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+    --> src/lib.rs:1045:50
+     |
+1045 | ...                   y: v.pose().position.y,
+     |                            ^^^^-- argument #1 of type `Posef` is missing
+     |
+note: method defined here
+    --> /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/openxr-0.18.0/src/generated.rs:5816:16
+     |
+5816 |         pub fn pose(mut self, value: Posef) -> Self {
+     |                ^^^^
+help: provide the argument
+     |
+1045 |                                             y: v.pose(/* Posef */).position.y,
+     |                                                      ~~~~~~~~~~~~~
+
+error[E0609]: no field `position` on type `openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1045:57
+     |
+1045 | ...                   y: v.pose().position.y,
+     |                                   ^^^^^^^^ unknown field
+
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+    --> src/lib.rs:1046:50
+     |
+1046 | ...                   z: v.pose().position.z,
+     |                            ^^^^-- argument #1 of type `Posef` is missing
+     |
+note: method defined here
+    --> /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/openxr-0.18.0/src/generated.rs:5816:16
+     |
+5816 |         pub fn pose(mut self, value: Posef) -> Self {
+     |                ^^^^
+help: provide the argument
+     |
+1046 |                                             z: v.pose(/* Posef */).position.z,
+     |                                                      ~~~~~~~~~~~~~
+
+error[E0609]: no field `position` on type `openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1046:57
+     |
+1046 | ...                   z: v.pose().position.z,
+     |                                   ^^^^^^^^ unknown field
+
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+    --> src/lib.rs:1050:55
+     |
+1050 | ...                   angle_left: v.fov().angle_left,
+     |                                     ^^^-- argument #1 of type `Fovf` is missing
+     |
+note: method defined here
+    --> /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/openxr-0.18.0/src/generated.rs:5821:16
+     |
+5821 |         pub fn fov(mut self, value: Fovf) -> Self {
+     |                ^^^
+help: provide the argument
+     |
+1050 |                                         angle_left: v.fov(/* Fovf */).angle_left,
+     |                                                          ~~~~~~~~~~~~
+
+error[E0609]: no field `angle_left` on type `openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1050:61
+     |
+1050 | ...                   angle_left: v.fov().angle_left,
+     |                                           ^^^^^^^^^^ unknown field
+
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+    --> src/lib.rs:1051:56
+     |
+1051 | ...                   angle_right: v.fov().angle_right,
+     |                                      ^^^-- argument #1 of type `Fovf` is missing
+     |
+note: method defined here
+    --> /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/openxr-0.18.0/src/generated.rs:5821:16
+     |
+5821 |         pub fn fov(mut self, value: Fovf) -> Self {
+     |                ^^^
+help: provide the argument
+     |
+1051 |                                         angle_right: v.fov(/* Fovf */).angle_right,
+     |                                                           ~~~~~~~~~~~~
+
+error[E0609]: no field `angle_right` on type `openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1051:62
+     |
+1051 | ...                   angle_right: v.fov().angle_right,
+     |                                            ^^^^^^^^^^^ unknown field
+
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+    --> src/lib.rs:1052:53
+     |
+1052 | ...                   angle_up: v.fov().angle_up,
+     |                                   ^^^-- argument #1 of type `Fovf` is missing
+     |
+note: method defined here
+    --> /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/openxr-0.18.0/src/generated.rs:5821:16
+     |
+5821 |         pub fn fov(mut self, value: Fovf) -> Self {
+     |                ^^^
+help: provide the argument
+     |
+1052 |                                         angle_up: v.fov(/* Fovf */).angle_up,
+     |                                                        ~~~~~~~~~~~~
+
+error[E0609]: no field `angle_up` on type `openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1052:59
+     |
+1052 | ...                   angle_up: v.fov().angle_up,
+     |                                         ^^^^^^^^ unknown field
+
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+    --> src/lib.rs:1053:55
+     |
+1053 | ...                   angle_down: v.fov().angle_down,
+     |                                     ^^^-- argument #1 of type `Fovf` is missing
+     |
+note: method defined here
+    --> /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/openxr-0.18.0/src/generated.rs:5821:16
+     |
+5821 |         pub fn fov(mut self, value: Fovf) -> Self {
+     |                ^^^
+help: provide the argument
+     |
+1053 |                                         angle_down: v.fov(/* Fovf */).angle_down,
+     |                                                          ~~~~~~~~~~~~
+
+error[E0609]: no field `angle_down` on type `openxr::CompositionLayerProjectionView<'_, Vulkan>`
+    --> src/lib.rs:1053:61
+     |
+1053 | ...                   angle_down: v.fov().angle_down,
+     |                                           ^^^^^^^^^^ unknown field
+
+warning: unused variable: `binding_descriptions`
+    --> src/graphics/mod.rs:1169:13
+     |
+1169 |         let binding_descriptions = [vk::VertexInputBindingDescription::builder()
+     |             ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_binding_descriptions`
+     |
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `attribute_descriptions`
+    --> src/graphics/mod.rs:1175:13
+     |
+1175 |         let attribute_descriptions = [
+     |             ^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attribute_descriptions`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:127:38
+    |
+127 |                 SceneUpdate::Spawn { id, position, rotation, color } => {
+    |                                      ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:161:42
+    |
+161 |                 SceneUpdate::SpawnMesh { id, mesh, position, rotation } => {
+    |                                          ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `id`
+   --> src/world/mod.rs:171:37
+    |
+171 |                 SceneUpdate::Move { id, position } => {
+    |                                     ^^ help: try ignoring the field: `id: _`
+
+warning: unused variable: `position`
+   --> src/world/mod.rs:171:41
+    |
+171 |                 SceneUpdate::Move { id, position } => {
+    |                                         ^^^^^^^^ help: try ignoring the field: `position: _`
+
+warning: unused variable: `p`
+   --> src/world/mod.rs:201:10
+    |
+201 |         |p| tobj::load_mtl_buf(&mut std::io::Cursor::new(Vec::new())) // Ignore materials for now
+    |          ^ help: if this is intentional, prefix it with an underscore: `_p`
+
+warning: value assigned to `swapchain_image_views` is never read
+   --> src/xr/mod.rs:222:17
+    |
+222 |         let mut swapchain_image_views = Vec::new();
+    |                 ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` on by default
+
+warning: value assigned to `depth_swapchain_image_views` is never read
+   --> src/xr/mod.rs:223:17
+    |
+223 |         let mut depth_swapchain_image_views = Vec::new();
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `motion_swapchain_image_views` is never read
+   --> src/xr/mod.rs:224:17
+    |
+224 |         let mut motion_swapchain_image_views = Vec::new();
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+Some errors have detailed explanations: E0061, E0609.
+For more information about an error, try `rustc --explain E0061`.
+warning: `stfsc_engine` (lib) generated 15 warnings
+error: could not compile `stfsc_engine` (lib) due to 22 previous errors; 15 warnings emitted

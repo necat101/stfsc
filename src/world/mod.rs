@@ -1,8 +1,8 @@
 use hecs::World;
-use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use log::info;
 use glam;
+use std::sync::Arc;
 
 pub struct GameWorld {
     pub ecs: World,
@@ -33,6 +33,14 @@ pub struct Mesh {
     pub albedo: Option<Vec<u8>>, // Raw image bytes (png/jpg)
     pub normal: Option<Vec<u8>>,
     pub metallic_roughness: Option<Vec<u8>>,
+    
+    // Runtime-only decoded data (not serialized)
+    #[serde(skip)]
+    pub decoded_albedo: Option<Arc<DecodedImage>>,
+    #[serde(skip)]
+    pub decoded_normal: Option<Arc<DecodedImage>>,
+    #[serde(skip)]
+    pub decoded_mr: Option<Arc<DecodedImage>>,
 }
 
 #[repr(C)]
@@ -43,6 +51,13 @@ pub struct Vertex {
     pub uv: [f32; 2],
     pub color: [f32; 3],
     pub tangent: [f32; 4], // xyz + w (handedness)
+}
+
+#[derive(Clone, Debug)]
+pub struct DecodedImage {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -107,6 +122,9 @@ impl GameWorld {
                     albedo: None,
                     normal: None,
                     metallic_roughness: None,
+                    decoded_albedo: None,
+                    decoded_normal: None,
+                    decoded_mr: None,
                 },
             ));
         }
@@ -124,7 +142,7 @@ impl GameWorld {
         while let Ok(cmd) = self.command_receiver.try_recv() {
             info!("Processing command: {:?}", cmd);
             match cmd {
-                SceneUpdate::Spawn { id, position, rotation, color } => {
+                SceneUpdate::Spawn { id: _, position, rotation, color } => {
                     let tangent = [1.0, 0.0, 0.0, 1.0];
                     self.ecs.spawn((
                         Transform {
@@ -154,11 +172,14 @@ impl GameWorld {
                             albedo: None,
                             normal: None,
                             metallic_roughness: None,
+                            decoded_albedo: None,
+                            decoded_normal: None,
+                            decoded_mr: None,
                         },
                     ));
                     // info!("Spawn command received (ECS spawn disabled)");
                 }
-                SceneUpdate::SpawnMesh { id, mesh, position, rotation } => {
+                SceneUpdate::SpawnMesh { id: _, mesh, position, rotation } => {
                      self.ecs.spawn((
                         Transform {
                             position: glam::Vec3::from(position),
@@ -168,7 +189,7 @@ impl GameWorld {
                         mesh,
                     ));
                 }
-                SceneUpdate::Move { id, position } => {
+                SceneUpdate::Move { id: _, position: _ } => {
                     // TODO: Find entity by ID and update transform
                 }
             }
@@ -253,5 +274,8 @@ pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
         albedo: None,
         normal: None,
         metallic_roughness: None,
+        decoded_albedo: None,
+        decoded_normal: None,
+        decoded_mr: None,
     })
 }

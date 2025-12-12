@@ -22,6 +22,7 @@ use xr::XrContext;
 #[cfg(target_os = "android")]
 use physics::PhysicsWorld;
 use world::GameWorld;
+use world::DecodedImage; // Import DecodedImage
 #[cfg(target_os = "android")]
 use graphics::Texture;
 #[cfg(target_os = "android")]
@@ -48,6 +49,16 @@ pub struct GpuMesh {
     pub custom_textures: Vec<Texture>,
 }
 
+
+#[derive(Debug)]
+pub enum AndroidEvent {
+    Resume,
+    Pause,
+    Destroy,
+    InitWindow,
+    WindowResized,
+}
+
 #[cfg(target_os = "android")]
 #[no_mangle]
 fn android_main(app: AndroidApp) {
@@ -60,7 +71,76 @@ fn android_main(app: AndroidApp) {
         error!("PANIC: {:?}", panic_info);
     }));
 
-    info!("STFSC Engine Starting...");
+    info!("STFSC Engine Starting (Main Thread)...");
+
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<AndroidEvent>();
+    let render_app = app.clone();
+
+    // Spawn Render Thread
+    std::thread::spawn(move || {
+        render_loop(render_app, event_rx);
+    });
+
+    // Main Event Loop (Android Lifecycle)
+    let mut running = true;
+    loop {
+        if !running { break; }
+        app.poll_events(None, |event| {
+            match event {
+                PollEvent::Main(MainEvent::Destroy) => {
+                    info!("MainEvent::Destroy received on Main Thread");
+                    let _ = event_tx.send(AndroidEvent::Destroy);
+                    running = false;
+                }
+                PollEvent::Main(MainEvent::InitWindow { .. }) => {
+                     let _ = event_tx.send(AndroidEvent::InitWindow);
+                }
+                PollEvent::Main(MainEvent::Resume { .. }) => {
+                     let _ = event_tx.send(AndroidEvent::Resume);
+                }
+                PollEvent::Main(MainEvent::Pause { .. }) => {
+                     let _ = event_tx.send(AndroidEvent::Pause);
+                }
+                PollEvent::Main(MainEvent::WindowResized { .. }) => {
+                     let _ = event_tx.send(AndroidEvent::WindowResized);
+                }
+                _ => {}
+            }
+        });
+    }
+}
+
+#[cfg(target_os = "android")]
+fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent>) {
+    info!("Render Thread Started");
+
+    // Wait for InitWindow before initializing Graphics/XR
+    info!("Waiting for InitWindow...");
+    // State flags that might change before InitWindow
+    let mut activity_resumed = false;
+    let mut window_ready = false;
+
+    while !window_ready {
+        match event_rx.recv() {
+            Ok(AndroidEvent::InitWindow) => {
+                 info!("InitWindow received, initializing engine...");
+                 window_ready = true;
+            }
+            Ok(AndroidEvent::Resume) => {
+                 info!("Resume received (during wait)");
+                 activity_resumed = true;
+            }
+            Ok(AndroidEvent::Pause) => {
+                 info!("Pause received (during wait)");
+                 activity_resumed = false;
+            }
+            Ok(AndroidEvent::Destroy) => {
+                 info!("Destroy received before InitWindow, existing.");
+                 return;
+            }
+             _ => {} // Ignore others
+        }
+    }
 
     let mut quit = false;
     
@@ -173,6 +253,9 @@ fn android_main(app: AndroidApp) {
                 albedo: None,
                 normal: None,
                 metallic_roughness: None,
+                decoded_albedo: None,
+                decoded_normal: None,
+                decoded_mr: None,
             }
         })
     };
@@ -353,8 +436,43 @@ fn android_main(app: AndroidApp) {
                                 break;
                             }
                             
-                            if let Ok(update) = bincode::deserialize::<world::SceneUpdate>(&data) {
-                                info!("Received update: {:?}", update);
+                            if let Ok(mut update) = bincode::deserialize::<world::SceneUpdate>(&data) {
+                                info!("Received update (pre-decode): {:?}", update);
+                                
+                                // Offload texture decoding to blocking thread
+                                let update = tokio::task::spawn_blocking(move || {
+                                    if let world::SceneUpdate::SpawnMesh { mesh, .. } = &mut update {
+                                        // Helper closure for decoding
+                                        let decode = |data: &Option<Vec<u8>>| -> Option<Arc<DecodedImage>> {
+                                            if let Some(bytes) = data {
+                                                if let Ok(img) = image::load_from_memory(bytes) {
+                                                    let rgba = img.to_rgba8();
+                                                    let (width, height) = rgba.dimensions();
+                                                    return Some(Arc::new(DecodedImage {
+                                                        width,
+                                                        height,
+                                                        data: rgba.into_raw(),
+                                                    }));
+                                                }
+                                            }
+                                            None
+                                        };
+
+                                        mesh.decoded_albedo = decode(&mesh.albedo);
+                                        mesh.decoded_normal = decode(&mesh.normal);
+                                        mesh.decoded_mr = decode(&mesh.metallic_roughness);
+                                        
+                                        if mesh.decoded_albedo.is_some() {
+                                            info!("Decoded albedo texture in background");
+                                        }
+                                    }
+                                    update
+                                }).await.unwrap_or_else(|e| {
+                                    error!("Join error in spawn_blocking: {:?}", e);
+                                    // wrapper to avoid panic, though unwrap is mostly safe here if we don't panic inside
+                                    world::SceneUpdate::Spawn { id: 0, position: [0.0; 3], rotation: [0.0; 4], color: [1.0, 0.0, 1.0] } // Error sentinel
+                                });
+
                                 let _ = tx.send(update).await;
                             } else {
                                 error!("Failed to deserialize update");
@@ -369,8 +487,8 @@ fn android_main(app: AndroidApp) {
     info!("Engine Initialized Successfully");
 
     let mut session_running = false;
-    let mut activity_resumed = false;
-    
+    // activity_resumed is already defined above
+
     // State for AppSW (Motion Vectors)
     // Store previous frame's View Projection Matrix per eye
     let mut prev_view_projs = [glam::Mat4::IDENTITY; 2];
@@ -382,42 +500,31 @@ fn android_main(app: AndroidApp) {
             std::time::Duration::from_millis(100)
         };
 
-        app.poll_events(Some(timeout), |event| {
+        // Process Android Events from Main Thread
+        while let Ok(event) = event_rx.try_recv() {
             match event {
-                PollEvent::Main(MainEvent::Destroy) => {
-                    info!("MainEvent::Destroy received, quitting...");
+                AndroidEvent::Destroy => {
+                    info!("AndroidEvent::Destroy received in Render Thread, quitting...");
                     quit = true;
                 }
-                PollEvent::Main(MainEvent::InitWindow { .. }) => {
-                    info!("Window Initialized");
+                AndroidEvent::InitWindow => {
+                    info!("Window Initialized (Render Thread)");
                 }
-                PollEvent::Main(MainEvent::Resume { .. }) => {
-                    info!("MainEvent::Resume received");
+                AndroidEvent::Resume => {
+                    info!("AndroidEvent::Resume received");
                     activity_resumed = true;
                     info!("Activity state: resumed");
                 }
-                PollEvent::Main(MainEvent::Pause { .. }) => {
-                    info!("MainEvent::Pause received");
-                    activity_resumed = false;
-                    info!("Activity state: paused");
+                AndroidEvent::Pause => {
+                     info!("AndroidEvent::Pause received");
+                     activity_resumed = false;
+                     info!("Activity state: paused");
                 }
-                PollEvent::Main(MainEvent::ConfigChanged { .. }) => {
-                    info!("MainEvent::ConfigChanged received");
-                }
-                PollEvent::Main(MainEvent::WindowResized { .. }) => {
-                    info!("MainEvent::WindowResized received");
-                }
-                PollEvent::Main(MainEvent::RedrawNeeded { .. }) => {
-                    // info!("MainEvent::RedrawNeeded received");
-                }
-                PollEvent::Main(MainEvent::InputAvailable { .. }) => {
-                    info!("MainEvent::InputAvailable received");
-                }
-                _ => {
-                    // info!("Other event: {:?}", event);
+                AndroidEvent::WindowResized => {
+                    info!("AndroidEvent::WindowResized received");
                 }
             }
-        });
+        }
         
         // Heartbeat log
         static mut FRAME_COUNT: u64 = 0;
@@ -426,6 +533,12 @@ fn android_main(app: AndroidApp) {
             if FRAME_COUNT % 60 == 0 {
                 info!("Heartbeat: Frame {}", FRAME_COUNT);
             }
+        }
+
+        // If not running or not resumed, throttle the loop
+        if !session_running || !activity_resumed {
+             info!("Frame loop paused - session_running: {}, activity_resumed: {}", session_running, activity_resumed);
+             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
         let mut event_storage = EventDataBuffer::new();
@@ -537,21 +650,35 @@ fn android_main(app: AndroidApp) {
                         let mut tex_normal_opt = None;
                         let mut tex_mr_opt = None;
                         
-                        if let Some(data) = &mesh.albedo {
+                        if let Some(decoded) = &mesh.decoded_albedo {
+                             if let Ok(tex) = graphics_context.create_texture_from_raw(decoded.width, decoded.height, &decoded.data) {
+                                 tex_albedo_opt = Some(tex);
+                             }
+                        } else if let Some(data) = &mesh.albedo {
                              if let Ok(img) = image::load_from_memory(data) {
                                 if let Ok(tex) = graphics_context.create_texture_from_image(&img.to_rgba8()) {
                                     tex_albedo_opt = Some(tex);
                                 }
                              }
                         }
-                         if let Some(data) = &mesh.normal {
+                        
+                        if let Some(decoded) = &mesh.decoded_normal {
+                             if let Ok(tex) = graphics_context.create_texture_from_raw(decoded.width, decoded.height, &decoded.data) {
+                                 tex_normal_opt = Some(tex);
+                             }
+                        } else if let Some(data) = &mesh.normal {
                              if let Ok(img) = image::load_from_memory(data) {
                                 if let Ok(tex) = graphics_context.create_texture_from_image(&img.to_rgba8()) {
                                     tex_normal_opt = Some(tex);
                                 }
                              }
                         }
-                         if let Some(data) = &mesh.metallic_roughness {
+                        
+                        if let Some(decoded) = &mesh.decoded_mr {
+                             if let Ok(tex) = graphics_context.create_texture_from_raw(decoded.width, decoded.height, &decoded.data) {
+                                 tex_mr_opt = Some(tex);
+                             }
+                        } else if let Some(data) = &mesh.metallic_roughness {
                              if let Ok(img) = image::load_from_memory(data) {
                                 if let Ok(tex) = graphics_context.create_texture_from_image(&img.to_rgba8()) {
                                     tex_mr_opt = Some(tex);
@@ -902,7 +1029,7 @@ fn android_main(app: AndroidApp) {
                                 info!("swapchain.release_image succeeded");
 
                                 // Views are already located above
-                                projection_views = views.into_iter().enumerate().map(|(i, view)| {
+                                projection_views = views.iter().enumerate().map(|(i, view)| {
                                     // Normalize orientation to avoid ERROR_POSE_INVALID
                                     let q = view.pose.orientation;
                                     let len = (q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w).sqrt();
@@ -951,22 +1078,157 @@ fn android_main(app: AndroidApp) {
                             projection_layer_storage = None;
                         }
 
-                    } else {
-                        projection_layer_storage = None;
-                    }
+                        // AppSW Layer Chaining
+                        let mut space_warp_layer_info = if projection_layer_storage.is_some() {
+                            // Enable AppSW by chaining XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB
+                            let motion_sub_image = oxr::sys::SwapchainSubImage {
+                                swapchain: xr_context.motion_swapchain.as_raw(),
+                                image_rect: oxr::sys::Rect2Di {
+                                    offset: oxr::sys::Offset2Di { x: 0, y: 0 },
+                                    extent: oxr::sys::Extent2Di {
+                                        width: xr_context.resolution.width as i32,
+                                        height: xr_context.resolution.height as i32,
+                                    },
+                                },
+                                image_array_index: 0, 
+                            };
 
-                    // Use the blend mode selected during session creation
-                    let blend_mode = xr_context.blend_mode;
+                            let depth_sub_image = oxr::sys::SwapchainSubImage {
+                                swapchain: xr_context.depth_swapchain.as_raw(),
+                                image_rect: oxr::sys::Rect2Di {
+                                    offset: oxr::sys::Offset2Di { x: 0, y: 0 },
+                                    extent: oxr::sys::Extent2Di {
+                                        width: xr_context.resolution.width as i32,
+                                        height: xr_context.resolution.height as i32,
+                                    },
+                                },
+                                image_array_index: 0,
+                            };
 
-                    info!("Calling frame_stream.end");
-                    if let Err(e) = xr_context.frame_stream.end(
-                        frame_state.predicted_display_time,
-                        blend_mode,
-                        &layers,
-                    ) {
-                        log::error!("frame_stream.end failed: {}", e);
+                            let info = CompositionLayerSpaceWarpInfoFB {
+                                ty: oxr::StructureType::from_raw(1000171000), // XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB
+                                next: std::ptr::null(),
+                                layer_flags: 0,
+                                motion_vector_sub_image: motion_sub_image,
+                                app_space_delta_pose: oxr::sys::Posef {
+                                    orientation: oxr::sys::Quaternionf { x: 0.0, y: 0.0, z: 0.0, w: 1.0 },
+                                    position: oxr::sys::Vector3f { x: 0.0, y: 0.0, z: 0.0 },
+                                },
+                                depth_sub_image: depth_sub_image,
+                                min_depth: 0.0,
+                                max_depth: 1.0,
+                                near_z: 0.01,
+                                far_z: 100.0,
+                            };
+                            Some(info)
+                        } else {
+                            None
+                        };
+                        
+                        let mut layers_ptrs: Vec<*const oxr::sys::CompositionLayerBaseHeader> = Vec::new();
+                        
+                        // Reconstruct CompositionLayerProjection as sys type to chain
+                        let projection_layer_sys = if projection_layer_storage.is_some() {
+                             
+                             // Iterate over ORIGINAL views to get data
+                             let sys_views: Vec<oxr::sys::CompositionLayerProjectionView> = views.iter().enumerate().map(|(i, view)| {
+                                 // Re-normalize (or duplicate logic)
+                                    let q = view.pose.orientation;
+                                    let len = (q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w).sqrt();
+                                    let normalized_pose = if len > 0.0001 {
+                                        oxr::sys::Posef {
+                                            orientation: oxr::sys::Quaternionf {
+                                                x: q.x / len,
+                                                y: q.y / len,
+                                                z: q.z / len,
+                                                w: q.w / len,
+                                            },
+                                            position: oxr::sys::Vector3f {
+                                                x: view.pose.position.x,
+                                                y: view.pose.position.y,
+                                                z: view.pose.position.z,
+                                            },
+                                        }
+                                    } else {
+                                        oxr::sys::Posef {
+                                            orientation: oxr::sys::Quaternionf { x: 0.0, y: 0.0, z: 0.0, w: 1.0 },
+                                            position: oxr::sys::Vector3f {
+                                                x: view.pose.position.x,
+                                                y: view.pose.position.y,
+                                                z: view.pose.position.z,
+                                            },
+                                        }
+                                    };
+
+                                 oxr::sys::CompositionLayerProjectionView {
+                                     ty: oxr::StructureType::COMPOSITION_LAYER_PROJECTION_VIEW,
+                                     next: std::ptr::null(),
+                                     pose: normalized_pose,
+                                     fov: oxr::sys::Fovf {
+                                        angle_left: view.fov.angle_left,
+                                        angle_right: view.fov.angle_right,
+                                        angle_up: view.fov.angle_up,
+                                        angle_down: view.fov.angle_down,
+                                     },
+                                     sub_image: oxr::sys::SwapchainSubImage {
+                                         swapchain: xr_context.swapchain.as_raw(), 
+                                         image_rect: oxr::sys::Rect2Di {
+                                            offset: oxr::sys::Offset2Di { x: 0, y: 0 },
+                                            extent: oxr::sys::Extent2Di {
+                                                width: xr_context.resolution.width as i32,
+                                                height: xr_context.resolution.height as i32,
+                                            },
+                                         },
+                                         image_array_index: i as u32,
+                                     },
+                                 }
+                             }).collect();
+                             
+                             let mut sys_layer = oxr::sys::CompositionLayerProjection {
+                                 ty: oxr::StructureType::COMPOSITION_LAYER_PROJECTION,
+                                 next: std::ptr::null(),
+                                 layer_flags: oxr::sys::CompositionLayerFlags::EMPTY,
+                                 space: xr_context.stage_space.as_raw(),
+                                 view_count: sys_views.len() as u32,
+                                 views: sys_views.as_ptr(),
+                             };
+                             
+                             // Chain it!
+                             if let Some(ref mut info) = space_warp_layer_info {
+                                 sys_layer.next = info as *mut _ as *const _;
+                             }
+                             
+                             Some((sys_layer, sys_views)) // Keep views alive!
+                        } else {
+                            None
+                        };
+
+                        if let Some((ref sys_layer, _)) = projection_layer_sys {
+                            layers_ptrs.push(sys_layer as *const _ as *const oxr::sys::CompositionLayerBaseHeader);
+                        }
+
+                        // Use the blend mode selected during session creation
+                        let blend_mode = xr_context.blend_mode;
+
+                        info!("Calling frame_stream.end (AppSW)");
+                        unsafe {
+                            let frame_end_info = oxr::sys::FrameEndInfo {
+                                ty: oxr::StructureType::FRAME_END_INFO,
+                                next: std::ptr::null(),
+                                display_time: frame_state.predicted_display_time,
+                                environment_blend_mode: blend_mode,
+                                layer_count: layers_ptrs.len() as u32,
+                                layers: layers_ptrs.as_ptr(),
+                            };
+                            
+                            let fp = xr_context.instance.fp();
+                            let res = (fp.end_frame)(xr_context.session.as_raw(), &frame_end_info);
+                            if res.into_raw() < 0 {
+                                error!("frame_stream.end (sys) failed: {:?}", res);
+                            }
+                        }
+                        info!("frame_stream.end succeeded");
                     }
-                    info!("frame_stream.end succeeded");
                 }
                 Err(e) => {
                     error!("Failed to wait frame: {:?}", e);
@@ -981,6 +1243,22 @@ fn android_main(app: AndroidApp) {
             }
         }
     }
+}
+
+#[cfg(target_os = "android")]
+#[repr(C)]
+#[derive(Debug)]
+pub struct CompositionLayerSpaceWarpInfoFB {
+    pub ty: oxr::StructureType,
+    pub next: *const std::ffi::c_void,
+    pub layer_flags: u64, // XrCompositionLayerSpaceWarpInfoFlagsFB
+    pub motion_vector_sub_image: oxr::sys::SwapchainSubImage,
+    pub app_space_delta_pose: oxr::sys::Posef,
+    pub depth_sub_image: oxr::sys::SwapchainSubImage,
+    pub min_depth: f32,
+    pub max_depth: f32,
+    pub near_z: f32,
+    pub far_z: f32,
 }
 
 #[cfg(target_os = "android")]
