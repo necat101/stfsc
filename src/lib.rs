@@ -2,10 +2,14 @@
 use android_activity::{AndroidApp, MainEvent, PollEvent};
 use log::{info, error, debug};
 use std::sync::{Arc, RwLock};
+use std::collections::HashMap; // Added HashMap
 #[cfg(target_os = "android")]
 use openxr as oxr;
 #[cfg(target_os = "android")]
 use ash::vk;
+
+#[cfg(target_os = "android")]
+use graphics::InstanceData; // Added InstanceData
 
 #[cfg(target_os = "android")]
 mod graphics;
@@ -21,6 +25,8 @@ use graphics::GraphicsContext;
 use xr::XrContext;
 #[cfg(target_os = "android")]
 use physics::PhysicsWorld;
+#[cfg(target_os = "android")]
+use rapier3d::prelude::{vector, point, Ray, QueryFilter, nalgebra};
 use world::GameWorld;
 use world::DecodedImage; // Import DecodedImage
 #[cfg(target_os = "android")]
@@ -85,7 +91,7 @@ fn android_main(app: AndroidApp) {
     let mut running = true;
     loop {
         if !running { break; }
-        app.poll_events(None, |event| {
+        app.poll_events(Some(std::time::Duration::from_millis(0)), |event| {
             match event {
                 PollEvent::Main(MainEvent::Destroy) => {
                     info!("MainEvent::Destroy received on Main Thread");
@@ -107,6 +113,7 @@ fn android_main(app: AndroidApp) {
                 _ => {}
             }
         });
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
@@ -177,9 +184,33 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
         }
     };
     
+    // Create Global Instance Buffer (10k instances)
+    let max_instances = 10000;
+    let (instance_buffer, instance_memory) = match graphics_context.create_buffer(
+        (max_instances * std::mem::size_of::<InstanceData>()) as u64,
+        vk::BufferUsageFlags::STORAGE_BUFFER,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+    ) {
+        Ok(ret) => ret,
+        Err(e) => {
+             error!("Failed to create instance buffer: {:?}", e);
+             return;
+        }
+    };
+
+    let instance_ptr = unsafe {
+        match graphics_context.device.map_memory(instance_memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()) {
+             Ok(ptr) => ptr as *mut InstanceData,
+             Err(e) => {
+                 error!("Failed to map instance buffer: {:?}", e);
+                 return;
+             }
+        }
+    };
     let global_descriptor_set = match graphics_context.create_global_descriptor_set(
         graphics_context.shadow_depth_view,
-        graphics_context.shadow_sampler
+        graphics_context.shadow_sampler,
+        instance_buffer
         ) {
         Ok(set) => set,
         Err(e) => {
@@ -200,109 +231,52 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
         }
     };
 
-    // Load Model (Android Asset Manager)
-    #[cfg(target_os = "android")]
-    let mesh = {
-        use std::io::Read;
-        let asset_manager = app.asset_manager();
-        let filename = std::ffi::CString::new("cube.obj").unwrap();
+    // Initialize Mesh Library
+    let mut mesh_library: Vec<GpuMesh> = Vec::new();
+    
+    // Create primitives (0=Cube, 1=Sphere, 2=Cylinder, 3=Plane, 4=Capsule, 5=Cone)
+    // Create primitives (0=Cube, 1=Sphere, 2=Cylinder, 3=Plane, 4=Capsule, 5=Cone)
+    for i in 0..6 {
+        let mesh = world::create_primitive(i);
         
-        let loaded_mesh = if let Some(mut asset) = asset_manager.open(&filename) {
-            let mut buffer = Vec::new();
-            if asset.read_to_end(&mut buffer).is_ok() {
-                match world::load_obj_from_bytes(&buffer) {
-                    Ok(m) => {
-                        info!("Loaded cube.obj successfully from assets");
-                        Some(m)
-                    },
-                    Err(e) => {
-                        error!("Failed to parse cube.obj: {:?}", e);
-                        None
-                    }
-                }
-            } else {
-                error!("Failed to read cube.obj asset");
-                None
-            }
-        } else {
-            error!("Failed to open cube.obj asset");
-            None
-        };
-
-        loaded_mesh.unwrap_or_else(|| {
-            info!("Using fallback cube");
-            world::Mesh {
-                vertices: vec![
-                    world::Vertex { position: [-0.5, -0.5,  0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0], color: [1.0, 0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-                    world::Vertex { position: [ 0.5, -0.5,  0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0], color: [0.0, 1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-                    world::Vertex { position: [ 0.5,  0.5,  0.5], normal: [0.0, 0.0, 1.0], uv: [1.0, 1.0], color: [0.0, 0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-                    world::Vertex { position: [-0.5,  0.5,  0.5], normal: [0.0, 0.0, 1.0], uv: [0.0, 1.0], color: [1.0, 1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-                    world::Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 0.0], color: [0.0, 1.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-                    world::Vertex { position: [ 0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 0.0], color: [1.0, 0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-                    world::Vertex { position: [ 0.5,  0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [1.0, 1.0], color: [1.0, 1.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-                    world::Vertex { position: [-0.5,  0.5, -0.5], normal: [0.0, 0.0, -1.0], uv: [0.0, 1.0], color: [0.0, 0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-                ],
-                indices: vec![
-                    0u32, 1, 2, 2, 3, 0,
-                    4, 5, 6, 6, 7, 4,
-                    4, 5, 1, 1, 0, 4,
-                    7, 6, 2, 2, 3, 7,
-                    4, 7, 3, 3, 0, 4,
-                    5, 6, 2, 2, 1, 5,
-                ],
-                albedo: None,
-                normal: None,
-                metallic_roughness: None,
-                decoded_albedo: None,
-                decoded_normal: None,
-                decoded_mr: None,
-            }
-        })
-    };
-
-    let (vertex_buffer, vertex_memory) = match graphics_context.create_buffer(
-        (mesh.vertices.len() * std::mem::size_of::<world::Vertex>()) as u64,
-        vk::BufferUsageFlags::VERTEX_BUFFER,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
-    ) {
-        Ok(ret) => ret,
-        Err(e) => {
-            error!("Failed to create vertex buffer: {:?}", e);
-            return;
-        }
-    };
-
-    unsafe {
-        if let Ok(ptr) = graphics_context.device.map_memory(vertex_memory, 0, (mesh.vertices.len() * std::mem::size_of::<world::Vertex>()) as u64, vk::MemoryMapFlags::empty()) {
+        let (vbo, vbo_mem) = graphics_context.create_buffer(
+            (mesh.vertices.len() * std::mem::size_of::<world::Vertex>()) as u64,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+        ).unwrap();
+        
+        unsafe {
+            let ptr = graphics_context.device.map_memory(vbo_mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).unwrap();
             std::ptr::copy_nonoverlapping(mesh.vertices.as_ptr(), ptr as *mut world::Vertex, mesh.vertices.len());
-            graphics_context.device.unmap_memory(vertex_memory);
-        } else {
-             error!("Failed to map vertex memory");
-             return;
+            graphics_context.device.unmap_memory(vbo_mem);
         }
-    }
 
-    let (index_buffer, index_memory) = match graphics_context.create_buffer(
-        (mesh.indices.len() * std::mem::size_of::<u32>()) as u64,
-        vk::BufferUsageFlags::INDEX_BUFFER,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
-    ) {
-        Ok(ret) => ret,
-        Err(e) => {
-            error!("Failed to create index buffer: {:?}", e);
-            return;
-        }
-    };
+        let (ibo, ibo_mem) = graphics_context.create_buffer(
+            (mesh.indices.len() * std::mem::size_of::<u32>()) as u64,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+        ).unwrap();
 
-    unsafe {
-        if let Ok(ptr) = graphics_context.device.map_memory(index_memory, 0, (mesh.indices.len() * std::mem::size_of::<u32>()) as u64, vk::MemoryMapFlags::empty()) {
+        unsafe {
+            let ptr = graphics_context.device.map_memory(ibo_mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).unwrap();
             std::ptr::copy_nonoverlapping(mesh.indices.as_ptr(), ptr as *mut u32, mesh.indices.len());
-            graphics_context.device.unmap_memory(index_memory);
-        } else {
-            error!("Failed to map index memory");
-            return;
+            graphics_context.device.unmap_memory(ibo_mem);
         }
+
+        let index_count = mesh.indices.len() as u32;
+
+        mesh_library.push(GpuMesh {
+            vertex_buffer: vbo,
+            vertex_memory: vbo_mem,
+            index_buffer: ibo,
+            index_memory: ibo_mem,
+            index_count,
+            material_descriptor_set: material_descriptor_set, // Share same material for now
+            custom_textures: Vec::new(),
+        });
+        info!("Initialized Primitive Mesh {}", i);
     }
+
 
     // Skybox Mesh (Hardcoded Cube)
     let skybox_vertices = [
@@ -367,12 +341,95 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
     struct GameState {
         physics: PhysicsWorld,
         world: GameWorld,
+        player_position: glam::Vec3,
     }
     
     let game_state = Arc::new(RwLock::new(GameState {
         physics: physics_world,
         world: game_world,
+        player_position: glam::Vec3::new(0.0, 1.7, 0.0), // Default standing height
     }));
+
+    // =========================================================================
+    // DEMO SCENE - DISABLED
+    // The editor now controls scene content. Deploy "Test Engine Scene" from 
+    // editor via File > Test Engine Scene, then Scene > Deploy All to Quest
+    // =========================================================================
+    // To re-enable: uncomment the block below
+    /*
+    // Spawn a Test Physics Block
+    {
+        if let Ok(mut state) = game_state.write() {
+             // 1. Create Rigid Body
+             let handle = state.physics.add_box_rigid_body([0.0, 10.0, -8.0], [0.5, 0.5, 0.5], true);
+             state.physics.add_box_rigid_body([0.0, -2.0, 0.0], [100.0, 1.0, 100.0], false); // Ground Plane
+
+             // 2. Create Entity
+             state.world.ecs.spawn((
+                 world::Transform {
+                     position: glam::Vec3::new(0.0, 10.0, -8.0),
+                     rotation: glam::Quat::IDENTITY,
+                     scale: glam::Vec3::ONE,
+                 },
+                 world::MeshHandle(0),
+                 world::RigidBodyHandle(handle),
+             ));
+             info!("Spawned Physics Test Cube + Ground");
+             
+             // 3. Spawn Test Vehicle
+             let veh_handle = state.physics.add_box_rigid_body([5.0, 2.0, -8.0], [1.0, 0.5, 2.0], true);
+             state.world.ecs.spawn((
+                 world::Transform {
+                     position: glam::Vec3::new(5.0, 2.0, -8.0),
+                     rotation: glam::Quat::IDENTITY,
+                     scale: glam::Vec3::ONE,
+                 },
+                 world::MeshHandle(0), // Re-use cube mesh for now
+                 world::RigidBodyHandle(veh_handle),
+                 world::Vehicle { speed: 10.0, max_speed: 30.0, steering: 0.0, accelerating: true },
+             ));
+
+             info!("Spawned Test Vehicle");
+             
+             // 4. Spawn Crowd (50 Agents)
+             let mut seed: u32 = 999;
+             let mut rand = || {
+                 seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                 (seed as f32) / (u32::MAX as f32)
+             };
+             for i in 0..50 {
+                 let x = (rand() - 0.5) * 40.0;
+                 let z = (rand() - 0.5) * 40.0;
+                 
+                 // Some agents are fleeing (10% of them) for demo
+                 let (agent_state, max_speed) = if i < 5 {
+                     (world::AgentState::Fleeing, 8.0)  // Fast runners
+                 } else if i < 15 {
+                     (world::AgentState::Running, 5.0)  // Jogging
+                 } else {
+                     (world::AgentState::Walking, 2.0)  // Normal walking
+                 };
+                 
+                 state.world.ecs.spawn((
+                     world::Transform {
+                         position: glam::Vec3::new(x, 1.0, z),
+                         rotation: glam::Quat::IDENTITY,
+                         scale: glam::Vec3::new(0.3, 1.7, 0.3), // Human-ish scale
+                     },
+                     world::MeshHandle(0),
+                     world::CrowdAgent {
+                         velocity: glam::Vec3::ZERO,
+                         target: glam::Vec3::new((rand() - 0.5) * 40.0, 1.0, (rand() - 0.5) * 40.0),
+                         state: agent_state,
+                         max_speed,
+                     }
+                 ));
+             }
+             info!("Spawned 50 Crowd Agents (5 Fleeing, 10 Running, 35 Walking)");
+        }
+    }
+    */
+    info!("Quest started with empty scene - deploy from editor");
 
     // Game Loop Thread
     let game_state_thread = game_state.clone();
@@ -380,14 +437,200 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
     
     std::thread::spawn(move || {
         info!("Game Loop Thread Started");
+        let mut frame_count: u64 = 0;
         while !game_quit {
             let start = std::time::Instant::now();
+            
+            // ===== PHASE 1: Physics Step (short lock) =====
             {
-                if let Ok(mut state) = game_state_thread.write() {
+                if let Ok(mut state) = game_state_thread.try_write() {
                     state.physics.step();
-                    state.world.update_streaming();
                 }
             }
+            // Yield to render thread
+            std::thread::yield_now();
+            
+            // ===== PHASE 2: World Streaming (short lock) =====
+            {
+                if let Ok(mut state) = game_state_thread.try_write() {
+                    let player_pos = state.player_position;
+                    state.world.update_streaming(player_pos);
+                }
+            }
+            // Yield to render thread
+            std::thread::yield_now();
+            
+            // ===== PHASE 3: Physics -> ECS Sync (collect outside lock, apply with lock) =====
+            let physics_updates: Vec<_>;
+            {
+                if let Ok(state) = game_state_thread.try_read() {
+                    use rayon::prelude::*;
+                    let physics_bodies: Vec<_> = state.world.ecs
+                        .query::<(&world::Transform, &world::RigidBodyHandle)>()
+                        .iter()
+                        .map(|(id, (_, handle))| (id, handle.0))
+                        .collect();
+                    
+                    physics_updates = physics_bodies.par_iter()
+                        .filter_map(|(id, handle)| {
+                            state.physics.rigid_body_set.get(*handle).map(|body| {
+                                let translation = body.translation();
+                                let rotation = body.rotation();
+                                (*id, 
+                                 glam::Vec3::new(translation.x, translation.y, translation.z), 
+                                 glam::Quat::from_xyzw(rotation.i, rotation.j, rotation.k, rotation.w))
+                            })
+                        })
+                        .collect();
+                } else {
+                    physics_updates = Vec::new();
+                }
+            }
+            // Apply physics updates with short write lock
+            if !physics_updates.is_empty() {
+                if let Ok(mut state) = game_state_thread.try_write() {
+                    for (id, pos, rot) in physics_updates {
+                        if let Ok(mut transform) = state.world.ecs.get::<&mut world::Transform>(id) {
+                            transform.position = pos;
+                            transform.rotation = rot;
+                        }
+                    }
+                }
+            }
+            std::thread::yield_now();
+            
+            // ===== PHASE 4: Vehicle Logic (short lock per operation) =====
+            {
+                // Collect vehicle data
+                let vehicle_data: Vec<_>;
+                if let Ok(state) = game_state_thread.try_read() {
+                    vehicle_data = state.world.ecs.query::<(&world::Vehicle, &world::RigidBodyHandle)>()
+                        .iter()
+                        .map(|(_, (v, h))| (v.speed, h.0))
+                        .collect();
+                } else {
+                    vehicle_data = Vec::new();
+                }
+                
+                // Process each vehicle with short lock
+                for (speed, body_handle) in vehicle_data {
+                    if let Ok(mut state) = game_state_thread.try_write() {
+                        let ray_result = {
+                            if let Some(body) = state.physics.rigid_body_set.get(body_handle) {
+                                let position = body.translation();
+                                let ray_origin = point![position.x, position.y, position.z];
+                                let ray_dir = vector![0.0, -1.0, 0.0];
+                                let max_dist = 1.5;
+                                
+                                state.physics.query_pipeline.cast_ray(
+                                    &state.physics.rigid_body_set,
+                                    &state.physics.collider_set,
+                                    &Ray::new(ray_origin, ray_dir),
+                                    max_dist,
+                                    true,
+                                    QueryFilter::default().exclude_rigid_body(body_handle)
+                                ).map(|(_, toi)| (toi, max_dist))
+                            } else {
+                                None
+                            }
+                        };
+                        
+                        if let Some((toi, max_dist)) = ray_result {
+                            if let Some(body) = state.physics.rigid_body_set.get_mut(body_handle) {
+                                let stiffness = 200.0;
+                                let damping = 10.0;
+                                let compression = 1.0 - (toi / max_dist);
+                                let up_force = vector![0.0, stiffness * compression, 0.0];
+                                
+                                body.add_force(up_force, true);
+                                
+                                let vel = *body.linvel();
+                                body.add_force(-vel * damping, true);
+                                
+                                let rot = *body.rotation();
+                                let forward_dir = rot.transform_vector(&vector![0.0, 0.0, -1.0]);
+                                body.add_force(forward_dir * speed, true);
+                            }
+                        }
+                    }
+                }
+            }
+            std::thread::yield_now();
+            
+            // ===== PHASE 5: Crowd Logic (parallel compute, short lock for apply) =====
+            {
+                use rayon::prelude::*;
+                let dt = 0.027 * 5.0;
+                
+                // Collect agents outside lock
+                let agents_to_update: Vec<_>;
+                if let Ok(state) = game_state_thread.try_read() {
+                    agents_to_update = state.world.ecs
+                        .query::<(&world::CrowdAgent, &world::Transform)>()
+                        .iter()
+                        .enumerate()
+                        .filter(|(idx, _)| (*idx % 5) == ((frame_count % 5) as usize))
+                        .map(|(_, (id, (agent, transform)))| {
+                            (id, agent.clone(), transform.clone())
+                        })
+                        .collect();
+                } else {
+                    agents_to_update = Vec::new();
+                }
+                
+                // Process in parallel WITHOUT lock
+                let agent_updates: Vec<_> = agents_to_update.par_iter()
+                    .map(|(id, agent, transform)| {
+                        let pos = transform.position;
+                        let target = agent.target;
+                        let max_speed = agent.max_speed;
+                        
+                        let to_target = target - pos;
+                        let dist = to_target.length();
+                        
+                        if dist < 1.0 {
+                            let new_target = -agent.target;
+                            (*id, agent.velocity, new_target, transform.position, transform.rotation)
+                        } else {
+                            let desired = to_target.normalize() * max_speed;
+                            let steer_force = if agent.state == world::AgentState::Fleeing { 10.0 } else { 5.0 };
+                            let steering = (desired - agent.velocity) * steer_force;
+                            
+                            let mut new_velocity = agent.velocity + steering * dt;
+                            if new_velocity.length() > max_speed {
+                                new_velocity = new_velocity.normalize() * max_speed;
+                            }
+                            
+                            let new_position = pos + new_velocity * dt;
+                            
+                            let new_rotation = if new_velocity.length_squared() > 0.1 {
+                                let angle = new_velocity.x.atan2(new_velocity.z);
+                                glam::Quat::from_rotation_y(angle)
+                            } else {
+                                transform.rotation
+                            };
+                            
+                            (*id, new_velocity, agent.target, new_position, new_rotation)
+                        }
+                    })
+                    .collect();
+                
+                // Apply with short write lock
+                if !agent_updates.is_empty() {
+                    if let Ok(mut state) = game_state_thread.try_write() {
+                        for (id, new_vel, new_target, new_pos, new_rot) in agent_updates {
+                            if let Ok((mut agent, mut transform)) = state.world.ecs.query_one_mut::<(&mut world::CrowdAgent, &mut world::Transform)>(id) {
+                                agent.velocity = new_vel;
+                                agent.target = new_target;
+                                transform.position = new_pos;
+                                transform.rotation = new_rot;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            frame_count += 1;
             let elapsed = start.elapsed();
             // Target 36Hz (approx 27.77ms) for AppSW
             // We run physics/logic at 36fps and let AppSW synthesize the rest to 72Hz
@@ -470,7 +713,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                 }).await.unwrap_or_else(|e| {
                                     error!("Join error in spawn_blocking: {:?}", e);
                                     // wrapper to avoid panic, though unwrap is mostly safe here if we don't panic inside
-                                    world::SceneUpdate::Spawn { id: 0, position: [0.0; 3], rotation: [0.0; 4], color: [1.0, 0.0, 1.0] } // Error sentinel
+                                    world::SceneUpdate::Spawn { id: 0, primitive: 0, position: [0.0; 3], rotation: [0.0; 4], color: [1.0, 0.0, 1.0] } // Error sentinel
                                 });
 
                                 let _ = tx.send(update).await;
@@ -492,6 +735,14 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
     // State for AppSW (Motion Vectors)
     // Store previous frame's View Projection Matrix per eye
     let mut prev_view_projs = [glam::Mat4::IDENTITY; 2];
+    
+    // Previous transforms for entities (for Motion Vectors)
+    let mut prev_transforms: HashMap<u64, glam::Mat4> = HashMap::new();
+    
+    // Cached draw data for lock-failure recovery (prevents 30-second flicker from TREX stalls)
+    let mut cached_player_position = glam::Vec3::ZERO;
+    let mut cached_batch_map: HashMap<usize, Vec<InstanceData>> = HashMap::new();
+    let mut cached_custom_draws: Vec<(GpuMesh, InstanceData)> = Vec::new();
 
     while !quit {
         let timeout = if session_running {
@@ -581,12 +832,16 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             // physics_world.step();
             // game_world.update_streaming();
 
-            // Mesh Upload Logic
-            {
-                let mut state = game_state.write().unwrap();
+            // Mesh Upload Logic (non-blocking to prevent ANR)
+            // Limit uploads per frame to avoid stalling the render thread
+            const MAX_MESH_UPLOADS_PER_FRAME: usize = 1; // Strict limit to prevent ANR
+            if let Ok(mut state) = game_state.try_write() {
                 let mut meshes_to_upload = Vec::new();
                 
                 for (id, (mesh, _transform)) in state.world.ecs.query::<(&world::Mesh, &world::Transform)>().iter() {
+                    if meshes_to_upload.len() >= MAX_MESH_UPLOADS_PER_FRAME {
+                        break; // Throttle: defer remaining uploads to next frame
+                    }
                     if state.world.ecs.get::<&GpuMesh>(id).is_ok() {
                         continue;
                     }
@@ -650,15 +905,10 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                         let mut tex_normal_opt = None;
                         let mut tex_mr_opt = None;
                         
+                        // Only use pre-decoded textures (decoded on network thread to avoid ANR)
                         if let Some(decoded) = &mesh.decoded_albedo {
                              if let Ok(tex) = graphics_context.create_texture_from_raw(decoded.width, decoded.height, &decoded.data) {
                                  tex_albedo_opt = Some(tex);
-                             }
-                        } else if let Some(data) = &mesh.albedo {
-                             if let Ok(img) = image::load_from_memory(data) {
-                                if let Ok(tex) = graphics_context.create_texture_from_image(&img.to_rgba8()) {
-                                    tex_albedo_opt = Some(tex);
-                                }
                              }
                         }
                         
@@ -666,23 +916,11 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                              if let Ok(tex) = graphics_context.create_texture_from_raw(decoded.width, decoded.height, &decoded.data) {
                                  tex_normal_opt = Some(tex);
                              }
-                        } else if let Some(data) = &mesh.normal {
-                             if let Ok(img) = image::load_from_memory(data) {
-                                if let Ok(tex) = graphics_context.create_texture_from_image(&img.to_rgba8()) {
-                                    tex_normal_opt = Some(tex);
-                                }
-                             }
                         }
                         
                         if let Some(decoded) = &mesh.decoded_mr {
                              if let Ok(tex) = graphics_context.create_texture_from_raw(decoded.width, decoded.height, &decoded.data) {
                                  tex_mr_opt = Some(tex);
-                             }
-                        } else if let Some(data) = &mesh.metallic_roughness {
-                             if let Ok(img) = image::load_from_memory(data) {
-                                if let Ok(tex) = graphics_context.create_texture_from_image(&img.to_rgba8()) {
-                                    tex_mr_opt = Some(tex);
-                                }
                              }
                         }
                         
@@ -726,17 +964,20 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                 }
             }
 
-            info!("Calling xrWaitFrame");
+            // Yield before blocking OpenXR call to reduce lock contention
+            std::thread::yield_now();
+            
+            // info!("Calling xrWaitFrame");
             match xr_context.frame_waiter.wait() {
                 Ok(frame_state) => {
-                    info!("xrWaitFrame returned, should_render: {}", frame_state.should_render);
+                    // info!("xrWaitFrame returned, should_render: {}", frame_state.should_render);
 
-                    info!("Calling frame_stream.begin");
+                    // info!("Calling frame_stream.begin");
                     if let Err(e) = xr_context.frame_stream.begin() {
                          error!("Failed to begin frame: {:?}", e);
                          continue;
                     }
-                    info!("frame_stream.begin succeeded");
+                    // info!("frame_stream.begin succeeded");
 
                     let mut layers: Vec<&oxr::CompositionLayerBase<oxr::Vulkan>> = Vec::new();
                     let projection_views: Vec<oxr::CompositionLayerProjectionView<oxr::Vulkan>>;
@@ -749,9 +990,15 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                             &xr_context.stage_space,
                         ).unwrap();
 
-                        info!("Locate views succeeded, flags: {:?}", view_flags);
+                        // info!("Locate views succeeded, flags: {:?}", view_flags);
+                        
+                        // Sync player position to game state for streaming
+                        if let Ok(mut state) = game_state.try_write() {
+                             let p = views[0].pose.position;
+                             state.player_position = glam::Vec3::new(p.x, p.y, p.z);
+                        }
 
-                        info!("Calling swapchain.acquire_image");
+                        // info!("Calling swapchain.acquire_image");
                         let stream_idx = match xr_context.swapchain.acquire_image() {
                             Ok(idx) => idx,
                             Err(e) => {
@@ -761,13 +1008,13 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                         };
 
                         if stream_idx != 9999 {
-                            info!("swapchain.acquire_image succeeded: {}", stream_idx);
+                            // info!("swapchain.acquire_image succeeded: {}", stream_idx);
                             
                             // Acquire Depth and Motion images (assume synced)
                             let _depth_idx = xr_context.depth_swapchain.acquire_image().unwrap_or(0);
                             let _motion_idx = xr_context.motion_swapchain.acquire_image().unwrap_or(0);
 
-                            info!("Calling swapchain.wait_image");
+                            // info!("Calling swapchain.wait_image");
                             if let Err(e) = xr_context.swapchain.wait_image(Duration::INFINITE) {
                                  error!("Failed to wait image: {:?}", e);
                             }
@@ -778,245 +1025,317 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                  error!("Failed to wait motion image: {:?}", e);
                             }
                             
-                            info!("swapchain.wait_image succeeded");
+                            // info!("swapchain.wait_image succeeded");
 
                                 // Record Command Buffer
                                 unsafe {
-                                    info!("Resetting Command Buffer: {:?}", graphics_context.command_buffer);
                                     let _ = graphics_context.device.reset_command_buffer(graphics_context.command_buffer, vk::CommandBufferResetFlags::empty());
-
-                                    let begin_info = vk::CommandBufferBeginInfo::builder()
-                                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-                                    
+                                    let begin_info = vk::CommandBufferBeginInfo::builder().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
                                     let _ = graphics_context.device.begin_command_buffer(graphics_context.command_buffer, &begin_info);
 
-                                    // Render Loop for Stereo (2 Eyes)
-                                    // Calculate Light Matrices once per frame (or here to be safe)
-                                    let light_pos = glam::Vec3::new(10.0, 20.0, 4.0);
-                                    let light_proj = glam::Mat4::orthographic_rh(-10.0, 10.0, -10.0, 10.0, 1.0, 50.0);
-                                    let light_view = glam::Mat4::look_at_rh(light_pos, glam::Vec3::ZERO, glam::Vec3::Y);
-
-                                    // --- Shadow Pass (Moved Outside Eye Loop) ---
-                                    {
-                                        let clear_values = [
-                                            vk::ClearValue {
-                                                depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 },
-                                            }
-                                        ];
+                                    // --- 1. Prepare Instance Data ---
+                                    let mut batch_map: HashMap<usize, Vec<InstanceData>> = HashMap::new();
+                                    let mut custom_draws: Vec<(GpuMesh, InstanceData)> = Vec::new();
+                                    
+                                    if let Ok(state) = game_state.try_read() {
+                                        // Update cached player position for shadow calculations
+                                        cached_player_position = state.player_position;
                                         
+                                        // 1. Collect Regular Instance Meshes (MeshHandle)
+                                        for (id, (handle, transform)) in state.world.ecs.query::<(&world::MeshHandle, &world::Transform)>().iter() {
+                                            let model = glam::Mat4::from_scale_rotation_translation(transform.scale, transform.rotation, transform.position);
+                                            let entity_id = id.id() as u64; 
+                                            let prev_model = *prev_transforms.get(&entity_id).unwrap_or(&model);
+                                            prev_transforms.insert(entity_id, model);
+                                            
+                                            let color = if let Ok(mat) = state.world.ecs.get::<&world::Material>(id) {
+                                                mat.color
+                                            } else {
+                                                [1.0, 1.0, 1.0, 1.0]
+                                            };
+                                            
+                                            batch_map.entry(handle.0).or_default().push(InstanceData { model, prev_model, color });
+                                        }
+
+                                        // 2. Collect LOD Groups
+                                        // Calculate camera position for distance check (use left eye for approx)
+                                        let cam_pos = views[0].pose.position;
+                                        let cam_vec3 = glam::Vec3::new(cam_pos.x, cam_pos.y, cam_pos.z);
+
+                                        for (id, (lod_group, transform)) in state.world.ecs.query::<(&world::LODGroup, &world::Transform)>().iter() {
+                                            let dist = transform.position.distance(cam_vec3);
+                                            
+                                            // Find suitable LOD level
+                                            let mut best_handle = None;
+                                            for level in &lod_group.levels {
+                                                if dist < level.distance {
+                                                    best_handle = Some(level.mesh);
+                                                    break;
+                                                }
+                                            }
+                                            // If None (dist > max distance), we cull it (draw nothing)
+
+                                            if let Some(handle) = best_handle {
+                                                let model = glam::Mat4::from_scale_rotation_translation(transform.scale, transform.rotation, transform.position);
+                                                let entity_id = id.id() as u64;
+                                                let prev_model = *prev_transforms.get(&entity_id).unwrap_or(&model);
+                                                prev_transforms.insert(entity_id, model);
+                                                
+                                                let color = if let Ok(mat) = state.world.ecs.get::<&world::Material>(id) {
+                                                    mat.color
+                                                } else {
+                                                    [1.0, 1.0, 1.0, 1.0]
+                                                };
+                                                
+                                                batch_map.entry(handle.0).or_default().push(InstanceData { model, prev_model, color });
+                                            }
+                                        }
+                                        
+                                        // 3. Collect Custom GpuMesh Entities (e.g. from Editor SpawnMesh)
+                                        for (id, (gpu_mesh, transform)) in state.world.ecs.query::<(&GpuMesh, &world::Transform)>().iter() {
+                                            // Skip if it has MeshHandle or LODGroup (already handled)
+                                            if state.world.ecs.get::<&world::MeshHandle>(id).is_ok() { continue; }
+                                            if state.world.ecs.get::<&world::LODGroup>(id).is_ok() { continue; }
+
+                                            let model = glam::Mat4::from_scale_rotation_translation(transform.scale, transform.rotation, transform.position);
+                                            let entity_id = id.id() as u64; 
+                                            let prev_model = *prev_transforms.get(&entity_id).unwrap_or(&model);
+                                            prev_transforms.insert(entity_id, model);
+                                            
+                                            let color = if let Ok(mat) = state.world.ecs.get::<&world::Material>(id) {
+                                                mat.color
+                                            } else {
+                                                [1.0, 1.0, 1.0, 1.0]
+                                            };
+                                            
+                                            custom_draws.push((gpu_mesh.clone(), InstanceData { model, prev_model, color }));
+                                        }
+                                        
+                                        // Update cache for next potential lock failure
+                                        cached_batch_map = batch_map.clone();
+                                        cached_custom_draws = custom_draws.clone();
+                                    } else {
+                                        // Lock failed (likely TREX stall) - use cached data to prevent flicker
+                                        batch_map = cached_batch_map.clone();
+                                        custom_draws = cached_custom_draws.clone();
+                                    }
+
+                                    // Upload to Instance Buffer
+                                    let mut instance_offset = 0;
+                                    let mut draw_calls: Vec<(usize, u32, u32)> = Vec::new(); // (mesh_idx, first_instance, instance_count)
+                                    let mut custom_draw_calls: Vec<(GpuMesh, u32, u32)> = Vec::new(); // (mesh, first_instance, instance_count)
+
+                                    // Batch Maps
+                                    for (mesh_idx, instances) in batch_map {
+                                        if mesh_idx >= mesh_library.len() { continue; }
+                                        let count = instances.len();
+                                        if instance_offset + count > 10000 {
+                                            error!("Instance buffer overflow!");
+                                            break;
+                                        }
+                                        
+                                        let dest = instance_ptr.add(instance_offset);
+                                        std::ptr::copy_nonoverlapping(instances.as_ptr(), dest, count);
+                                        
+                                        draw_calls.push((mesh_idx, instance_offset as u32, count as u32));
+                                        instance_offset += count;
+                                    }
+                                    
+                                    // Custom Draws
+                                    for (mesh, instance_data) in custom_draws {
+                                         if instance_offset + 1 > 10000 {
+                                            error!("Instance buffer overflow (custom)!");
+                                            break;
+                                        }
+                                        let dest = instance_ptr.add(instance_offset);
+                                        std::ptr::write(dest, instance_data);
+                                        
+                                        custom_draw_calls.push((mesh, instance_offset as u32, 1));
+                                        instance_offset += 1;
+                                    }
+                                    
+                                    // Flush instance buffer (if not HOST_COHERENT, but we used HOST_COHERENT)
+
+                                    // Light Data - Shadow frustum follows player position (uses cached position if lock failed earlier)
+                                    let shadow_center = cached_player_position;
+                                    let light_offset = glam::Vec3::new(20.0, 50.0, 20.0);
+                                    let light_pos = shadow_center + light_offset;
+                                    let light_proj = glam::Mat4::orthographic_rh(-50.0, 50.0, -50.0, 50.0, 1.0, 150.0);
+                                    let light_view = glam::Mat4::look_at_rh(light_pos, shadow_center, glam::Vec3::Y);
+                                    let light_view_proj = light_proj * light_view;
+
+                                    // --- 2. Shadow Pass ---
+                                    {
+                                        let clear_values = [vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } }];
                                         let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
                                             .render_pass(graphics_context.shadow_render_pass)
                                             .framebuffer(graphics_context.shadow_framebuffer)
-                                            .render_area(vk::Rect2D {
-                                                offset: vk::Offset2D { x: 0, y: 0 },
-                                                extent: graphics_context.shadow_extent,
-                                            })
+                                            .render_area(vk::Rect2D { offset: vk::Offset2D::default(), extent: graphics_context.shadow_extent })
                                             .clear_values(&clear_values);
 
-                                        info!("Shadow Pass: RP={:?}, FB={:?}, CB={:?}", graphics_context.shadow_render_pass, graphics_context.shadow_framebuffer, graphics_context.command_buffer);
-                                        if graphics_context.command_buffer == vk::CommandBuffer::null() {
-                                            error!("CRITICAL: Command Buffer is NULL before Shadow Pass!");
+                                        graphics_context.device.cmd_begin_render_pass(graphics_context.command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE);
+                                        graphics_context.device.cmd_bind_pipeline(graphics_context.command_buffer, vk::PipelineBindPoint::GRAPHICS, graphics_context.shadow_pipeline);
+
+                                        // Bind Global Set (Set 0) - Contains Instance Buffer (Binding 1)
+                                        graphics_context.device.cmd_bind_descriptor_sets(
+                                            graphics_context.command_buffer,
+                                            vk::PipelineBindPoint::GRAPHICS,
+                                            graphics_context.shadow_pipeline_layout,
+                                            0,
+                                            &[global_descriptor_set],
+                                            &[]
+                                        );
+                                        
+                                        // Push Constants (Light ViewProj)
+                                        let push_bytes = bytemuck::bytes_of(&light_view_proj);
+                                        graphics_context.device.cmd_push_constants(
+                                            graphics_context.command_buffer, 
+                                            graphics_context.shadow_pipeline_layout, 
+                                            vk::ShaderStageFlags::VERTEX, 
+                                            0, 
+                                            push_bytes
+                                        );
+
+                                        // Draw Batches
+                                        for (mesh_idx, first_instance, instance_count) in &draw_calls {
+                                            let gpu_mesh = &mesh_library[*mesh_idx];
+                                            graphics_context.device.cmd_bind_vertex_buffers(graphics_context.command_buffer, 0, &[gpu_mesh.vertex_buffer], &[0]);
+                                            graphics_context.device.cmd_bind_index_buffer(graphics_context.command_buffer, gpu_mesh.index_buffer, 0, vk::IndexType::UINT32);
+                                            graphics_context.device.cmd_draw_indexed(graphics_context.command_buffer, gpu_mesh.index_count, *instance_count, 0, 0, *first_instance);
+                                        }
+                                        
+                                        // Draw Custom Meshes
+                                        for (gpu_mesh, first_instance, instance_count) in &custom_draw_calls {
+                                            graphics_context.device.cmd_bind_vertex_buffers(graphics_context.command_buffer, 0, &[gpu_mesh.vertex_buffer], &[0]);
+                                            graphics_context.device.cmd_bind_index_buffer(graphics_context.command_buffer, gpu_mesh.index_buffer, 0, vk::IndexType::UINT32);
+                                            graphics_context.device.cmd_draw_indexed(graphics_context.command_buffer, gpu_mesh.index_count, *instance_count, 0, 0, *first_instance);
                                         }
 
-                                        unsafe {
-                                            graphics_context.device.cmd_begin_render_pass(
-                                                graphics_context.command_buffer,
-                                                &render_pass_begin_info,
-                                                vk::SubpassContents::INLINE,
-                                            );
-                                            
-                                            graphics_context.device.cmd_bind_pipeline(
-                                                graphics_context.command_buffer, 
-                                                vk::PipelineBindPoint::GRAPHICS, 
-                                                graphics_context.shadow_pipeline
-                                            );
-                                        }
-                                        
-                                        // Draw entities for shadow
-                                        if let Ok(state) = game_state.read() {
-                                            for (_id, (transform, gpu_mesh)) in state.world.ecs.query::<(&world::Transform, &GpuMesh)>().iter() {
-                                                let model = glam::Mat4::from_scale_rotation_translation(transform.scale, transform.rotation, transform.position);
-                                                
-                                                let mut shadow_push = Vec::new();
-                                                shadow_push.extend_from_slice(bytemuck::bytes_of(&model));
-                                                shadow_push.extend_from_slice(bytemuck::bytes_of(&light_view));
-                                                shadow_push.extend_from_slice(bytemuck::bytes_of(&light_proj));
-                                                
-                                                graphics_context.device.cmd_push_constants(
-                                                    graphics_context.command_buffer,
-                                                    graphics_context.shadow_pipeline_layout,
-                                                    vk::ShaderStageFlags::VERTEX,
-                                                    0,
-                                                    &shadow_push
-                                                );
-                                                
-                                                graphics_context.device.cmd_bind_vertex_buffers(graphics_context.command_buffer, 0, &[gpu_mesh.vertex_buffer], &[0]);
-                                                graphics_context.device.cmd_bind_index_buffer(graphics_context.command_buffer, gpu_mesh.index_buffer, 0, vk::IndexType::UINT32);
-                                                graphics_context.device.cmd_draw_indexed(graphics_context.command_buffer, gpu_mesh.index_count, 1, 0, 0, 0);
-                                            }
-                                        }
-                                        
-                                        unsafe {
-                                            graphics_context.device.cmd_end_render_pass(graphics_context.command_buffer);
-                                        }
+                                        graphics_context.device.cmd_end_render_pass(graphics_context.command_buffer);
                                     }
 
+                                    // --- 3. Main Pass (Stereo) ---
                                     for eye_index in 0..2 {
-
-
-                    let clear_values = [
-                                            vk::ClearValue {
-                                                color: vk::ClearColorValue {
-                                                    float32: [0.1, 0.1, 0.2, 1.0], // Dark Blue Opaque for Immersive VR
-                                                },
-                                            },
-                                            vk::ClearValue {
-                                                depth_stencil: vk::ClearDepthStencilValue {
-                                                    depth: 1.0,
-                                                    stencil: 0,
-                                                },
-                                            },
-                                            vk::ClearValue { // Motion Vector Clear (0,0 = no motion)
-                                                color: vk::ClearColorValue {
-                                                    float32: [0.0, 0.0, 0.0, 0.0],
-                                                },
-                                            }
+                                        let clear_values = [
+                                            vk::ClearValue { color: vk::ClearColorValue { float32: [0.1, 0.1, 0.15, 1.0] } },
+                                            vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } },
+                                            vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 0.0] } } // Motion Vectors
                                         ];
                                         
                                         let view = &views[eye_index];
-                                        if eye_index == 0 && FRAME_COUNT % 120 == 0 {
-                                            info!("View 0 Flags: {:?}", view_flags);
-                                            info!("Active Blend Mode: {:?}", xr_context.blend_mode);
-                                            info!("View 0 FOV: {:?}", view.fov);
-                                            info!("View 0 Pose: Pos={:?}, Ori={:?}", view.pose.position, view.pose.orientation);
-                                            info!("Resolution: {:?}", xr_context.resolution);
-                                        }
+                                        
+                                        let player_start = if let Ok(state) = game_state.read() {
+                                            state.world.player_start_transform.clone()
+                                        } else {
+                                            world::Transform { position: glam::Vec3::ZERO, rotation: glam::Quat::IDENTITY, scale: glam::Vec3::ONE }
+                                        };
 
-                                        let view_matrix = create_view_matrix(&view.pose);
+                                        let view_matrix = create_view_matrix(&view.pose, &player_start);
                                         let proj_matrix = create_projection_matrix(view.fov, 0.01, 100.0);
+                                        let view_proj = proj_matrix * view_matrix;
 
                                         let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
                                             .render_pass(graphics_context.render_pass)
                                             .framebuffer(xr_context.framebuffers[stream_idx as usize][eye_index])
-                                            .render_area(vk::Rect2D {
-                                                offset: vk::Offset2D { x: 0, y: 0 },
-                                                extent: xr_context.resolution,
-                                            })
+                                            .render_area(vk::Rect2D { offset: vk::Offset2D::default(), extent: xr_context.resolution })
                                             .clear_values(&clear_values);
 
-                                        info!("Main Pass (Eye {}): RP={:?}, FB={:?}, CB={:?}", eye_index, graphics_context.render_pass, xr_context.framebuffers[stream_idx as usize][eye_index], graphics_context.command_buffer);
                                         graphics_context.device.cmd_begin_render_pass(graphics_context.command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE);
                                         
-                                        // Render Entities
+                                        // Set Viewport/Scissor
+                                        let viewport = vk::Viewport { x: 0.0, y: 0.0, width: xr_context.resolution.width as f32, height: xr_context.resolution.height as f32, min_depth: 0.0, max_depth: 1.0 };
+                                        let scissor = vk::Rect2D { offset: vk::Offset2D::default(), extent: xr_context.resolution };
+                                        graphics_context.device.cmd_set_viewport(graphics_context.command_buffer, 0, &[viewport]);
+                                        graphics_context.device.cmd_set_scissor(graphics_context.command_buffer, 0, &[scissor]);
+
+                                        // Bind Pipeline & Global Set
                                         graphics_context.device.cmd_bind_pipeline(graphics_context.command_buffer, vk::PipelineBindPoint::GRAPHICS, graphics_context.pipeline);
-                                        
-                                        // Bind Global Descriptor Set (Set 0)
                                         graphics_context.device.cmd_bind_descriptor_sets(
                                             graphics_context.command_buffer,
                                             vk::PipelineBindPoint::GRAPHICS,
                                             graphics_context.pipeline_layout,
                                             0,
                                             &[global_descriptor_set],
-                                            &[],
+                                            &[]
                                         );
 
-                                        // Bind Material Descriptor Set (Per Object)
-                                        // But here we are iterating.
-                                        // Wait, the previous replacement was:
-                                        // graphics_context.device.cmd_bind_descriptor_sets(..., 1, &[material_descriptor_set], ...);
-                                        // We should now use `gpu_mesh.material_descriptor_set`.
+                                        // Push Constants: ViewProj, PrevViewProj, LightSpace, CameraPos
+                                        // 3 matrices + 1 vec4 = 208 bytes
+                                        let mut push_data = Vec::with_capacity(208);
+                                        push_data.extend_from_slice(bytemuck::bytes_of(&view_proj));
+                                        push_data.extend_from_slice(bytemuck::bytes_of(&prev_view_projs[eye_index]));
+                                        // LightSpaceMatrix (for shadows) - typically LightViewProj * Model. But we are instancing.
+                                        // The shader expects `lightSpace` matrix to transform WorldPos to LightClipSpace.
+                                        // Usually LightProj * LightView. The Vertex Shader multiplies: `lightSpace * worldPos`.
+                                        // yes, just LightViewProj.
+                                        push_data.extend_from_slice(bytemuck::bytes_of(&light_view_proj));
+                                        // Camera world position for correct view vector in PBR lighting
+                                        // Compute directly from HMD pose + player_start to avoid matrix inversion issues
+                                        let hmd_pos = glam::Vec3::new(view.pose.position.x, view.pose.position.y, view.pose.position.z);
+                                        let camera_world_pos = glam::Vec4::from((player_start.position + player_start.rotation * hmd_pos, 1.0));
+                                        push_data.extend_from_slice(bytemuck::bytes_of(&camera_world_pos));
                                         
-                                        // Viewport and Scissor
-                                        let viewport = vk::Viewport {
-                                            x: 0.0,
-                                            y: 0.0,
-                                            width: xr_context.resolution.width as f32,
-                                            height: xr_context.resolution.height as f32,
-                                            min_depth: 0.0,
-                                            max_depth: 1.0,
-                                        };
-                                        let scissor = vk::Rect2D {
-                                            offset: vk::Offset2D { x: 0, y: 0 },
-                                            extent: xr_context.resolution,
-                                        };
-                                        graphics_context.device.cmd_set_viewport(graphics_context.command_buffer, 0, &[viewport]);
-                                        graphics_context.device.cmd_set_scissor(graphics_context.command_buffer, 0, &[scissor]);
+                                        graphics_context.device.cmd_push_constants(
+                                            graphics_context.command_buffer,
+                                            graphics_context.pipeline_layout,
+                                            vk::ShaderStageFlags::VERTEX,
+                                            0,
+                                            &push_data
+                                        );
 
-                                        // Update ViewProj
-                                        let view_proj = proj_matrix * view_matrix;
-                                        
-                                        // Render ECS objects
-                                        if let Ok(state) = game_state.read() {
-                                            for (_id, (transform, gpu_mesh)) in state.world.ecs.query::<(&world::Transform, &GpuMesh)>().iter() {
-                                                let model_matrix = glam::Mat4::from_scale_rotation_translation(
-                                                    transform.scale,
-                                                    transform.rotation,
-                                                    transform.position
-                                                );
-                                                
-                                                // Prepare PushConstants: Model, ViewProj, PrevViewProj, LightSpace
-                                                // 64 bytes each => 256 total
-                                                let mut push_data = Vec::with_capacity(256);
-                                                push_data.extend_from_slice(bytemuck::bytes_of(&model_matrix));
-                                                push_data.extend_from_slice(bytemuck::bytes_of(&view_proj));
-                                                push_data.extend_from_slice(bytemuck::bytes_of(&prev_view_projs[eye_index]));
-                                                
-                                                // Light Space (Placeholder or calculated)
-                                                 let light_space_matrix = light_proj * light_view * model_matrix; // Just one example
-                                                push_data.extend_from_slice(bytemuck::bytes_of(&light_space_matrix));
-                                                
-                                                graphics_context.device.cmd_push_constants(
-                                                    graphics_context.command_buffer,
-                                                    graphics_context.pipeline_layout,
-                                                    vk::ShaderStageFlags::VERTEX,
-                                                    0,
-                                                    &push_data
-                                                );
-                                                
-                                                // Bind Material Descriptor Set (Set 1)
-                                                graphics_context.device.cmd_bind_descriptor_sets(
-                                                    graphics_context.command_buffer,
-                                                    vk::PipelineBindPoint::GRAPHICS,
-                                                    graphics_context.pipeline_layout,
-                                                    1,
-                                                    &[gpu_mesh.material_descriptor_set],
-                                                    &[],
-                                                );
-                                                
-                                                graphics_context.device.cmd_bind_vertex_buffers(graphics_context.command_buffer, 0, &[gpu_mesh.vertex_buffer], &[0]);
-                                                graphics_context.device.cmd_bind_index_buffer(graphics_context.command_buffer, gpu_mesh.index_buffer, 0, vk::IndexType::UINT32);
-                                                graphics_context.device.cmd_draw_indexed(graphics_context.command_buffer, gpu_mesh.index_count, 1, 0, 0, 0);
-                                            }
+                                        // Draw Batches
+                                        for (mesh_idx, first_instance, instance_count) in &draw_calls {
+                                            let gpu_mesh = &mesh_library[*mesh_idx];
+                                            
+                                            // Bind Material Set
+                                            graphics_context.device.cmd_bind_descriptor_sets(
+                                                graphics_context.command_buffer,
+                                                vk::PipelineBindPoint::GRAPHICS,
+                                                graphics_context.pipeline_layout,
+                                                1,
+                                                &[gpu_mesh.material_descriptor_set],
+                                                &[]
+                                            );
+                                            
+                                            graphics_context.device.cmd_bind_vertex_buffers(graphics_context.command_buffer, 0, &[gpu_mesh.vertex_buffer], &[0]);
+                                            graphics_context.device.cmd_bind_index_buffer(graphics_context.command_buffer, gpu_mesh.index_buffer, 0, vk::IndexType::UINT32);
+                                            graphics_context.device.cmd_draw_indexed(graphics_context.command_buffer, gpu_mesh.index_count, *instance_count, 0, 0, *first_instance);
                                         }
+                                        
+                                        // Draw Custom Meshes
+                                        for (gpu_mesh, first_instance, instance_count) in &custom_draw_calls {
+                                            // Bind Material Set
+                                            graphics_context.device.cmd_bind_descriptor_sets(
+                                                graphics_context.command_buffer,
+                                                vk::PipelineBindPoint::GRAPHICS,
+                                                graphics_context.pipeline_layout,
+                                                1,
+                                                &[gpu_mesh.material_descriptor_set],
+                                                &[]
+                                            );
+                                            
+                                            graphics_context.device.cmd_bind_vertex_buffers(graphics_context.command_buffer, 0, &[gpu_mesh.vertex_buffer], &[0]);
+                                            graphics_context.device.cmd_bind_index_buffer(graphics_context.command_buffer, gpu_mesh.index_buffer, 0, vk::IndexType::UINT32);
+                                            graphics_context.device.cmd_draw_indexed(graphics_context.command_buffer, gpu_mesh.index_count, *instance_count, 0, 0, *first_instance);
+                                        }
+                                        
+                                        // Update Prev ViewProj
+                                        prev_view_projs[eye_index] = view_proj;
 
-                                        // Update Prev ViewProj for next frame
-                                        prev_view_projs[eye_index] = view_proj; 
-                                        
-                                        unsafe {
-                                            graphics_context.device.cmd_end_render_pass(graphics_context.command_buffer);
-                                        }
-                                    
+                                        graphics_context.device.cmd_end_render_pass(graphics_context.command_buffer);
                                     }
+
                                     let _ = graphics_context.device.end_command_buffer(graphics_context.command_buffer);
 
-                                    let command_buffers = [graphics_context.command_buffer];
-                                    let submit_info = vk::SubmitInfo::builder()
-                                        .command_buffers(&command_buffers);
-                                    
-                                    // Reset fence before submission
+                                    // Submit
+                                    let cmd_buffers = [graphics_context.command_buffer];
+                                    let submit_info = vk::SubmitInfo::builder().command_buffers(&cmd_buffers);
                                     let _ = graphics_context.device.reset_fences(&[graphics_context.fence]);
-
-                                    if let Err(e) = graphics_context.device.queue_submit(graphics_context.queue, &[submit_info.build()], graphics_context.fence) {
-                                        error!("Failed to submit queue: {:?}", e);
-                                    }
-
-                                    // Wait for fence to ensure GPU is done before releasing image
-                                    if let Err(e) = graphics_context.device.wait_for_fences(&[graphics_context.fence], true, u64::MAX) {
-                                        error!("Failed to wait for fences: {:?}", e);
-                                    }
+                                    let _ = graphics_context.device.queue_submit(graphics_context.queue, &[submit_info.build()], graphics_context.fence);
+                                    let _ = graphics_context.device.wait_for_fences(&[graphics_context.fence], true, 50_000_000); // 50ms timeout to prevent ANR
                                 }
 
-                                info!("Calling swapchain.release_image");
+                                // info!("Calling swapchain.release_image");
                                 if let Err(e) = xr_context.swapchain.release_image() {
                                     error!("Failed to release image: {:?}", e);
                                 }
@@ -1026,7 +1345,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                 if let Err(e) = xr_context.motion_swapchain.release_image() {
                                     error!("Failed to release motion image: {:?}", e);
                                 }
-                                info!("swapchain.release_image succeeded");
+                                // info!("swapchain.release_image succeeded");
 
                                 // Views are already located above
                                 projection_views = views.iter().enumerate().map(|(i, view)| {
@@ -1210,7 +1529,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                         // Use the blend mode selected during session creation
                         let blend_mode = xr_context.blend_mode;
 
-                        info!("Calling frame_stream.end (AppSW)");
+                        // info!("Calling frame_stream.end (AppSW)");
                         unsafe {
                             let frame_end_info = oxr::sys::FrameEndInfo {
                                 ty: oxr::StructureType::FRAME_END_INFO,
@@ -1227,7 +1546,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                 error!("frame_stream.end (sys) failed: {:?}", res);
                             }
                         }
-                        info!("frame_stream.end succeeded");
+                        // info!("frame_stream.end succeeded");
                     }
                 }
                 Err(e) => {
@@ -1235,9 +1554,9 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                 }
             }
         } else {
-            // Frame loop paused: session not running or activity not resumed
+            // Frame loop paused
             unsafe {
-                if FRAME_COUNT % 120 == 0 { // Log occasionally to avoid spam
+                if FRAME_COUNT % 120 == 0 { 
                     info!("Frame loop paused - session_running: {}, activity_resumed: {}", session_running, activity_resumed);
                 }
             }
@@ -1262,7 +1581,7 @@ pub struct CompositionLayerSpaceWarpInfoFB {
 }
 
 #[cfg(target_os = "android")]
-fn create_view_matrix(pose: &openxr::Posef) -> glam::Mat4 {
+fn create_view_matrix(pose: &openxr::Posef, world_transform: &world::Transform) -> glam::Mat4 {
     let rotation = glam::Quat::from_xyzw(
         pose.orientation.x,
         pose.orientation.y,
@@ -1274,7 +1593,13 @@ fn create_view_matrix(pose: &openxr::Posef) -> glam::Mat4 {
         pose.position.y,
         pose.position.z,
     );
-    glam::Mat4::from_rotation_translation(rotation, position).inverse()
+    
+    // PlayerStart * HMD
+    let hmd_transform = glam::Mat4::from_rotation_translation(rotation, position);
+    let player_transform = glam::Mat4::from_rotation_translation(world_transform.rotation, world_transform.position);
+    
+    // The view matrix is the inverse of the camera's world transform
+    (player_transform * hmd_transform).inverse()
 }
 
 #[cfg(target_os = "android")]

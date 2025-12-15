@@ -14,6 +14,14 @@ pub struct Texture {
     pub sampler: vk::Sampler,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct InstanceData {
+    pub model: glam::Mat4,
+    pub prev_model: glam::Mat4,
+    pub color: [f32; 4],
+}
+
 pub struct SkyboxRenderer {
     pub pipeline: vk::Pipeline,
     pub pipeline_layout: vk::PipelineLayout,
@@ -230,6 +238,12 @@ impl GraphicsContext {
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT)
                 .build(),
+             vk::DescriptorSetLayoutBinding::builder()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .build(),
         ];
         let global_layout_info = vk::DescriptorSetLayoutCreateInfo::builder()
             .bindings(&global_bindings);
@@ -266,7 +280,11 @@ impl GraphicsContext {
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 300, // Enough for 100 materials * 3 textures
+                descriptor_count: 300, 
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                descriptor_count: 100,
             }
         ];
         
@@ -286,11 +304,13 @@ impl GraphicsContext {
             vk::PushConstantRange::builder()
                 .stage_flags(vk::ShaderStageFlags::VERTEX)
                 .offset(0)
-                .size(std::mem::size_of::<glam::Mat4>() as u32 * 3) // Model, View, Proj
+                .size(std::mem::size_of::<glam::Mat4>() as u32 * 1) // ViewProj only
                 .build()
         ];
+        let shadow_set_layouts = [global_set_layout]; // Share global set
         let shadow_pipeline_layout_info = vk::PipelineLayoutCreateInfo::builder()
-            .push_constant_ranges(&push_constant_ranges);
+            .push_constant_ranges(&push_constant_ranges)
+            .set_layouts(&shadow_set_layouts);
         let shadow_pipeline_layout = unsafe { device.create_pipeline_layout(&shadow_pipeline_layout_info, None)? };
 
         // Create Shadow Pipeline
@@ -328,7 +348,7 @@ impl GraphicsContext {
             vk::PushConstantRange::builder()
                 .stage_flags(vk::ShaderStageFlags::VERTEX)
                 .offset(0)
-                .size(std::mem::size_of::<glam::Mat4>() as u32 * 4)
+                .size(std::mem::size_of::<glam::Mat4>() as u32 * 3 + 16) // ViewProj, PrevViewProj, LightSpace + CameraPos (vec4)
                 .build()
         ];
         let set_layouts = [global_set_layout, material_set_layout];
@@ -701,6 +721,8 @@ impl GraphicsContext {
     pub fn copy_buffer_to_image(&self, buffer: vk::Buffer, image: vk::Image, width: u32, height: u32) -> Result<()> {
         let command_buffer = self.begin_single_time_commands()?;
         
+        // Assume single mip level for basic copy_buffer_to_image calls (for legacy support)
+        // For compressed textures, we will use a separate path or manual copy
         let region = vk::BufferImageCopy::builder()
             .buffer_offset(0)
             .buffer_row_length(0)
@@ -730,6 +752,127 @@ impl GraphicsContext {
 
         self.end_single_time_commands(command_buffer)?;
         Ok(())
+    }
+
+    // New helper for Compressed Textures (KTX2)
+    pub fn create_compressed_texture(
+        &self,
+        command_pool: vk::CommandPool, // We usually use self.command_pool, but context passes it? No, context has it.
+        data: &[u8],
+        format: vk::Format,
+        width: u32,
+        height: u32,
+        mip_levels: u32,
+    ) -> Result<(vk::Image, vk::DeviceMemory, vk::ImageView)> {
+        // 1. Create Staging Buffer
+        let (staging_buffer, staging_memory) = self.create_buffer(
+            data.len() as u64,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+
+        unsafe {
+            let data_ptr = self.device.map_memory(staging_memory, 0, data.len() as u64, vk::MemoryMapFlags::empty())?;
+            let mut align = ash::util::Align::new(data_ptr, std::mem::align_of::<u8>() as u64, data.len() as u64);
+            align.copy_from_slice(data);
+            self.device.unmap_memory(staging_memory);
+        }
+
+        // 2. Create Image
+        let image_create_info = vk::ImageCreateInfo::builder()
+            .image_type(vk::ImageType::TYPE_2D)
+            .extent(vk::Extent3D { width, height, depth: 1 })
+            .mip_levels(mip_levels)
+            .array_layers(1)
+            .format(format)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .samples(vk::SampleCountFlags::TYPE_1);
+
+        let texture_image = unsafe { self.device.create_image(&image_create_info, None)? };
+        
+        let mem_reqs = unsafe { self.device.get_image_memory_requirements(texture_image) };
+        let memory_type_index = self.find_memory_type(mem_reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+        
+        let alloc_info = vk::MemoryAllocateInfo::builder()
+            .allocation_size(mem_reqs.size)
+            .memory_type_index(memory_type_index);
+            
+        let texture_memory = unsafe { self.device.allocate_memory(&alloc_info, None)? };
+        unsafe { self.device.bind_image_memory(texture_image, texture_memory, 0)?; }
+
+        // 3. Transition to TransferDst
+        self.transition_image_layout(
+            texture_image,
+            format,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        )?;
+
+        // 4. Copy Buffer to Image (All mips)
+        // Note: data is assumed to be tightly packed mips for now, or just base level?
+        // KTX2 usually provides offsets. For simplicity, we assume single mip for basic usage or handle complex copies later.
+        // Actually, for compressed textures, KTX2 provides the full blob. GPU reads it correctly if tightly packed?
+        // No, we need per-region copies. KTX2 library gives us this.
+        // For this step, we'll assume the `data` IS the single chunk of data for ALL mips (if continuous) or just MIP 0.
+        // Let's assume MIP 0 for now to get it compiling, real KTX2 loader will need iteration.
+        
+        let command_buffer = self.begin_single_time_commands()?;
+        let region = vk::BufferImageCopy::builder()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_offset(vk::Offset3D::default())
+            .image_extent(vk::Extent3D { width, height, depth: 1 });
+
+        unsafe {
+            self.device.cmd_copy_buffer_to_image(
+                command_buffer, 
+                staging_buffer, 
+                texture_image, 
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL, 
+                &[region.build()]
+            );
+        }
+        self.end_single_time_commands(command_buffer)?;
+
+        // 5. Transition to ShaderReadOnly
+        self.transition_image_layout(
+            texture_image,
+            format,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        )?;
+
+        unsafe {
+            self.device.destroy_buffer(staging_buffer, None);
+            self.device.free_memory(staging_memory, None);
+        }
+
+        // 6. Create ImageView
+        let view_info = vk::ImageViewCreateInfo::builder()
+            .image(texture_image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: mip_levels,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+            
+        let texture_image_view = unsafe { self.device.create_image_view(&view_info, None)? };
+
+        Ok((texture_image, texture_memory, texture_image_view))
     }
 
     pub fn create_default_pbr_textures(&self) -> Result<(Texture, Texture, Texture)> {
@@ -967,7 +1110,7 @@ impl GraphicsContext {
         })
     }
 
-    pub fn create_global_descriptor_set(&self, shadow_view: vk::ImageView, shadow_sampler: vk::Sampler) -> Result<vk::DescriptorSet> {
+    pub fn create_global_descriptor_set(&self, shadow_view: vk::ImageView, shadow_sampler: vk::Sampler, instance_buffer: vk::Buffer) -> Result<vk::DescriptorSet> {
         let layouts = [self.global_set_layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::builder()
             .descriptor_pool(self.descriptor_pool)
@@ -976,9 +1119,14 @@ impl GraphicsContext {
         let descriptor_set = unsafe { self.device.allocate_descriptor_sets(&alloc_info)?[0] };
 
         let shadow_info = vk::DescriptorImageInfo::builder()
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) // TODO: Make sure this layout transition happens!
             .image_view(shadow_view)
             .sampler(shadow_sampler);
+
+        let buffer_info = vk::DescriptorBufferInfo::builder()
+            .buffer(instance_buffer)
+            .offset(0)
+            .range(vk::WHOLE_SIZE);
 
         let descriptor_writes = [
             vk::WriteDescriptorSet::builder()
@@ -987,6 +1135,13 @@ impl GraphicsContext {
                 .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(std::slice::from_ref(&shadow_info))
+                .build(),
+            vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(1)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(std::slice::from_ref(&buffer_info))
                 .build(),
         ];
 
@@ -1140,11 +1295,11 @@ impl GraphicsContext {
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::BACK) // Back face culling for shadows usually OK, or Front face to prevent peter panning
+            .cull_mode(vk::CullModeFlags::FRONT) // Front face culling prevents shadow acne on front faces
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .depth_bias_enable(true) // Enable depth bias
-            .depth_bias_constant_factor(1.25)
-            .depth_bias_slope_factor(1.75);
+            .depth_bias_constant_factor(6.0)
+            .depth_bias_slope_factor(8.0);
 
         let multisample = vk::PipelineMultisampleStateCreateInfo::builder()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);

@@ -9,6 +9,7 @@ layout(location = 5) in vec3 inBitangent;
 layout(location = 6) in vec4 inLightSpacePos;
 layout(location = 7) in vec4 inClipPos;
 layout(location = 8) in vec4 inPrevClipPos;
+layout(location = 9) in vec3 inCameraPos;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec4 outMotionVector;
@@ -28,15 +29,20 @@ const vec3 camPos = vec3(0.0, 0.0, 0.0);
 float ShadowCalculation(vec4 fragPosLightSpace) {
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
-    if(projCoords.z > 1.0)
+    
+    // Check if fragment is outside shadow map frustum - return fully lit
+    if(projCoords.z > 1.0 || projCoords.z < 0.0)
+        return 0.0;
+    if(projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0)
         return 0.0;
         
     float closestDepth = texture(shadowMap, projCoords.xy).r; 
     float currentDepth = projCoords.z;
     
     vec3 normal = normalize(inNormal);
-    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.2)); // Must match main
-    float bias = max(0.05 * (1.0 - dot(normal, lightDir)), 0.005);
+    vec3 lightDir = normalize(vec3(20.0, 50.0, 20.0)); // Match shadow light offset
+    // Reduced bias to prevent peter-panning (objects appearing to float)
+    float bias = 0.003;
     
     // PCF
     float shadow = 0.0;
@@ -103,11 +109,12 @@ void main() {
     float metallic = mr.r;
     float roughness = mr.g;
 
-    vec3 V = normalize(vec3(0.0) - inWorldPos);
+    // Use actual camera position for correct view vector
+    vec3 V = normalize(inCameraPos - inWorldPos);
     vec3 F0 = vec3(0.04);
     F0 = mix(F0, albedo, metallic);
 
-    vec3 L = normalize(vec3(0.5, 1.0, 0.2)); 
+    vec3 L = normalize(vec3(20.0, 50.0, 20.0)); // Match shadow light offset 
     vec3 H = normalize(V + L);
     float NdotL = max(dot(N, L), 0.0);
 
@@ -129,7 +136,7 @@ void main() {
     
     vec3 Lo = (kD * albedo / PI + specular) * vec3(3.0) * NdotL * (1.0 - shadow); 
 
-    vec3 ambient = vec3(0.03) * albedo;
+    vec3 ambient = vec3(0.15) * albedo; // Higher ambient to avoid complete darkness
     vec3 color = ambient + Lo;
 
     // Gamma correction

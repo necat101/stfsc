@@ -1,0 +1,70 @@
+{
+  "name": "Test",
+  "version": "1.0",
+  "entities": [
+    {
+      "id": 1,
+      "name": "Ground Plane",
+      "position": [0.0, -0.5, 0.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": [200.0, 1.0, 200.0],
+      "entity_type": "Ground"
+    },
+    {
+      "id": 2,
+      "name": "Physics Cube",
+      "position": [0.0, 10.0, -5.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": [1.0, 1.0, 1.0],
+      "entity_type": { "Cube": { "color": [1.0, 0.5, 0.2] } }
+    },
+    {
+      "id": 3,
+      "name": "Test Vehicle",
+      "position": [5.0, 2.0, -8.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": [1.0, 0.5, 2.0],
+      "entity_type": "Vehicle"
+    },
+    {
+      "id": 100,
+      "name": "Agent 0 (Fleeing)",
+      "position": [-20.0, 1.0, -10.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": [0.3, 1.7, 0.3],
+      "entity_type": { "CrowdAgent": { "state": "Fleeing", "speed": 8.0 } }
+    },
+    {
+      "id": 101,
+      "name": "Agent 1 (Running)",
+      "position": [-10.0, 1.0, -15.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": [0.3, 1.7, 0.3],
+      "entity_type": { "CrowdAgent": { "state": "Running", "speed": 5.0 } }
+    },
+    {
+      "id": 102,
+      "name": "Agent 2 (Walking)",
+      "position": [0.0, 1.0, -12.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": [0.3, 1.7, 0.3],
+      "entity_type": { "CrowdAgent": { "state": "Walking", "speed": 2.0 } }
+    },
+    {
+      "id": 200,
+      "name": "Building 1",
+      "position": [20.0, 4.0, -30.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": [4.0, 8.0, 4.0],
+      "entity_type": { "Building": { "height": 8.0 } }
+    },
+    {
+      "id": 201,
+      "name": "Building 2",
+      "position": [28.0, 5.5, -30.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": [4.0, 11.0, 4.0],
+      "entity_type": { "Building": { "height": 11.0 } }
+    }
+  ]
+}
