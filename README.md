@@ -150,7 +150,7 @@ adb shell am start -n com.stfsc.engine/android.app.NativeActivity
 
 ## 🤝 Philosophy
 
-**Steal this f***ing source code.** Seriously.
+**Steal this fuckiing source code.** Seriously.
 
 If you're building a game and struggling with VR performance, take what you need. Learn from it. Improve on it. The goal isn't to hoard knowledge—it's to prove that **optimized, ambitious games are possible on mobile VR**.
 
