@@ -55,10 +55,27 @@ void main() {
     
     // Normal Matrix
     mat3 normalMatrix = transpose(inverse(mat3(model)));
-    vec3 T = normalize(normalMatrix * tangent.xyz);
     vec3 N = normalize(normalMatrix * normal);
-    T = normalize(T - dot(T, N) * N); // Gram-Schmidt
-    vec3 B = cross(N, T) * tangent.w;
+    
+    // Safe tangent calculation - handle zero/degenerate tangent input
+    vec3 rawT = normalMatrix * tangent.xyz;
+    float tangentLen = length(rawT);
+    
+    vec3 T;
+    vec3 B;
+    
+    if (tangentLen > 0.0001) {
+        // Valid tangent - use Gram-Schmidt orthogonalization
+        T = rawT / tangentLen;
+        T = normalize(T - dot(T, N) * N);
+        B = cross(N, T) * tangent.w;
+    } else {
+        // Degenerate tangent - generate arbitrary tangent from normal
+        // Choose a vector not parallel to N
+        vec3 helper = abs(N.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        T = normalize(cross(N, helper));
+        B = cross(N, T);
+    }
     
     outNormal = N;
     outTangent = T;

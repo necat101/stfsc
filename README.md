@@ -3,7 +3,7 @@
 **Steal This Fucking Source Code** — *Because gaming deserves better.*
 
 <p align="center">
-  <strong>v0.1 Alpha Test</strong>
+  <strong>v0.2 Alpha Test</strong>
 </p>
 
 ---
@@ -37,6 +37,7 @@ STFSC is the foundation for **556**—an upcoming open-world crime simulator aim
 - **Application Space Warp (AppSW)** support for 36fps→72Hz upscaling
 - **Motion vector generation** for temporal reprojection
 - **Instanced rendering** with batched draw calls
+- **Dynamic Lights** (Point, Spot, Directional) with PCF Shadows
 
 ### Engine Architecture
 - **Entity Component System (ECS)** via `hecs`
@@ -44,6 +45,7 @@ STFSC is the foundation for **556**—an upcoming open-world crime simulator aim
 - **Crowd simulation** with agent AI and collision avoidance
 - **World streaming** architecture for open-world scenes
 - **Thread-safe game state** with lock-failure recovery
+- **Async Resource Loading** for background mesh uploads (No ANRs)
 
 ### Editor Integration
 - **Live scene deployment** over TCP/IP
@@ -129,8 +131,11 @@ adb shell am start -n com.stfsc.engine/android.app.NativeActivity
 
 ## 🗺️ Roadmap
 
-### v0.2 (Planned)
-- [ ] Dynamic lighting system
+### v0.2 (Alpha Test)
+- [x] Dynamic lighting system
+- [x] Parallel Resource Loading
+
+### v0.2.5 (Planned)
 - [ ] Occlusion culling
 - [ ] Compressed texture streaming (KTX2/ASTC)
 - [ ] Audio system integration
@@ -150,7 +155,7 @@ adb shell am start -n com.stfsc.engine/android.app.NativeActivity
 
 ## 🤝 Philosophy
 
-**Steal this fuckiing source code.** Seriously.
+**Steal this fucking source code.** Seriously.
 
 If you're building a game and struggling with VR performance, take what you need. Learn from it. Improve on it. The goal isn't to hoard knowledge—it's to prove that **optimized, ambitious games are possible on mobile VR**.
 
@@ -162,7 +167,7 @@ STFSC is open because optimization knowledge shouldn't be gatekept.
 
 ## ⚠️ Alpha Disclaimer
 
-This is **v0.1 Alpha Test** software. Expect:
+This is **v0.2 Alpha Test** software. Expect:
 - Incomplete features
 - API changes
 - The occasional crash

@@ -6,6 +6,9 @@ use openxr as xr;
 use glam;
 use std::ptr;
 
+pub mod occlusion;
+pub mod texture_streaming;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Texture {
     pub image: vk::Image,
@@ -55,6 +58,9 @@ pub struct GraphicsContext {
     pub shadow_framebuffer: vk::Framebuffer,
     pub shadow_sampler: vk::Sampler,
     pub shadow_extent: vk::Extent2D,
+    
+    // Thread safety for queue submission
+    pub queue_mutex: std::sync::Mutex<()>,
 }
 
 impl GraphicsContext {
@@ -228,9 +234,7 @@ impl GraphicsContext {
             
         let render_pass = unsafe { device.create_render_pass(&render_pass_create_info, None)? };
 
-        // 8.5 Create Descriptor Set Layouts
-        
-        // Global Set (Set 0): Shadows, maybe EnvMap later
+        // Global Set (Set 0): Shadows, Instance Buffer, Light UBO
         let global_bindings = [
              vk::DescriptorSetLayoutBinding::builder()
                 .binding(0)
@@ -243,6 +247,13 @@ impl GraphicsContext {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .build(),
+             // Light Uniform Buffer for dynamic lighting
+             vk::DescriptorSetLayoutBinding::builder()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
                 .build(),
         ];
         let global_layout_info = vk::DescriptorSetLayoutCreateInfo::builder()
@@ -285,6 +296,10 @@ impl GraphicsContext {
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 descriptor_count: 100,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 10, // For light UBO
             }
         ];
         
@@ -531,7 +546,16 @@ impl GraphicsContext {
             shadow_framebuffer,
             shadow_sampler,
             shadow_extent,
+            queue_mutex: std::sync::Mutex::new(()),
         })
+    }
+
+    /// Create a new command pool (useful for creating thread-local pools)
+    pub fn create_command_pool(&self) -> Result<vk::CommandPool> {
+        let pool_create_info = vk::CommandPoolCreateInfo::builder()
+            .queue_family_index(self.queue_family_index)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        unsafe { self.device.create_command_pool(&pool_create_info, None).map_err(Into::into) }
     }
 
     fn find_depth_format(instance: &Instance, physical_device: vk::PhysicalDevice) -> Result<vk::Format> {
@@ -636,6 +660,8 @@ impl GraphicsContext {
     }
 
     pub fn begin_single_time_commands(&self) -> Result<vk::CommandBuffer> {
+        let _lock = self.queue_mutex.lock().unwrap();
+        
         let alloc_info = vk::CommandBufferAllocateInfo::builder()
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_pool(self.command_pool)
@@ -658,10 +684,13 @@ impl GraphicsContext {
         let submit_info = vk::SubmitInfo::builder()
             .command_buffers(&command_buffers);
             
-        unsafe {
-            self.device.queue_submit(self.queue, &[submit_info.build()], vk::Fence::null())?;
-            self.device.queue_wait_idle(self.queue)?;
-            self.device.free_command_buffers(self.command_pool, &command_buffers);
+        {
+            let _lock = self.queue_mutex.lock().unwrap();
+            unsafe {
+                self.device.queue_submit(self.queue, &[submit_info.build()], vk::Fence::null())?;
+                self.device.queue_wait_idle(self.queue)?;
+                self.device.free_command_buffers(self.command_pool, &command_buffers);
+            }
         }
         
         Ok(())
@@ -1110,7 +1139,7 @@ impl GraphicsContext {
         })
     }
 
-    pub fn create_global_descriptor_set(&self, shadow_view: vk::ImageView, shadow_sampler: vk::Sampler, instance_buffer: vk::Buffer) -> Result<vk::DescriptorSet> {
+    pub fn create_global_descriptor_set(&self, shadow_view: vk::ImageView, shadow_sampler: vk::Sampler, instance_buffer: vk::Buffer, light_buffer: vk::Buffer) -> Result<vk::DescriptorSet> {
         let layouts = [self.global_set_layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::builder()
             .descriptor_pool(self.descriptor_pool)
@@ -1123,8 +1152,13 @@ impl GraphicsContext {
             .image_view(shadow_view)
             .sampler(shadow_sampler);
 
-        let buffer_info = vk::DescriptorBufferInfo::builder()
+        let instance_buffer_info = vk::DescriptorBufferInfo::builder()
             .buffer(instance_buffer)
+            .offset(0)
+            .range(vk::WHOLE_SIZE);
+
+        let light_buffer_info = vk::DescriptorBufferInfo::builder()
+            .buffer(light_buffer)
             .offset(0)
             .range(vk::WHOLE_SIZE);
 
@@ -1141,7 +1175,14 @@ impl GraphicsContext {
                 .dst_binding(1)
                 .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(std::slice::from_ref(&buffer_info))
+                .buffer_info(std::slice::from_ref(&instance_buffer_info))
+                .build(),
+            vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(2)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(std::slice::from_ref(&light_buffer_info))
                 .build(),
         ];
 

@@ -1,7 +1,7 @@
 use eframe::egui;
 use std::net::TcpStream;
 use std::io::Write;
-use stfsc_engine::world::{SceneUpdate, Mesh, Vertex};
+use stfsc_engine::world::{SceneUpdate, Mesh, Vertex, LightType};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::path::PathBuf;
@@ -142,7 +142,13 @@ enum EntityType {
     Primitive(PrimitiveType),
     Mesh { path: String },
     Vehicle, CrowdAgent { state: String, speed: f32 }, Building { height: f32 }, Ground, Camera,
+    /// Dynamic light source
+    Light { light_type: LightTypeEditor, intensity: f32, range: f32, color: [f32; 3] },
 }
+
+/// Light types for editor
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+enum LightTypeEditor { Point, Spot, Directional }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct Scene { name: String, version: String, entities: Vec<SceneEntity> }
@@ -246,31 +252,53 @@ impl EditorApp {
     }
     
     fn deploy_entity_to_quest(&self, entity: &SceneEntity) {
-        if let EntityType::Camera = entity.entity_type {
-            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetPlayerStart {
-                position: entity.position, rotation: entity.rotation,
-            }));
-        } else {
-            let color = entity.material.albedo_color;
-            let primitive = match &entity.entity_type {
-                EntityType::Primitive(p) => match p {
-                    PrimitiveType::Cube => 0,
-                    PrimitiveType::Sphere => 1,
-                    PrimitiveType::Cylinder => 2,
-                    PrimitiveType::Plane => 3,
-                    PrimitiveType::Capsule => 4,
-                    PrimitiveType::Cone => 5,
-                },
-                EntityType::Ground => 0, // Use Cube for ground
-                EntityType::Vehicle => 0, // Use Cube for vehicle body
-                EntityType::Building { .. } => 0, // Use Cube for buildings
-                EntityType::CrowdAgent { .. } => 4, // Use Capsule for agents
-                _ => 0, // Default to Cube
-            };
-            
-            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::Spawn {
-                id: entity.id, primitive, position: entity.position, rotation: entity.rotation, color,
-            }));
+        match &entity.entity_type {
+            EntityType::Camera => {
+                let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetPlayerStart {
+                    position: entity.position, rotation: entity.rotation,
+                }));
+            }
+            EntityType::Light { light_type, intensity, range, color } => {
+                // Convert editor light type to engine light type
+                let engine_light_type = match light_type {
+                    LightTypeEditor::Point => LightType::Point,
+                    LightTypeEditor::Spot => LightType::Spot,
+                    LightTypeEditor::Directional => LightType::Directional,
+                };
+                let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SpawnLight {
+                    id: entity.id,
+                    light_type: engine_light_type,
+                    position: entity.position,
+                    direction: [0.0, -1.0, 0.0], // Default down direction
+                    color: *color,
+                    intensity: *intensity,
+                    range: *range,
+                    inner_cone: 0.4,
+                    outer_cone: 0.6,
+                }));
+            }
+            _ => {
+                let color = entity.material.albedo_color;
+                let primitive = match &entity.entity_type {
+                    EntityType::Primitive(p) => match p {
+                        PrimitiveType::Cube => 0,
+                        PrimitiveType::Sphere => 1,
+                        PrimitiveType::Cylinder => 2,
+                        PrimitiveType::Plane => 3,
+                        PrimitiveType::Capsule => 4,
+                        PrimitiveType::Cone => 5,
+                    },
+                    EntityType::Ground => 0, // Use Cube for ground
+                    EntityType::Vehicle => 0, // Use Cube for vehicle body
+                    EntityType::Building { .. } => 0, // Use Cube for buildings
+                    EntityType::CrowdAgent { .. } => 4, // Use Capsule for agents
+                    _ => 0, // Default to Cube
+                };
+                
+                let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::Spawn {
+                    id: entity.id, primitive, position: entity.position, rotation: entity.rotation, color,
+                }));
+            }
         }
     }
     
@@ -590,6 +618,44 @@ impl eframe::App for EditorApp {
                         }
                         ui.close_menu();
                     }
+                    ui.separator();
+                    ui.label("💡 Lights");
+                    if ui.button("💡 Point Light").clicked() {
+                        if let Some(scene) = &mut self.current_scene {
+                            let id = scene.entities.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+                            scene.entities.push(SceneEntity {
+                                id, name: format!("Point Light {}", id), position: [0.0, 5.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], scale: [0.5, 0.5, 0.5],
+                                entity_type: EntityType::Light { light_type: LightTypeEditor::Point, intensity: 5.0, range: 20.0, color: [1.0, 1.0, 0.9] },
+                                material: Material { albedo_color: [1.0, 1.0, 0.5], ..Default::default() }, deployed: false,
+                            });
+                            self.selected_entity_id = Some(id);
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("🔦 Spot Light").clicked() {
+                        if let Some(scene) = &mut self.current_scene {
+                            let id = scene.entities.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+                            scene.entities.push(SceneEntity {
+                                id, name: format!("Spot Light {}", id), position: [0.0, 10.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], scale: [0.5, 0.5, 0.5],
+                                entity_type: EntityType::Light { light_type: LightTypeEditor::Spot, intensity: 10.0, range: 30.0, color: [1.0, 1.0, 1.0] },
+                                material: Material { albedo_color: [1.0, 0.8, 0.3], ..Default::default() }, deployed: false,
+                            });
+                            self.selected_entity_id = Some(id);
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("☀️ Directional Light").clicked() {
+                        if let Some(scene) = &mut self.current_scene {
+                            let id = scene.entities.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+                            scene.entities.push(SceneEntity {
+                                id, name: format!("Sun Light {}", id), position: [50.0, 100.0, 50.0], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0, 1.0, 1.0],
+                                entity_type: EntityType::Light { light_type: LightTypeEditor::Directional, intensity: 3.0, range: 1000.0, color: [1.0, 0.95, 0.8] },
+                                material: Material { albedo_color: [1.0, 0.9, 0.5], ..Default::default() }, deployed: false,
+                            });
+                            self.selected_entity_id = Some(id);
+                        }
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Scene", |ui| {
                     if ui.button("🚀 Deploy All to Quest").clicked() {
@@ -734,6 +800,28 @@ impl eframe::App for EditorApp {
                             }
                             EntityType::Primitive(p) => { ui.label(format!("{} {}", p.icon(), p.name())); }
                             EntityType::Camera => { ui.label("🎥 Player Start"); }
+                            EntityType::Light { light_type, intensity, range, color } => {
+                                let icon = match light_type {
+                                    LightTypeEditor::Point => "💡",
+                                    LightTypeEditor::Spot => "🔦",
+                                    LightTypeEditor::Directional => "☀️",
+                                };
+                                ui.label(format!("{} {:?} Light", icon, light_type));
+                                ui.add(egui::Slider::new(intensity, 0.1..=50.0).text("Intensity"));
+                                ui.add(egui::Slider::new(range, 1.0..=100.0).text("Range"));
+                                ui.horizontal(|ui| {
+                                    ui.label("Color:");
+                                    let mut c = egui::Color32::from_rgb(
+                                        (color[0] * 255.0) as u8,
+                                        (color[1] * 255.0) as u8,
+                                        (color[2] * 255.0) as u8);
+                                    if ui.color_edit_button_srgba(&mut c).changed() {
+                                        color[0] = c.r() as f32 / 255.0;
+                                        color[1] = c.g() as f32 / 255.0;
+                                        color[2] = c.b() as f32 / 255.0;
+                                    }
+                                });
+                            }
                             _ => {}
                         }
                         
@@ -795,6 +883,11 @@ impl eframe::App for EditorApp {
                                 EntityType::Vehicle => "🚗", EntityType::CrowdAgent {..} => "🚶",
                                 EntityType::Building {..} => "🏢", EntityType::Ground => "🌍", EntityType::Mesh {..} => "📦",
                                 EntityType::Camera => "🎥",
+                                EntityType::Light { light_type, .. } => match light_type {
+                                    LightTypeEditor::Point => "💡",
+                                    LightTypeEditor::Spot => "🔦",
+                                    LightTypeEditor::Directional => "☀️",
+                                },
                             };
                             let deployed = if entity.deployed { "✓" } else { "" };
                             if ui.selectable_label(self.selected_entity_id == Some(entity.id), 

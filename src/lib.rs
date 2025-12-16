@@ -3,6 +3,7 @@ use android_activity::{AndroidApp, MainEvent, PollEvent};
 use log::{info, error, debug};
 use std::sync::{Arc, RwLock};
 use std::collections::HashMap; // Added HashMap
+use hecs::Entity;
 #[cfg(target_os = "android")]
 use openxr as oxr;
 #[cfg(target_os = "android")]
@@ -18,6 +19,15 @@ mod physics;
 pub mod world;
 #[cfg(target_os = "android")]
 mod xr;
+#[cfg(target_os = "android")]
+mod lighting;
+#[cfg(target_os = "android")]
+pub mod audio;
+#[cfg(target_os = "android")]
+pub mod resource_loader;
+
+#[cfg(target_os = "android")]
+use resource_loader::ResourceLoader;
 
 #[cfg(target_os = "android")]
 use graphics::GraphicsContext;
@@ -160,7 +170,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
     };
 
     let graphics_context = match GraphicsContext::new(&xr_instance, xr_system) {
-        Ok(ctx) => ctx,
+        Ok(ctx) => Arc::new(ctx),
         Err(e) => {
             error!("Failed to create Graphics Context: {:?}", e);
             return;
@@ -207,10 +217,42 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
              }
         }
     };
+    
+    // Create Light Uniform Buffer for dynamic lighting
+    let light_buffer_size = std::mem::size_of::<lighting::LightUBO>() as u64;
+    let (light_buffer, light_memory) = match graphics_context.create_buffer(
+        light_buffer_size,
+        vk::BufferUsageFlags::UNIFORM_BUFFER,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+    ) {
+        Ok(ret) => ret,
+        Err(e) => {
+             error!("Failed to create light buffer: {:?}", e);
+             return;
+        }
+    };
+    
+    let light_ptr = unsafe {
+        match graphics_context.device.map_memory(light_memory, 0, light_buffer_size, vk::MemoryMapFlags::empty()) {
+             Ok(ptr) => ptr as *mut lighting::LightUBO,
+             Err(e) => {
+                 error!("Failed to map light buffer: {:?}", e);
+                 return;
+             }
+        }
+    };
+    
+    // Initialize light UBO with defaults
+    unsafe {
+        *light_ptr = lighting::LightUBO::default();
+    }
+    info!("Created light buffer for {} lights", lighting::MAX_LIGHTS);
+    
     let global_descriptor_set = match graphics_context.create_global_descriptor_set(
         graphics_context.shadow_depth_view,
         graphics_context.shadow_sampler,
-        instance_buffer
+        instance_buffer,
+        light_buffer
         ) {
         Ok(set) => set,
         Err(e) => {
@@ -231,8 +273,12 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
         }
     };
 
+    // Initialize Resource Loader
+    let resource_loader = ResourceLoader::new(graphics_context.clone());
+
     // Initialize Mesh Library
     let mut mesh_library: Vec<GpuMesh> = Vec::new();
+    let mut pending_uploads: std::collections::HashSet<Entity> = std::collections::HashSet::new();
     
     // Create primitives (0=Cube, 1=Sphere, 2=Cylinder, 3=Plane, 4=Capsule, 5=Cone)
     // Create primitives (0=Cube, 1=Sphere, 2=Cylinder, 3=Plane, 4=Capsule, 5=Cone)
@@ -743,6 +789,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
     let mut cached_player_position = glam::Vec3::ZERO;
     let mut cached_batch_map: HashMap<usize, Vec<InstanceData>> = HashMap::new();
     let mut cached_custom_draws: Vec<(GpuMesh, InstanceData)> = Vec::new();
+    let mut cached_light_ubo: lighting::LightUBO = lighting::LightUBO::default();
 
     while !quit {
         let timeout = if session_running {
@@ -832,136 +879,64 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             // physics_world.step();
             // game_world.update_streaming();
 
-            // Mesh Upload Logic (non-blocking to prevent ANR)
-            // Limit uploads per frame to avoid stalling the render thread
-            const MAX_MESH_UPLOADS_PER_FRAME: usize = 1; // Strict limit to prevent ANR
-            if let Ok(mut state) = game_state.try_write() {
-                let mut meshes_to_upload = Vec::new();
-                
-                for (id, (mesh, _transform)) in state.world.ecs.query::<(&world::Mesh, &world::Transform)>().iter() {
-                    if meshes_to_upload.len() >= MAX_MESH_UPLOADS_PER_FRAME {
-                        break; // Throttle: defer remaining uploads to next frame
-                    }
+            // Mesh Upload Logic (Background Thread)
+            // 1. Queue new meshes for upload
+            if let Ok(state) = game_state.try_read() {
+                for (id, (mesh, _)) in state.world.ecs.query::<(&world::Mesh, &world::Transform)>().iter() {
                     if state.world.ecs.get::<&GpuMesh>(id).is_ok() {
                         continue;
                     }
-                    meshes_to_upload.push((id, mesh.clone()));
+                    if pending_uploads.contains(&id) {
+                        continue;
+                    }
+                    
+                    // Queue for upload
+                    resource_loader.queue_upload(id, mesh.clone());
+                    pending_uploads.insert(id);
+                    
+                    // Limit queue rate? For now, queue all.
                 }
+            }
 
-                for (id, mesh) in meshes_to_upload {
-                    let (vbo, vbo_mem) = unsafe {
-                        graphics_context.create_buffer(
-                            (mesh.vertices.len() * std::mem::size_of::<world::Vertex>()) as vk::DeviceSize,
-                            vk::BufferUsageFlags::VERTEX_BUFFER,
-                            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                        ).expect("Failed to create vertex buffer")
-                    };
+            // 2. Process finished uploads
+            for (id, loaded_data) in resource_loader.poll_processed() {
+                 pending_uploads.remove(&id);
+                 
+                 // Create Material Descriptor Set
+                 let albedo_ref = loaded_data.albedo_texture.as_ref().unwrap_or(&albedo_tex);
+                 
+                 let material_descriptor_set = match graphics_context.create_material_descriptor_set(
+                    albedo_ref,
+                    &normal_tex,
+                    &mr_tex
+                 ) {
+                     Ok(set) => set,
+                     Err(e) => {
+                         error!("Failed to create descriptor set for loaded mesh: {:?}", e);
+                         continue; 
+                     }
+                 };
+                 
+                 let mut custom_textures = Vec::new();
+                 if let Some(tex) = loaded_data.albedo_texture {
+                     custom_textures.push(tex);
+                 }
 
-                    unsafe {
-                        let data_ptr = graphics_context.device.map_memory(
-                            vbo_mem,
-                            0,
-                            (mesh.vertices.len() * std::mem::size_of::<world::Vertex>()) as vk::DeviceSize,
-                            vk::MemoryMapFlags::empty(),
-                        ).expect("Failed to map vertex buffer");
-                        std::ptr::copy_nonoverlapping(
-                            mesh.vertices.as_ptr(),
-                            data_ptr as *mut world::Vertex,
-                            mesh.vertices.len(),
-                        );
-                        graphics_context.device.unmap_memory(vbo_mem);
-                    }
+                 let gpu_mesh = GpuMesh {
+                     vertex_buffer: loaded_data.vertex_buffer,
+                     vertex_memory: loaded_data.vertex_memory,
+                     index_buffer: loaded_data.index_buffer,
+                     index_memory: loaded_data.index_memory,
+                     index_count: loaded_data.index_count,
+                     material_descriptor_set,
+                     custom_textures,
+                 };
 
-                    let (ibo, ibo_mem) = unsafe {
-                        graphics_context.create_buffer(
-                            (mesh.indices.len() * std::mem::size_of::<u32>()) as vk::DeviceSize,
-                            vk::BufferUsageFlags::INDEX_BUFFER,
-                            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                        ).expect("Failed to create index buffer")
-                    };
-
-                    unsafe {
-                        let data_ptr = graphics_context.device.map_memory(
-                            ibo_mem,
-                            0,
-                            (mesh.indices.len() * std::mem::size_of::<u32>()) as vk::DeviceSize,
-                            vk::MemoryMapFlags::empty(),
-                        ).expect("Failed to map index buffer");
-                        std::ptr::copy_nonoverlapping(
-                            mesh.indices.as_ptr(),
-                            data_ptr as *mut u32,
-                            mesh.indices.len(),
-                        );
-                        graphics_context.device.unmap_memory(ibo_mem);
-                    }
-
-                        let mut custom_textures = Vec::new();
-                        
-                        // Helper to load texture or use default
-                        // We need to handle potential errors gracefully or just log and use default
-                        
-                        // Retry strategy: Create all 3 optionals first.
-                        let mut tex_albedo_opt = None;
-                        let mut tex_normal_opt = None;
-                        let mut tex_mr_opt = None;
-                        
-                        // Only use pre-decoded textures (decoded on network thread to avoid ANR)
-                        if let Some(decoded) = &mesh.decoded_albedo {
-                             if let Ok(tex) = graphics_context.create_texture_from_raw(decoded.width, decoded.height, &decoded.data) {
-                                 tex_albedo_opt = Some(tex);
-                             }
-                        }
-                        
-                        if let Some(decoded) = &mesh.decoded_normal {
-                             if let Ok(tex) = graphics_context.create_texture_from_raw(decoded.width, decoded.height, &decoded.data) {
-                                 tex_normal_opt = Some(tex);
-                             }
-                        }
-                        
-                        if let Some(decoded) = &mesh.decoded_mr {
-                             if let Ok(tex) = graphics_context.create_texture_from_raw(decoded.width, decoded.height, &decoded.data) {
-                                 tex_mr_opt = Some(tex);
-                             }
-                        }
-                        
-                        let final_albedo = tex_albedo_opt.as_ref().unwrap_or(&albedo_tex);
-                        let final_normal = tex_normal_opt.as_ref().unwrap_or(&normal_tex);
-                        let final_mr = tex_mr_opt.as_ref().unwrap_or(&mr_tex);
-                        
-                        // Decide if we need a new descriptor set
-                        let final_descriptor_set = if tex_albedo_opt.is_some() || tex_normal_opt.is_some() || tex_mr_opt.is_some() {
-                             match graphics_context.create_material_descriptor_set(final_albedo, final_normal, final_mr) {
-                                 Ok(set) => set,
-                                 Err(e) => {
-                                     error!("Failed to create custom descriptor set: {:?}", e);
-                                     material_descriptor_set // Fallback
-                                 }
-                             }
-                        } else {
-                            material_descriptor_set
-                        };
-                        
-                        // Move ownership to vector for GpuMesh
-                        if let Some(t) = tex_albedo_opt { custom_textures.push(t); }
-                        if let Some(t) = tex_normal_opt { custom_textures.push(t); }
-                        if let Some(t) = tex_mr_opt { custom_textures.push(t); }
-
-                        let gpu_mesh = GpuMesh {
-                        vertex_buffer: vbo,
-                        vertex_memory: vbo_mem,
-                        index_buffer: ibo,
-                        index_memory: ibo_mem,
-                        index_count: mesh.indices.len() as u32,
-                        material_descriptor_set: final_descriptor_set,
-                        custom_textures,
-                    };
-
-                    if let Err(e) = state.world.ecs.insert_one(id, gpu_mesh) {
-                        error!("Failed to insert GpuMesh for entity {:?}: {:?}", id, e);
-                    } else {
-                        info!("Uploaded mesh for entity {:?}", id);
-                    }
-                }
+                 // Add to ECS
+                 if let Ok(mut state) = game_state.write() {
+                     let _ = state.world.ecs.insert_one(id, gpu_mesh);
+                     info!("Uploaded mesh for entity {:?}", id);
+                 }
             }
 
             // Yield before blocking OpenXR call to reduce lock contention
@@ -1030,8 +1005,13 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                 // Record Command Buffer
                                 unsafe {
                                     let _ = graphics_context.device.reset_command_buffer(graphics_context.command_buffer, vk::CommandBufferResetFlags::empty());
-                                    let begin_info = vk::CommandBufferBeginInfo::builder().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-                                    let _ = graphics_context.device.begin_command_buffer(graphics_context.command_buffer, &begin_info);
+                                    // Begin Command Buffer
+                                    let begin_info = vk::CommandBufferBeginInfo::builder()
+                                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+                                    {
+                                        let _lock = graphics_context.queue_mutex.lock().unwrap();
+                                        graphics_context.device.begin_command_buffer(graphics_context.command_buffer, &begin_info).unwrap();
+                                    }
 
                                     // --- 1. Prepare Instance Data ---
                                     let mut batch_map: HashMap<usize, Vec<InstanceData>> = HashMap::new();
@@ -1043,6 +1023,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                         
                                         // 1. Collect Regular Instance Meshes (MeshHandle)
                                         for (id, (handle, transform)) in state.world.ecs.query::<(&world::MeshHandle, &world::Transform)>().iter() {
+                                            
                                             let model = glam::Mat4::from_scale_rotation_translation(transform.scale, transform.rotation, transform.position);
                                             let entity_id = id.id() as u64; 
                                             let prev_model = *prev_transforms.get(&entity_id).unwrap_or(&model);
@@ -1108,16 +1089,57 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                                 [1.0, 1.0, 1.0, 1.0]
                                             };
                                             
-                                            custom_draws.push((gpu_mesh.clone(), InstanceData { model, prev_model, color }));
+                                        custom_draws.push((gpu_mesh.clone(), InstanceData { model, prev_model, color }));
+                                        }
+                                        
+                                        // 4. Collect Dynamic Lights
+                                        let mut light_ubo = lighting::LightUBO::new();
+                                        for (_id, (light, transform)) in state.world.ecs.query::<(&world::LightComponent, &world::Transform)>().iter() {
+                                            // Calculate direction from rotation
+                                            let direction = transform.rotation * glam::Vec3::NEG_Z;
+                                            
+                                            let gpu_light = lighting::GpuLightData::from_light(
+                                                &lighting::Light {
+                                                    light_type: match light.light_type {
+                                                        world::LightType::Point => lighting::LightType::Point,
+                                                        world::LightType::Spot => lighting::LightType::Spot,
+                                                        world::LightType::Directional => lighting::LightType::Directional,
+                                                    },
+                                                    color: glam::Vec3::from_array(light.color),
+                                                    intensity: light.intensity,
+                                                    range: light.range,
+                                                    inner_cone_angle: light.inner_cone_angle,
+                                                    outer_cone_angle: light.outer_cone_angle,
+                                                    cast_shadows: light.cast_shadows,
+                                                },
+                                                transform.position,
+                                                direction,
+                                                -1, // No shadow index for now
+                                            );
+                                            
+                                            if !light_ubo.add_light(gpu_light) {
+                                                // Maximum lights reached
+                                                break;
+                                            }
+                                        }
+                                        
+                                        // Update light buffer on GPU
+                                        unsafe {
+                                            *light_ptr = light_ubo;
                                         }
                                         
                                         // Update cache for next potential lock failure
                                         cached_batch_map = batch_map.clone();
                                         cached_custom_draws = custom_draws.clone();
+                                        cached_light_ubo = light_ubo;
                                     } else {
                                         // Lock failed (likely TREX stall) - use cached data to prevent flicker
                                         batch_map = cached_batch_map.clone();
                                         custom_draws = cached_custom_draws.clone();
+                                        // Also restore cached light UBO to GPU to prevent lighting flicker
+                                        unsafe {
+                                            *light_ptr = cached_light_ubo;
+                                        }
                                     }
 
                                     // Upload to Instance Buffer
@@ -1156,7 +1178,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                     
                                     // Flush instance buffer (if not HOST_COHERENT, but we used HOST_COHERENT)
 
-                                    // Light Data - Shadow frustum follows player position (uses cached position if lock failed earlier)
+                                    // Light Data - Shadow frustum follows player position
                                     let shadow_center = cached_player_position;
                                     let light_offset = glam::Vec3::new(20.0, 50.0, 20.0);
                                     let light_pos = shadow_center + light_offset;
@@ -1331,8 +1353,16 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                     let cmd_buffers = [graphics_context.command_buffer];
                                     let submit_info = vk::SubmitInfo::builder().command_buffers(&cmd_buffers);
                                     let _ = graphics_context.device.reset_fences(&[graphics_context.fence]);
-                                    let _ = graphics_context.device.queue_submit(graphics_context.queue, &[submit_info.build()], graphics_context.fence);
-                                    let _ = graphics_context.device.wait_for_fences(&[graphics_context.fence], true, 50_000_000); // 50ms timeout to prevent ANR
+                                    
+                                    {
+                                        let _lock = graphics_context.queue_mutex.lock().unwrap();
+                                        let _ = graphics_context.device.queue_submit(graphics_context.queue, &[submit_info.build()], graphics_context.fence);
+                                    }
+                                    
+                                    
+                                    if let Err(e) = graphics_context.device.wait_for_fences(&[graphics_context.fence], true, 100_000_000) {
+                                        error!("Fence wait failed/timed out: {:?}", e);
+                                    }
                                 }
 
                                 // info!("Calling swapchain.release_image");

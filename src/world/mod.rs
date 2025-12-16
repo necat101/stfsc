@@ -117,6 +117,111 @@ pub struct CrowdAgent {
     pub max_speed: f32,      // Speed varies by state
 }
 
+/// Light types for dynamic lighting
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[repr(u8)]
+pub enum LightType {
+    Point = 0,
+    Spot = 1,
+    Directional = 2,
+}
+
+impl Default for LightType {
+    fn default() -> Self {
+        LightType::Point
+    }
+}
+
+/// ECS Component for dynamic lights
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct LightComponent {
+    pub light_type: LightType,
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub range: f32,              // Attenuation distance (Point/Spot)
+    pub inner_cone_angle: f32,   // Spot light inner cone (radians)
+    pub outer_cone_angle: f32,   // Spot light outer cone (radians)
+    pub cast_shadows: bool,
+}
+
+impl Default for LightComponent {
+    fn default() -> Self {
+        Self {
+            light_type: LightType::Point,
+            color: [1.0, 1.0, 1.0],
+            intensity: 1.0,
+            range: 10.0,
+            inner_cone_angle: 0.4,
+            outer_cone_angle: 0.6,
+            cast_shadows: false,
+        }
+    }
+}
+
+impl LightComponent {
+    /// Create a point light
+    pub fn point(color: [f32; 3], intensity: f32, range: f32) -> Self {
+        Self {
+            light_type: LightType::Point,
+            color,
+            intensity,
+            range,
+            ..Default::default()
+        }
+    }
+
+    /// Create a spot light
+    pub fn spot(color: [f32; 3], intensity: f32, range: f32, inner_angle: f32, outer_angle: f32) -> Self {
+        Self {
+            light_type: LightType::Spot,
+            color,
+            intensity,
+            range,
+            inner_cone_angle: inner_angle,
+            outer_cone_angle: outer_angle,
+            ..Default::default()
+        }
+    }
+
+    /// Create a directional light
+    pub fn directional(color: [f32; 3], intensity: f32) -> Self {
+        Self {
+            light_type: LightType::Directional,
+            color,
+            intensity,
+            range: f32::MAX,
+            ..Default::default()
+        }
+    }
+}
+
+/// ECS Component for 3D audio sources
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AudioSource {
+    /// Sound file path or identifier
+    pub sound_id: String,
+    /// Volume (0.0 to 1.0)
+    pub volume: f32,
+    /// Whether to loop
+    pub looping: bool,
+    /// Max audible distance
+    pub max_distance: f32,
+    /// Whether currently playing
+    pub playing: bool,
+}
+
+impl Default for AudioSource {
+    fn default() -> Self {
+        Self {
+            sound_id: String::new(),
+            volume: 1.0,
+            looping: false,
+            max_distance: 50.0,
+            playing: false,
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub enum SceneUpdate {
     Spawn { id: u32, primitive: u8, position: [f32; 3], rotation: [f32; 4], color: [f32; 3] },
@@ -127,6 +232,36 @@ pub enum SceneUpdate {
     /// Toggle procedural generation on/off (off by default)
     SetProceduralGeneration { enabled: bool },
     SetPlayerStart { position: [f32; 3], rotation: [f32; 4] },
+    /// Spawn a dynamic light
+    SpawnLight { 
+        id: u32, 
+        light_type: LightType, 
+        position: [f32; 3], 
+        direction: [f32; 3],  // For spot/directional
+        color: [f32; 3], 
+        intensity: f32, 
+        range: f32,
+        inner_cone: f32,
+        outer_cone: f32,
+    },
+    /// Update an existing light's properties
+    UpdateLight { 
+        id: u32, 
+        color: Option<[f32; 3]>, 
+        intensity: Option<f32>,
+        range: Option<f32>,
+    },
+    /// Spawn a 3D sound at a position
+    SpawnSound {
+        id: u32,
+        sound_id: String,
+        position: [f32; 3],
+        volume: f32,
+        looping: bool,
+        max_distance: f32,
+    },
+    /// Stop a playing sound
+    StopSound { id: u32 },
 }
 
 impl GameWorld {
@@ -273,6 +408,91 @@ impl GameWorld {
                     self.player_start_transform.position = glam::Vec3::from(position);
                     self.player_start_transform.rotation = glam::Quat::from_array(rotation);
                     info!("Player start set to: pos={:?}, rot={:?}", position, rotation);
+                }
+                SceneUpdate::SpawnLight { id, light_type, position, direction, color, intensity, range, inner_cone, outer_cone } => {
+                    // Create a light entity with transform and light component
+                    let light_component = LightComponent {
+                        light_type,
+                        color,
+                        intensity,
+                        range,
+                        inner_cone_angle: inner_cone,
+                        outer_cone_angle: outer_cone,
+                        cast_shadows: false,
+                    };
+                    
+                    // Calculate rotation from direction for spot/directional lights
+                    let rotation = if direction[0].abs() > 0.001 || direction[1].abs() > 0.001 || direction[2].abs() > 0.001 {
+                        let dir = glam::Vec3::from(direction).normalize();
+                        // Rotation from default forward (-Z) to target direction
+                        glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, dir)
+                    } else {
+                        glam::Quat::IDENTITY
+                    };
+                    
+                    self.ecs.spawn((
+                        EditorEntityId(id),
+                        Transform {
+                            position: glam::Vec3::from(position),
+                            rotation,
+                            scale: glam::Vec3::ONE,
+                        },
+                        light_component,
+                    ));
+                    info!("Spawned {} light with EditorEntityId({}), color={:?}, intensity={}", 
+                          match light_type {
+                              LightType::Point => "Point",
+                              LightType::Spot => "Spot", 
+                              LightType::Directional => "Directional"
+                          }, id, color, intensity);
+                }
+                SceneUpdate::UpdateLight { id, color, intensity, range } => {
+                    // Find entity by EditorEntityId and update light properties
+                    for (_entity, (editor_id, light)) in self.ecs.query_mut::<(&EditorEntityId, &mut LightComponent)>() {
+                        if editor_id.0 == id {
+                            if let Some(c) = color {
+                                light.color = c;
+                            }
+                            if let Some(i) = intensity {
+                                light.intensity = i;
+                            }
+                            if let Some(r) = range {
+                                light.range = r;
+                            }
+                            info!("Updated light {} properties", id);
+                            break;
+                        }
+                    }
+                }
+                SceneUpdate::SpawnSound { id, sound_id, position, volume, looping, max_distance } => {
+                    let audio_source = AudioSource {
+                        sound_id: sound_id.clone(),
+                        volume,
+                        looping,
+                        max_distance,
+                        playing: true,
+                    };
+                    
+                    self.ecs.spawn((
+                        EditorEntityId(id),
+                        Transform {
+                            position: glam::Vec3::from(position),
+                            rotation: glam::Quat::IDENTITY,
+                            scale: glam::Vec3::ONE,
+                        },
+                        audio_source,
+                    ));
+                    info!("Spawned audio source with EditorEntityId({}), sound={}", id, sound_id);
+                }
+                SceneUpdate::StopSound { id } => {
+                    // Find entity by EditorEntityId and stop the sound
+                    for (_entity, (editor_id, audio)) in self.ecs.query_mut::<(&EditorEntityId, &mut AudioSource)>() {
+                        if editor_id.0 == id {
+                            audio.playing = false;
+                            info!("Stopped sound {}", id);
+                            break;
+                        }
+                    }
                 }
             }
         }
