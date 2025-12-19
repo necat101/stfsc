@@ -117,6 +117,16 @@ adb shell am start -n com.stfsc.engine/android.app.NativeActivity
 
 ---
 
+ADDED LINUX BUILD TARGET FOR TESTING SINCE MY QUEST CABLE BROKE AND IM BUYING A NEW ONE TOMORROW OR THE DAY AFTER WHENEVER I CAN!
+
+linux build:
+```bash
+cargo run
+```
+
+thats it for the linux client build!
+
+
 ## 📊 Performance Targets
 
 | Metric | Target | Status |
@@ -186,5 +196,5 @@ This project is provided as-is for educational and development purposes. See ind
 </p>
 
 <p align="center">
-  <strong>STFSC Engine</strong> — <em>Steal This F***ing Source Code</em>
+  <strong>STFSC Engine</strong> — <em>Steal This Fucking Source Code</em>
 </p>
