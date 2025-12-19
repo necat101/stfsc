@@ -1,0 +1,5 @@
+error: no bin target named `main`.
+Available bin targets:
+    editor
+    stfsc_engine
+

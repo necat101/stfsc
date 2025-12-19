@@ -1,0 +1,43 @@
+warning: variable does not need to be mutable
+   --> src/world/mod.rs:708:18
+    |
+708 | ...t (mut script, m...
+    |       ----^^^^^^
+    |       |
+    |       help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: field `buffer_handle` is never read
+   --> src/audio/mod.rs:162:5
+    |
+161 | struct ActiveSourc...
+    |        ------------ field in this struct
+162 |     buffer_handle: Aud...
+    |     ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `stfsc_engine` (lib) generated 2 warnings (run `cargo fix --lib -p stfsc_engine` to apply 1 suggestion)
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+warning: variable `audio_source_count` is assigned to, but never used
+   --> src/main.rs:333:33
+    |
+333 |                         let mut audio_source_count = 0;
+    |                                 ^^^^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_audio_source_count` instead
+    = note: `#[warn(unused_variables)]` on by default
+
+error[E0499]: cannot borrow `state` as mutable more than once at a time
+   --> src/main.rs:159:51
+    |
+159 |                     state.world.update_logic(&mut state.physics, 0.016);
+    |                     -----       ------------      ^^^^^ second mutable borrow occurs here
+    |                     |           |
+    |                     |           first borrow later used by call
+    |                     first mutable borrow occurs here
+
+For more information about this error, try `rustc --explain E0499`.
+warning: `stfsc_engine` (bin "stfsc_engine") generated 1 warning
+error: could not compile `stfsc_engine` (bin "stfsc_engine") due to 1 previous error; 1 warning emitted

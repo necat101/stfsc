@@ -186,5 +186,5 @@ This project is provided as-is for educational and development purposes. See ind
 </p>
 
 <p align="center">
-  <strong>STFSC Engine</strong> — <em>Steal This Fucking Source Code</em>
+  <strong>STFSC Engine</strong> — <em>Steal This F***ing Source Code</em>
 </p>

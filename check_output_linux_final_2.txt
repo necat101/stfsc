@@ -1,0 +1,37 @@
+   Compiling stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+warning: unused import: `std::path::PathBuf`
+ --> src/bin/editor.rs:4:5
+  |
+4 | use std::path::PathBuf;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `Mesh` and `Vertex`
+ --> src/bin/editor.rs:7:38
+  |
+7 | use stfsc_engine::world::{LightType, Mesh, SceneUpdate, Vertex};
+  |                                      ^^^^               ^^^^^^
+
+warning: variant `SendError` is never constructed
+   --> src/bin/editor.rs:397:5
+    |
+394 | enum AppEvent {
+    |      -------- variant in this enum
+...
+397 |     SendError(String),
+    |     ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: field `show_primitives_panel` is never read
+   --> src/bin/editor.rs:416:5
+    |
+404 | struct EditorApp {
+    |        --------- field in this struct
+...
+416 |     show_primitives_panel: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `stfsc_engine` (bin "editor") generated 4 warnings (run `cargo fix --bin "editor"` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.32s

@@ -3,6 +3,7 @@ name = "stfsc_engine"
 version = "0.1.0"
 edition = "2021"
 publish = false
+default-run = "stfsc_engine"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -15,12 +16,10 @@ log = "0.4"
 env_logger = "0.10"
 
 # Graphics (Vulkan via Ash)
-ash = { version = "0.37", features = ["linked"] }
+ash = { version = "0.37" }
 ash-window = "0.12"
-raw-window-handle = "0.6"
+raw-window-handle = "0.5"
 
-# VR/XR Interface
-openxr = { version = "0.18", features = ["linked"] }
 
 # Math & Physics
 glam = { version = "0.24", features = ["bytemuck", "serde"] }
@@ -42,7 +41,8 @@ rayon = "1.8"  # Parallel iteration for game logic
 eframe = "0.24"
 home = "=0.5.9"
 tobj = "3.2"
-
+winit = { version = "0.29", features = ["rwh_05"] }
+rodio = "0.17"  # Audio playback (requires alsa-lib-devel on Fedora)
 
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -51,6 +51,7 @@ ndk = "0.7"
 ndk-context = "0.1"
 jni = "0.21"
 android-activity = { version = "0.4", features = ["native-activity"] }
+openxr = { version = "0.18", features = ["linked"] }
 
 
 [package.metadata.android]

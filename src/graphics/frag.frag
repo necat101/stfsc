@@ -20,7 +20,7 @@ layout(set = 1, binding = 2) uniform sampler2D metallicRoughnessMap;
 layout(set = 0, binding = 0) uniform sampler2D shadowMap;
 
 // Dynamic Lighting - Maximum lights for mobile VR
-const int MAX_LIGHTS = 16;
+const int MAX_LIGHTS = 256;
 
 // GPU Light data structure (matches Rust GpuLightData)
 struct LightData {
@@ -156,7 +156,10 @@ vec3 calculateLightContribution(
         vec3 lightPos = light.position_type.xyz;
         vec3 toLight = lightPos - worldPos;
         float distance = length(toLight);
-        L = normalize(toLight);
+        
+        // Minimum distance to prevent div-by-zero
+        distance = max(distance, 0.001);
+        L = toLight / distance;
         
         // Distance attenuation
         attenuation = calculateAttenuation(distance, range);
@@ -205,7 +208,18 @@ vec3 calculateLightContribution(
 
 void main() {
     // Sample textures
-    vec3 albedo = texture(albedoMap, inUV).rgb * inColor;
+    // If vertex color is white (1,1,1), use texture as-is (default)
+    // If vertex color is non-white, use it as a tint multiplier
+    vec4 texColor = texture(albedoMap, inUV);
+    vec3 albedo = texColor.rgb;
+    
+    // Check if color is "neutral" (white) - if so, use pure texture
+    // Otherwise, tint the texture with the vertex color
+    float colorBrightness = (inColor.r + inColor.g + inColor.b) / 3.0;
+    if (colorBrightness < 0.99) {
+        // Non-white color means "tint mode" - multiply texture by color
+        albedo = texColor.rgb * inColor;
+    }
     vec3 normalSample = texture(normalMap, inUV).rgb;
     normalSample = normalize(normalSample * 2.0 - 1.0);
     

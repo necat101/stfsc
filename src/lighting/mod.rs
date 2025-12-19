@@ -1,7 +1,7 @@
 // STFSC Engine - Dynamic Lighting System
 // Supports Point, Spot, and Directional lights with PBR integration
 
-use glam::{Vec3, Vec4};
+use glam::Vec3;
 
 /// Light types supported by the engine
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,10 +24,10 @@ pub struct Light {
     pub light_type: LightType,
     pub color: Vec3,
     pub intensity: f32,
-    pub range: f32,              // Attenuation distance (Point/Spot)
-    pub inner_cone_angle: f32,   // Spot light inner cone (radians)
-    pub outer_cone_angle: f32,   // Spot light outer cone (radians)
-    pub cast_shadows: bool,      // Whether this light casts shadows
+    pub range: f32,            // Attenuation distance (Point/Spot)
+    pub inner_cone_angle: f32, // Spot light inner cone (radians)
+    pub outer_cone_angle: f32, // Spot light outer cone (radians)
+    pub cast_shadows: bool,    // Whether this light casts shadows
 }
 
 impl Default for Light {
@@ -57,7 +57,13 @@ impl Light {
     }
 
     /// Create a spot light
-    pub fn spot(color: Vec3, intensity: f32, range: f32, inner_angle: f32, outer_angle: f32) -> Self {
+    pub fn spot(
+        color: Vec3,
+        intensity: f32,
+        range: f32,
+        inner_angle: f32,
+        outer_angle: f32,
+    ) -> Self {
         Self {
             light_type: LightType::Spot,
             color,
@@ -108,7 +114,12 @@ impl GpuLightData {
         };
 
         Self {
-            position_type: [position.x, position.y, position.z, light.light_type as u8 as f32],
+            position_type: [
+                position.x,
+                position.y,
+                position.z,
+                light.light_type as u8 as f32,
+            ],
             direction_range: [direction.x, direction.y, direction.z, light.range],
             color_intensity: [light.color.x, light.color.y, light.color.z, light.intensity],
             cone_shadow: [cos_inner, cos_outer, cone_range_inv, shadow_index as f32],
@@ -131,7 +142,7 @@ pub struct LightUBO {
 }
 
 /// Maximum lights supported (optimized for Quest 3 mobile GPU)
-pub const MAX_LIGHTS: usize = 16;
+pub const MAX_LIGHTS: usize = 256;
 
 impl Default for LightUBO {
     fn default() -> Self {
@@ -152,7 +163,12 @@ impl LightUBO {
 
     /// Set ambient light
     pub fn set_ambient(&mut self, color: Vec3, intensity: f32) {
-        self.ambient = [color.x * intensity, color.y * intensity, color.z * intensity, 1.0];
+        self.ambient = [
+            color.x * intensity,
+            color.y * intensity,
+            color.z * intensity,
+            1.0,
+        ];
     }
 
     /// Clear all lights
@@ -190,12 +206,12 @@ impl LightCuller {
             .filter_map(|(data, pos)| {
                 let dist = view_position.distance(*pos);
                 let light_type = data.position_type[3] as u8;
-                
+
                 // Directional lights always pass
                 if light_type == LightType::Directional as u8 {
                     return Some((0.0, *data)); // Priority 0 (always first)
                 }
-                
+
                 // Point/Spot lights: check range
                 let range = data.direction_range[3];
                 if dist < range + max_distance {
@@ -208,7 +224,11 @@ impl LightCuller {
 
         // Sort by distance (closest first), limit to MAX_LIGHTS
         result.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        result.into_iter().take(MAX_LIGHTS).map(|(_, d)| d).collect()
+        result
+            .into_iter()
+            .take(MAX_LIGHTS)
+            .map(|(_, d)| d)
+            .collect()
     }
 }
 
@@ -228,7 +248,7 @@ mod tests {
     fn test_gpu_light_packing() {
         let light = Light::point(Vec3::ONE, 2.0, 10.0);
         let gpu_data = GpuLightData::from_light(&light, Vec3::new(1.0, 2.0, 3.0), Vec3::Z, -1);
-        
+
         assert_eq!(gpu_data.position_type[0], 1.0);
         assert_eq!(gpu_data.position_type[1], 2.0);
         assert_eq!(gpu_data.position_type[2], 3.0);

@@ -1,0 +1,13 @@
+Archive:  target/release/apk/stfsc_engine.apk
+  Length      Date    Time    Name
+---------  ---------- -----   ----
+     4868  12-31-1980 19:00   AndroidManifest.xml
+      343  12-31-1980 19:00   assets/cube.obj
+  5306808  12-31-1980 19:00   lib/arm64-v8a/libstfsc_engine.so
+  1137008  12-31-1980 19:00   lib/arm64-v8a/libopenxr_loader.so
+  1822720  12-31-1980 19:00   lib/arm64-v8a/libc++_shared.so
+      641  12-31-1980 19:00   META-INF/STFSC_AL.SF
+     1350  12-31-1980 19:00   META-INF/STFSC_AL.RSA
+      514  12-31-1980 19:00   META-INF/MANIFEST.MF
+---------                     -------
+  8274252                     8 files

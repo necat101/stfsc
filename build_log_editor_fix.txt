@@ -1,0 +1,66 @@
+warning: variable does not need to be mutable
+   --> src/world/mod.rs:710:18
+    |
+710 |             let (mut script, mut started) = if let Ok(mut s) = self.ecs.get::<&mut DynamicScript>(entity) {
+    |                  ----^^^^^^
+    |                  |
+    |                  help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: field `buffer_handle` is never read
+   --> src/audio/mod.rs:162:5
+    |
+161 | struct ActiveSource {
+    |        ------------ field in this struct
+162 |     buffer_handle: AudioBufferHandle,
+    |     ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `stfsc_engine` (lib) generated 2 warnings (run `cargo fix --lib -p stfsc_engine` to apply 1 suggestion)
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+error[E0063]: missing field `script` in initializer of `SceneEntity`
+    --> src/bin/editor.rs:1028:49
+     |
+1028 | ...                   scene.entities.push(SceneEntity {
+     |                                           ^^^^^^^^^^^ missing `script`
+
+error[E0063]: missing field `script` in initializer of `SceneEntity`
+    --> src/bin/editor.rs:1048:49
+     |
+1048 | ...                   scene.entities.push(SceneEntity {
+     |                                           ^^^^^^^^^^^ missing `script`
+
+error[E0063]: missing field `script` in initializer of `SceneEntity`
+    --> src/bin/editor.rs:1068:49
+     |
+1068 | ...                   scene.entities.push(SceneEntity {
+     |                                           ^^^^^^^^^^^ missing `script`
+
+error[E0063]: missing field `script` in initializer of `SceneEntity`
+    --> src/bin/editor.rs:1090:49
+     |
+1090 | ...                   scene.entities.push(SceneEntity {
+     |                                           ^^^^^^^^^^^ missing `script`
+
+error[E0063]: missing field `script` in initializer of `SceneEntity`
+    --> src/bin/editor.rs:1115:49
+     |
+1115 | ...                   scene.entities.push(SceneEntity {
+     |                                           ^^^^^^^^^^^ missing `script`
+
+error[E0063]: missing field `script` in initializer of `SceneEntity`
+    --> src/bin/editor.rs:1140:49
+     |
+1140 | ...                   scene.entities.push(SceneEntity {
+     |                                           ^^^^^^^^^^^ missing `script`
+
+error[E0063]: missing field `script` in initializer of `SceneEntity`
+    --> src/bin/editor.rs:1167:49
+     |
+1167 | ...                   scene.entities.push(SceneEntity {
+     |                                           ^^^^^^^^^^^ missing `script`
+
+For more information about this error, try `rustc --explain E0063`.
+error: could not compile `stfsc_engine` (bin "editor") due to 7 previous errors

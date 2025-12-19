@@ -1,4 +1,3 @@
-    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
 warning: variable does not need to be mutable
    --> src/world/mod.rs:710:18
     |
@@ -20,4 +19,5 @@ warning: field `buffer_handle` is never read
     = note: `#[warn(dead_code)]` on by default
 
 warning: `stfsc_engine` (lib) generated 2 warnings (run `cargo fix --lib -p stfsc_engine` to apply 1 suggestion)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.36s
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.75s

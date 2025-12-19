@@ -1,0 +1,2 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.00s

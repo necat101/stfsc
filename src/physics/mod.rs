@@ -49,10 +49,16 @@ impl PhysicsWorld {
             &(),
             &(),
         );
-        self.query_pipeline.update(&self.rigid_body_set, &self.collider_set);
+        self.query_pipeline
+            .update(&self.rigid_body_set, &self.collider_set);
     }
 
-    pub fn add_box_rigid_body(&mut self, translation: [f32; 3], half_extents: [f32; 3], dynamic: bool) -> RigidBodyHandle {
+    pub fn add_box_rigid_body(
+        &mut self,
+        translation: [f32; 3],
+        half_extents: [f32; 3],
+        dynamic: bool,
+    ) -> RigidBodyHandle {
         let rigid_body = if dynamic {
             RigidBodyBuilder::dynamic()
                 .translation(vector![translation[0], translation[1], translation[2]])
@@ -62,11 +68,13 @@ impl PhysicsWorld {
                 .translation(vector![translation[0], translation[1], translation[2]])
                 .build()
         };
-        
-        let collider = ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2]).build();
+
+        let collider =
+            ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2]).build();
         let body_handle = self.rigid_body_set.insert(rigid_body);
-        self.collider_set.insert_with_parent(collider, body_handle, &mut self.rigid_body_set);
-        
+        self.collider_set
+            .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);
+
         body_handle
     }
 }

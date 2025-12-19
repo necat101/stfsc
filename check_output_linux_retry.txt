@@ -1,0 +1,130 @@
+warning: unused import: `ash::vk`
+ --> src/lib.rs:3:5
+  |
+3 | use ash::vk;
+  |     ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `hecs::Entity`
+ --> src/lib.rs:4:5
+  |
+4 | use hecs::Entity;
+  |     ^^^^^^^^^^^^
+
+warning: unused imports: `error` and `info`
+ --> src/lib.rs:5:11
+  |
+5 | use log::{error, info};
+  |           ^^^^^  ^^^^
+
+warning: unused imports: `HashMap` and `HashSet`
+ --> src/lib.rs:8:24
+  |
+8 | use std::collections::{HashMap, HashSet}; // Added HashMap
+  |                        ^^^^^^^  ^^^^^^^
+
+warning: unused imports: `Arc` and `RwLock`
+ --> src/lib.rs:9:17
+  |
+9 | use std::sync::{Arc, RwLock};
+  |                 ^^^  ^^^^^^
+
+warning: unused imports: `GpuMesh` and `InstanceData`
+  --> src/lib.rs:12:16
+   |
+12 | use graphics::{GpuMesh, InstanceData};
+   |                ^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused import: `ash::vk::Handle`
+ --> src/graphics/mod.rs:2:5
+  |
+2 | use ash::vk::Handle; // Import Handle trait
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `resource_loader::ResourceLoader`
+  --> src/lib.rs:29:5
+   |
+29 | use resource_loader::ResourceLoader;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `graphics::GraphicsContext`
+  --> src/lib.rs:32:5
+   |
+32 | use graphics::GraphicsContext;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `graphics::Texture`
+  --> src/lib.rs:34:5
+   |
+34 | use graphics::Texture;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `physics::PhysicsWorld`
+  --> src/lib.rs:40:5
+   |
+40 | use physics::PhysicsWorld;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `QueryFilter`, `Ray`, `nalgebra`, `point`, and `vector`
+  --> src/lib.rs:42:25
+   |
+42 | use rapier3d::prelude::{nalgebra, point, vector, QueryFilter, Ray};
+   |                         ^^^^^^^^  ^^^^^  ^^^^^^  ^^^^^^^^^^^  ^^^
+
+warning: unused import: `world::DecodedImage`
+  --> src/lib.rs:43:5
+   |
+43 | use world::DecodedImage; // Import DecodedImage
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `world::GameWorld`
+  --> src/lib.rs:44:5
+   |
+44 | use world::GameWorld;
+   |     ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `AABB` and `OcclusionCuller`
+  --> src/lib.rs:49:27
+   |
+49 | use graphics::occlusion::{OcclusionCuller, AABB}; // Added OcclusionCuller and AABB
+   |                           ^^^^^^^^^^^^^^^  ^^^^
+
+warning: `stfsc_engine` (lib) generated 15 warnings (run `cargo fix --lib -p stfsc_engine` to apply 15 suggestions)
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+warning: unused import: `std::path::PathBuf`
+ --> src/bin/editor.rs:4:5
+  |
+4 | use std::path::PathBuf;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `Mesh` and `Vertex`
+ --> src/bin/editor.rs:7:38
+  |
+7 | use stfsc_engine::world::{LightType, Mesh, SceneUpdate, Vertex};
+  |                                      ^^^^               ^^^^^^
+
+warning: variant `SendError` is never constructed
+   --> src/bin/editor.rs:397:5
+    |
+394 | enum AppEvent {
+    |      -------- variant in this enum
+...
+397 |     SendError(String),
+    |     ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: field `show_primitives_panel` is never read
+   --> src/bin/editor.rs:416:5
+    |
+404 | struct EditorApp {
+    |        --------- field in this struct
+...
+416 |     show_primitives_panel: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `stfsc_engine` (bin "editor") generated 4 warnings (run `cargo fix --bin "editor"` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.16s

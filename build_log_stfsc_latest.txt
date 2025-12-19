@@ -1,0 +1,144 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+error[E0433]: failed to resolve: use of undeclared crate or module `mpsc`
+  --> src/world/mod.rs:13:25
+   |
+13 |     pub chunk_receiver: mpsc::Receiver<ChunkData>,
+   |                         ^^^^ use of undeclared crate or module `mpsc`
+   |
+help: consider importing one of these modules
+   |
+1  + use std::sync::mpsc;
+   |
+1  + use tokio::sync::mpsc;
+   |
+
+error[E0433]: failed to resolve: use of undeclared crate or module `mpsc`
+  --> src/world/mod.rs:14:23
+   |
+14 |     pub chunk_sender: mpsc::Sender<ChunkData>,
+   |                       ^^^^ use of undeclared crate or module `mpsc`
+   |
+help: consider importing one of these modules
+   |
+1  + use std::sync::mpsc;
+   |
+1  + use tokio::sync::mpsc;
+   |
+
+error[E0433]: failed to resolve: use of undeclared crate or module `mpsc`
+  --> src/world/mod.rs:15:27
+   |
+15 |     pub command_receiver: mpsc::Receiver<SceneUpdate>,
+   |                           ^^^^ use of undeclared crate or module `mpsc`
+   |
+help: consider importing one of these modules
+   |
+1  + use std::sync::mpsc;
+   |
+1  + use tokio::sync::mpsc;
+   |
+
+error[E0433]: failed to resolve: use of undeclared crate or module `mpsc`
+  --> src/world/mod.rs:16:25
+   |
+16 |     pub command_sender: mpsc::Sender<SceneUpdate>,
+   |                         ^^^^ use of undeclared crate or module `mpsc`
+   |
+help: consider importing one of these modules
+   |
+1  + use std::sync::mpsc;
+   |
+1  + use tokio::sync::mpsc;
+   |
+
+error[E0433]: failed to resolve: use of undeclared crate or module `mpsc`
+   --> src/world/mod.rs:358:24
+    |
+358 |         let (tx, rx) = mpsc::channel(10);
+    |                        ^^^^ use of undeclared crate or module `mpsc`
+    |
+help: consider importing one of these modules
+    |
+1   + use std::sync::mpsc;
+    |
+1   + use tokio::sync::mpsc;
+    |
+
+error[E0433]: failed to resolve: use of undeclared crate or module `mpsc`
+   --> src/world/mod.rs:359:32
+    |
+359 |         let (cmd_tx, cmd_rx) = mpsc::channel(100);
+    |                                ^^^^ use of undeclared crate or module `mpsc`
+    |
+help: consider importing one of these modules
+    |
+1   + use std::sync::mpsc;
+    |
+1   + use tokio::sync::mpsc;
+    |
+
+error[E0061]: this function takes 4 arguments but 3 arguments were supplied
+   --> src/world/mod.rs:715:35
+    |
+715 |                     let mut ctx = ScriptContext::new(entity, &mut self.ecs, dt);
+    |                                   ^^^^^^^^^^^^^^^^^^                        -- argument #3 of type `&mut PhysicsWorld` is missing
+    |
+note: associated function defined here
+   --> src/world/scripting.rs:24:12
+    |
+24  |     pub fn new(entity: Entity, world: &'a mut World, physics: &'a mut PhysicsWorld, dt: f32) -> Self {
+    |            ^^^ --------------  --------------------  -----------------------------  -------
+help: provide the argument
+    |
+715 |                     let mut ctx = ScriptContext::new(entity, &mut self.ecs, /* &mut PhysicsWorld */, dt);
+    |                                                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+error[E0502]: cannot borrow `*ctx.world` as mutable because it is also borrowed as immutable
+   --> src/world/scripting.rs:166:25
+    |
+160 |             if let Ok(transform) = ctx.world.get::<&Transform>(ctx.entity) {
+    |                                    ---------------------------------------
+    |                                    |
+    |                                    immutable borrow occurs here
+    |                                    a temporary with access to the immutable borrow is created here ...
+...
+166 |                 let _ = ctx.world.insert_one(ctx.entity, crate::world::RigidBodyHandle(handle));
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
+167 |             }
+168 |         }
+    |         - ... and the immutable borrow might be used here, when that temporary is dropped and runs the destructor for type `std::result::Result<hecs::Ref<'_, world::Transform>, ComponentError>`
+
+warning: unused variable: `vehicle`
+   --> src/world/scripting.rs:176:23
+    |
+176 |         if let Ok(mut vehicle) = ctx.world.get::<&mut Vehicle>(ctx.entity) {
+    |                       ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vehicle`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: variable does not need to be mutable
+   --> src/world/scripting.rs:176:19
+    |
+176 |         if let Ok(mut vehicle) = ctx.world.get::<&mut Vehicle>(ctx.entity) {
+    |                   ----^^^^^^^
+    |                   |
+    |                   help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+error[E0502]: cannot borrow `ctx.physics.rigid_body_set` as immutable because it is also borrowed as mutable
+   --> src/world/scripting.rs:186:25
+    |
+178 |                 if let Some(body) = ctx.physics.rigid_body_set.get_mut(rb_handle.0) {
+    |                                     -------------------------- mutable borrow occurs here
+...
+186 |                         &ctx.physics.rigid_body_set,
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ immutable borrow occurs here
+...
+199 |                         body.add_force(up_force, true);
+    |                         ---- mutable borrow later used here
+
+Some errors have detailed explanations: E0061, E0433, E0502.
+For more information about an error, try `rustc --explain E0061`.
+warning: `stfsc_engine` (lib) generated 2 warnings
+error: could not compile `stfsc_engine` (lib) due to 9 previous errors; 2 warnings emitted

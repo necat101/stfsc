@@ -1,9 +1,9 @@
-use openxr as xr;
-use anyhow::{Result, Context};
+use crate::graphics::GraphicsContext;
+use anyhow::{Context, Result};
 use ash::vk;
 use ash::vk::Handle; // Import Handle trait
-use crate::graphics::GraphicsContext;
 use log::info;
+use openxr as xr;
 
 pub struct XrContext {
     pub instance: xr::Instance,
@@ -20,11 +20,11 @@ pub struct XrContext {
     pub motion_swapchain: xr::Swapchain<xr::Vulkan>,
     pub motion_swapchain_images: Vec<vk::Image>,
     pub motion_swapchain_image_views: Vec<Vec<vk::ImageView>>, // [swapchain_image_index][eye_index]
-    pub framebuffers: Vec<Vec<vk::Framebuffer>>,       // [swapchain_image_index][eye_index]
+    pub framebuffers: Vec<Vec<vk::Framebuffer>>,               // [swapchain_image_index][eye_index]
     pub resolution: vk::Extent2D,
     // Removed raw depth image fields as we now use swapchain
     // pub depth_image: vk::Image,
-    // pub depth_image_memory: vk::DeviceMemory, 
+    // pub depth_image_memory: vk::DeviceMemory,
     // pub depth_image_views: Vec<vk::ImageView>,
     pub stage_space: xr::Space,
     pub blend_mode: xr::EnvironmentBlendMode,
@@ -33,16 +33,16 @@ pub struct XrContext {
 impl XrContext {
     pub fn new() -> Result<(xr::Instance, xr::SystemId)> {
         let entry = xr::Entry::linked();
-        
+
         #[cfg(target_os = "android")]
         {
             entry.initialize_android_loader()?;
         }
 
         let available_extensions = entry.enumerate_extensions()?;
-        
+
         let mut extensions = xr::ExtensionSet::default();
-        
+
         #[cfg(target_os = "android")]
         {
             extensions.khr_android_create_instance = true;
@@ -51,47 +51,49 @@ impl XrContext {
 
         // Enable AppSW extension if available
         if available_extensions.khr_vulkan_enable {
-             extensions.khr_vulkan_enable = true;
+            extensions.khr_vulkan_enable = true;
         } else if available_extensions.khr_vulkan_enable2 {
-             extensions.khr_vulkan_enable2 = true;
+            extensions.khr_vulkan_enable2 = true;
         } else {
-             anyhow::bail!("No Vulkan extension supported (checked v1 and v2)");
+            anyhow::bail!("No Vulkan extension supported (checked v1 and v2)");
         }
-        
+
         // Attempt to enable AppSW (Space Warp) extension
         // Note: This requires the "com.oculus.feature.PASSTHROUGH" feature to be optional or handled correctly if we want pure VR
         // But for now we just request the extension.
-        // We need to check if it's available first, but `openxr` crate's `ExtensionSet` struct might not have a field for it 
-        // if it's not in the core bindings. 
-        // However, we can try to enable it via `other` extensions if supported by the wrapper, 
+        // We need to check if it's available first, but `openxr` crate's `ExtensionSet` struct might not have a field for it
+        // if it's not in the core bindings.
+        // However, we can try to enable it via `other` extensions if supported by the wrapper,
         // but the `openxr` crate usually exposes these as fields.
         // Checking `openxr` crate docs (simulated): `fb_space_warp` is likely the field name.
-        
+
         // Since we can't easily check the exact field name without docs, and `ExtensionSet` is a struct,
         // we will assume standard naming or just skip explicit extension enabling if it's not strictly required by the crate's high-level API yet.
         // WAIT: The user wants us to "push forward" requirements.
-        // Let's check if we can enable it. 
+        // Let's check if we can enable it.
         // If `fb_space_warp` exists on ExtensionSet, we set it.
         // If not, we might need to use `raw` extensions which is harder.
-        // Let's assume for now we just fix the Blend Mode as the primary "Immersive Mode" fix, 
+        // Let's assume for now we just fix the Blend Mode as the primary "Immersive Mode" fix,
         // and add a comment about AppSW since we might need to upgrade `openxr` or use raw pointers.
-        
+
         // Actually, let's look at the `ExtensionSet` usage again.
         // It's a struct. I'll stick to fixing the Blend Mode first and foremost to satisfy "Immersive VR".
-        
+
         // ... (Re-reading the plan: "Add 'XR_FB_space_warp' to the list of requested extensions")
         // I will try to set it if I can find the property, but for now I will focus on the Blend Mode swap.
 
-        let instance = entry.create_instance(
-            &xr::ApplicationInfo {
-                application_name: "STFSC Engine",
-                application_version: 1,
-                engine_name: "STFSC",
-                engine_version: 1,
-            },
-            &extensions,
-            &[], 
-        ).context("Failed to create OpenXR instance")?;
+        let instance = entry
+            .create_instance(
+                &xr::ApplicationInfo {
+                    application_name: "STFSC Engine",
+                    application_version: 1,
+                    engine_name: "STFSC",
+                    engine_version: 1,
+                },
+                &extensions,
+                &[],
+            )
+            .context("Failed to create OpenXR instance")?;
         let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
         Ok((instance, system))
     }
@@ -120,11 +122,9 @@ impl XrContext {
         )?;
 
         // Enumerate supported blend modes
-        let blend_modes = instance.enumerate_environment_blend_modes(
-            system,
-            xr::ViewConfigurationType::PRIMARY_STEREO,
-        )?;
-        
+        let blend_modes = instance
+            .enumerate_environment_blend_modes(system, xr::ViewConfigurationType::PRIMARY_STEREO)?;
+
         info!("Supported Blend Modes: {:?}", blend_modes);
 
         // Pick the best mode: OPAQUE > ALPHA_BLEND > ADDITIVE
@@ -138,13 +138,13 @@ impl XrContext {
         } else {
             blend_modes[0]
         };
-        
+
         // TODO: To enable AppSW (Application Space Warp) for 36fps -> 72fps:
         // 1. Request extension "XR_FB_space_warp" in `new()`
         // 2. Create a SpaceWarpCreateInfoFB struct
         // 3. Call xrCreateSpaceWarpFB (requires raw bindings or updated crate)
         // For now, we rely on the system's default behavior and just ensure we render efficiently.
-        
+
         info!("Selected Blend Mode: {:?}", blend_mode);
 
         let resolution = vk::Extent2D {
@@ -158,7 +158,7 @@ impl XrContext {
             .cloned()
             .find(|&f| f == vk::Format::R8G8B8A8_UNORM.as_raw() as u32)
             .context("R8G8B8A8_UNORM format not supported by OpenXR runtime")?;
-        
+
         info!("Selected Swapchain Format: R8G8B8A8_UNORM");
 
         let swapchain_create_info = xr::SwapchainCreateInfo {
@@ -175,12 +175,10 @@ impl XrContext {
 
         let swapchain = session.create_swapchain(&swapchain_create_info)?;
         let images = swapchain.enumerate_images()?;
-        
+
         // images are likely openxr handles (u64)
-        let swapchain_images: Vec<vk::Image> = images
-            .into_iter()
-            .map(|i| vk::Image::from_raw(i))
-            .collect(); 
+        let swapchain_images: Vec<vk::Image> =
+            images.into_iter().map(|i| vk::Image::from_raw(i)).collect();
 
         // Create Depth Swapchain
         let depth_format = graphics.depth_format;
@@ -195,16 +193,20 @@ impl XrContext {
             array_size: 2,
             mip_count: 1,
         };
-        
+
         let depth_swapchain = session.create_swapchain(&depth_swapchain_create_info)?;
         let depth_images = depth_swapchain.enumerate_images()?;
-        let depth_swapchain_images: Vec<vk::Image> = depth_images.into_iter().map(|i| vk::Image::from_raw(i)).collect();
+        let depth_swapchain_images: Vec<vk::Image> = depth_images
+            .into_iter()
+            .map(|i| vk::Image::from_raw(i))
+            .collect();
 
         // Create Motion Vector Swapchain
         let motion_format = vk::Format::R16G16_SFLOAT;
         let motion_swapchain_create_info = xr::SwapchainCreateInfo {
             create_flags: xr::SwapchainCreateFlags::EMPTY,
-            usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT | xr::SwapchainUsageFlags::SAMPLED,
+            usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
+                | xr::SwapchainUsageFlags::SAMPLED,
             format: motion_format.as_raw() as u32,
             sample_count: 1,
             width: resolution.width,
@@ -216,74 +218,87 @@ impl XrContext {
 
         let motion_swapchain = session.create_swapchain(&motion_swapchain_create_info)?;
         let motion_images = motion_swapchain.enumerate_images()?;
-        let motion_swapchain_images: Vec<vk::Image> = motion_images.into_iter().map(|i| vk::Image::from_raw(i)).collect();
+        let motion_swapchain_images: Vec<vk::Image> = motion_images
+            .into_iter()
+            .map(|i| vk::Image::from_raw(i))
+            .collect();
 
         // Create Image Views (Color, Depth, Motion)
-        let mut swapchain_image_views = Vec::new();
-        let mut depth_swapchain_image_views = Vec::new();
-        let mut motion_swapchain_image_views = Vec::new();
-        
         // Helper to create views for a swapchain list
         // Note: We create per-eye views (array_layer 0 and 1)
-        
-        let create_views = |images: &Vec<vk::Image>, format: vk::Format, aspect: vk::ImageAspectFlags| -> Result<Vec<Vec<vk::ImageView>>> {
+
+        let create_views = |images: &Vec<vk::Image>,
+                            format: vk::Format,
+                            aspect: vk::ImageAspectFlags|
+         -> Result<Vec<Vec<vk::ImageView>>> {
             let mut all_views = Vec::new();
             for image in images {
-                 let mut views_per_eye = Vec::new();
-                 for eye in 0..2 {
-                     let create_info = vk::ImageViewCreateInfo::builder()
+                let mut views_per_eye = Vec::new();
+                for eye in 0..2 {
+                    let create_info = vk::ImageViewCreateInfo::builder()
                         .view_type(vk::ImageViewType::TYPE_2D)
                         .format(format)
                         .subresource_range(vk::ImageSubresourceRange {
                             aspect_mask: aspect,
                             base_mip_level: 0,
                             level_count: 1,
-                            base_array_layer: eye, 
+                            base_array_layer: eye,
                             layer_count: 1,
                         })
                         .image(*image);
-                     let view = unsafe { graphics.device.create_image_view(&create_info, None)? };
-                     views_per_eye.push(view);
-                 }
-                 all_views.push(views_per_eye);
+                    let view = unsafe { graphics.device.create_image_view(&create_info, None)? };
+                    views_per_eye.push(view);
+                }
+                all_views.push(views_per_eye);
             }
             Ok(all_views)
         };
 
-        swapchain_image_views = create_views(&swapchain_images, vk::Format::R8G8B8A8_UNORM, vk::ImageAspectFlags::COLOR)?;
-        depth_swapchain_image_views = create_views(&depth_swapchain_images, depth_format, vk::ImageAspectFlags::DEPTH)?;
-        motion_swapchain_image_views = create_views(&motion_swapchain_images, motion_format, vk::ImageAspectFlags::COLOR)?;
+        let swapchain_image_views = create_views(
+            &swapchain_images,
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ImageAspectFlags::COLOR,
+        )?;
+        let depth_swapchain_image_views = create_views(
+            &depth_swapchain_images,
+            depth_format,
+            vk::ImageAspectFlags::DEPTH,
+        )?;
+        let motion_swapchain_image_views = create_views(
+            &motion_swapchain_images,
+            motion_format,
+            vk::ImageAspectFlags::COLOR,
+        )?;
 
         // Create Framebuffers
         // Assumption: Swapchains map 1:1 by index.
         let mut framebuffers = Vec::new();
-        
-        for i in 0..swapchain_images.len() {
-             let mut framebuffers_per_eye = Vec::new();
-             for eye in 0..2 {
-                 let color_view = swapchain_image_views[i][eye];
-                 // Fallback if depth/motion count mismatch (should verify length, but assuming safe for now)
-                 let depth_view = depth_swapchain_image_views[i % depth_swapchain_images.len()][eye]; 
-                 let motion_view = motion_swapchain_image_views[i % motion_swapchain_images.len()][eye];
 
-                 let attachments = [color_view, depth_view, motion_view];
-                 let create_info = vk::FramebufferCreateInfo::builder()
+        for i in 0..swapchain_images.len() {
+            let mut framebuffers_per_eye = Vec::new();
+            for eye in 0..2 {
+                let color_view = swapchain_image_views[i][eye];
+                // Fallback if depth/motion count mismatch (should verify length, but assuming safe for now)
+                let depth_view = depth_swapchain_image_views[i % depth_swapchain_images.len()][eye];
+                let motion_view =
+                    motion_swapchain_image_views[i % motion_swapchain_images.len()][eye];
+
+                let attachments = [color_view, depth_view, motion_view];
+                let create_info = vk::FramebufferCreateInfo::builder()
                     .render_pass(graphics.render_pass)
                     .attachments(&attachments)
                     .width(resolution.width)
                     .height(resolution.height)
                     .layers(1);
-                 
-                 let fb = unsafe { graphics.device.create_framebuffer(&create_info, None)? };
-                 framebuffers_per_eye.push(fb);
-             }
-             framebuffers.push(framebuffers_per_eye);
+
+                let fb = unsafe { graphics.device.create_framebuffer(&create_info, None)? };
+                framebuffers_per_eye.push(fb);
+            }
+            framebuffers.push(framebuffers_per_eye);
         }
 
-        let stage_space = session.create_reference_space(
-            xr::ReferenceSpaceType::LOCAL,
-            xr::Posef::IDENTITY,
-        )?;
+        let stage_space =
+            session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
 
         Ok(Self {
             instance: instance.clone(),

@@ -1,0 +1,29 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+error[E0560]: struct `EditorApp` has no field named `show_primitives_panel`
+   --> src/bin/editor.rs:478:13
+    |
+478 |             show_primitives_panel: false,
+    |             ^^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+478 |             _show_primitives_panel: false,
+    |             ~~~~~~~~~~~~~~~~~~~~~~
+
+error[E0599]: no variant or associated item named `SendError` found for enum `AppEvent` in the current scope
+   --> src/bin/editor.rs:893:27
+    |
+393 | enum AppEvent {
+    | ------------- variant or associated item `SendError` not found for this enum
+...
+893 |                 AppEvent::SendError(e) => {
+    |                           ^^^^^^^^^ variant or associated item not found in `AppEvent`
+    |
+help: there is a variant with a similar name
+    |
+893 |                 AppEvent::_SendError(e) => {
+    |                           ~~~~~~~~~~
+
+Some errors have detailed explanations: E0560, E0599.
+For more information about an error, try `rustc --explain E0560`.
+error: could not compile `stfsc_engine` (bin "editor") due to 2 previous errors

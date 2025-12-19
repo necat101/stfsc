@@ -1,0 +1,50 @@
+# STFSC Engine: "Fuck Script" Ruleset & Technical Guide
+
+This document serves as a guide for future AI agents and developers working on the STFSC engine's scripting system.
+
+## 1. System Overview
+"Fuck Scripts" (trait `FuckScript`) are the primary way to define dynamic entity behaviors in Rust. They are integrated into the engine's `hecs` ECS.
+
+## 2. Core Architecture
+- **Trait**: `FuckScript` defined in `src/world/scripting.rs`.
+- **Methods**:
+    - `on_start(&mut self, ctx: &mut ScriptContext)`: Called when the script first runs.
+    - `on_update(&mut self, ctx: &mut ScriptContext)`: Called every logic frame.
+- **ScriptContext**: Holds the `entity` ID, a mutable reference to the `world` (ECS), a mutable reference to the `physics` engine, and `dt` (delta time).
+
+## 3. ECS Integration
+- **DynamicScript Component**: Holds the script in an `Option<Box<dyn FuckScript>>`.
+- **Logic Thread**: `GameWorld::update_logic(dt)` iterates over `DynamicScript` components.
+- **Safety Pattern (The Take Pattern)**:
+    To allow scripts to mutably borrow the ECS world while they are being updated, we MUST use the `take()` pattern:
+    1. `Option::take()` the script from the `DynamicScript` component.
+    2. Call `on_update` with a `ScriptContext` that borrows the world.
+    3. Put the script back into the component.
+    *Failure to do this will result in borrow checker errors (E0502).*
+
+## 4. Registration & Deployment
+- **ScriptRegistry**: Maps string names (e.g., "CrowdAgent") to script constructors.
+- **Registration**: Done in `GameWorld::new()` using `reg.register("Name", || ScriptStruct)`.
+- **Deployment**: The editor sends a `SceneUpdate::AttachScript { id, name }` command over TCP. The engine handles this in `update_streaming` by looking up the name in the registry and inserting a `DynamicScript` component.
+
+## 5. Scripting Standards
+- Scripts should be `Send + Sync`.
+- Avoid heavy allocations inside `on_update`.
+- Use `ctx.world.get::<&mut Transform>(ctx.entity)` to move entities.
+- For AI, keep state inside the script struct (e.g., `pub struct MyAI { target: Vec3 }`).
+
+## 6. Example Script Template
+```rust
+pub struct MyScript;
+impl FuckScript for MyScript {
+    fn on_update(&mut self, ctx: &mut ScriptContext) {
+        // Your logic here
+    }
+}
+```
+
+## 7. Editor Support
+Adding new scripts requires updating:
+1. `src/world/scripting.rs`: Define the script.
+2. `src/world/mod.rs`: Register in `GameWorld::new`.
+3. `src/bin/editor.rs`: Add to the Inspector UI or test scene if needed.

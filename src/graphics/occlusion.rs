@@ -1,9 +1,7 @@
 // STFSC Engine - Occlusion Culling System
 // Hierarchical Z-Buffer (Hi-Z) based GPU occlusion culling for mobile VR
 
-use ash::vk;
-use anyhow::Result;
-use glam::{Vec3, Mat4};
+use glam::{Mat4, Vec3};
 
 /// Axis-Aligned Bounding Box for visibility testing
 #[derive(Clone, Copy, Debug)]
@@ -55,13 +53,13 @@ impl AABB {
         let corners = self.corners();
         let mut min = Vec3::splat(f32::MAX);
         let mut max = Vec3::splat(f32::MIN);
-        
+
         for corner in &corners {
             let transformed = matrix.transform_point3(*corner);
             min = min.min(transformed);
             max = max.max(transformed);
         }
-        
+
         AABB { min, max }
     }
 }
@@ -97,42 +95,51 @@ impl Frustum {
 
         let mut planes = [Vec4Plane::default(); 6];
 
-        // Left plane: row3 + row0
+        // Determine planes based on Vulkan clip space [0, w] and Y-down convention
+        // Projection matrix flips Y, so Row 1 is inverted relative to standard GL
+
+        // Left plane: row3 + row0 (w + x >= 0) -> Same for GL/Vulkan
         let left = row3 + row0;
         planes[0] = Self::normalize_plane(Vec4Plane {
             normal: Vec3::new(left.x, left.y, left.z),
             distance: left.w,
         });
 
-        // Right plane: row3 - row0
+        // Right plane: row3 - row0 (w - x >= 0) -> Same for GL/Vulkan
         let right = row3 - row0;
         planes[1] = Self::normalize_plane(Vec4Plane {
             normal: Vec3::new(right.x, right.y, right.z),
             distance: right.w,
         });
 
-        // Bottom plane: row3 + row1
-        let bottom = row3 + row1;
+        // Bottom plane: row3 - row1 (w - y >= 0)
+        // Note: With flipped Y (a22 < 0), +Y in view space becomes -Y in clip space.
+        // Screen bottom is Y_clip = +1.
+        // We want y_clip <= w_c -> w_c - y_c >= 0 -> row3 - row1.
+        let bottom = row3 - row1;
         planes[2] = Self::normalize_plane(Vec4Plane {
             normal: Vec3::new(bottom.x, bottom.y, bottom.z),
             distance: bottom.w,
         });
 
-        // Top plane: row3 - row1
-        let top = row3 - row1;
+        // Top plane: row3 + row1 (w + y >= 0)
+        // Screen top is Y_clip = -1.
+        // We want y_clip >= -w_c -> w_c + y_c >= 0 -> row3 + row1.
+        let top = row3 + row1;
         planes[3] = Self::normalize_plane(Vec4Plane {
             normal: Vec3::new(top.x, top.y, top.z),
             distance: top.w,
         });
 
-        // Near plane: row3 + row2
-        let near = row3 + row2;
+        // Near plane: row2 (z >= 0) for Vulkan [0, 1] depth
+        // GL would use row3 + row2 (z >= -w)
+        let near = row2;
         planes[4] = Self::normalize_plane(Vec4Plane {
             normal: Vec3::new(near.x, near.y, near.z),
             distance: near.w,
         });
 
-        // Far plane: row3 - row2
+        // Far plane: row3 - row2 (w - z >= 0) -> Same as GL (z <= w)
         let far = row3 - row2;
         planes[5] = Self::normalize_plane(Vec4Plane {
             normal: Vec3::new(far.x, far.y, far.z),
@@ -160,9 +167,21 @@ impl Frustum {
         for plane in &self.planes {
             // Find the corner most in the direction of the plane normal
             let p = Vec3::new(
-                if plane.normal.x >= 0.0 { aabb.max.x } else { aabb.min.x },
-                if plane.normal.y >= 0.0 { aabb.max.y } else { aabb.min.y },
-                if plane.normal.z >= 0.0 { aabb.max.z } else { aabb.min.z },
+                if plane.normal.x >= 0.0 {
+                    aabb.max.x
+                } else {
+                    aabb.min.x
+                },
+                if plane.normal.y >= 0.0 {
+                    aabb.max.y
+                } else {
+                    aabb.min.y
+                },
+                if plane.normal.z >= 0.0 {
+                    aabb.max.z
+                } else {
+                    aabb.min.z
+                },
             );
 
             // If this corner is behind the plane, the AABB is completely outside
@@ -218,11 +237,11 @@ impl OcclusionCuller {
 
     /// Update with combined frustum for both VR eyes
     /// Takes the union of left and right eye frustums for conservative culling
-    pub fn update_frustum_stereo(&mut self, left_vp: Mat4, right_vp: Mat4) {
+    pub fn update_frustum_stereo(&mut self, left_vp: Mat4, _right_vp: Mat4) {
         // For stereo, we use a merged frustum that encompasses both views
         // This is a conservative approach - objects visible in either eye pass
         // For Quest 3 with ~100° FoV per eye, the merged FoV is roughly ~110°
-        
+
         // Simple approach: use left eye frustum but expand near plane
         // Better approach would be to compute proper merged frustum
         self.frustum = Frustum::from_view_proj(left_vp);
@@ -232,7 +251,7 @@ impl OcclusionCuller {
     /// Test if an AABB is visible (not culled)
     pub fn is_visible(&mut self, aabb: &AABB) -> bool {
         self.stats.total_objects += 1;
-        
+
         if self.frustum.intersects_aabb(aabb) {
             self.stats.visible += 1;
             true
@@ -245,7 +264,7 @@ impl OcclusionCuller {
     /// Test if a sphere is visible
     pub fn is_sphere_visible(&mut self, center: Vec3, radius: f32) -> bool {
         self.stats.total_objects += 1;
-        
+
         if self.frustum.intersects_sphere(center, radius) {
             self.stats.visible += 1;
             true
@@ -264,13 +283,13 @@ impl OcclusionCuller {
     /// Returns indices of visible objects
     pub fn cull_batch(&mut self, aabbs: &[AABB]) -> Vec<usize> {
         let mut visible = Vec::with_capacity(aabbs.len());
-        
+
         for (i, aabb) in aabbs.iter().enumerate() {
             if self.is_visible(aabb) {
                 visible.push(i);
             }
         }
-        
+
         visible
     }
 }
@@ -337,7 +356,7 @@ mod tests {
 
         // Sphere in front
         assert!(culler.is_sphere_visible(Vec3::new(0.0, 0.0, -5.0), 1.0));
-        
+
         // Sphere behind
         assert!(!culler.is_sphere_visible(Vec3::new(0.0, 0.0, 5.0), 1.0));
     }

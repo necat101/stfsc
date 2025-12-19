@@ -2,17 +2,15 @@
 // Handles KTX2/ASTC compressed texture loading and streaming for mobile VR
 
 use ash::vk;
-use anyhow::{Result, Context};
 use std::collections::HashMap;
-use glam::Vec3;
 
 /// Supported ASTC block sizes for Quest 3
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AstcBlockSize {
-    Block4x4,   // Highest quality (8 bpp)
-    Block5x5,   // Good quality (5.12 bpp)
-    Block6x6,   // Medium quality (3.56 bpp)
-    Block8x8,   // Low quality (2 bpp)
+    Block4x4, // Highest quality (8 bpp)
+    Block5x5, // Good quality (5.12 bpp)
+    Block6x6, // Medium quality (3.56 bpp)
+    Block8x8, // Low quality (2 bpp)
 }
 
 impl AstcBlockSize {
@@ -66,9 +64,9 @@ pub struct StreamedTexture {
     pub width: u32,
     pub height: u32,
     pub mip_levels: u32,
-    pub resident_mips: u32,     // How many mips are currently loaded (from highest mip)
+    pub resident_mips: u32, // How many mips are currently loaded (from highest mip)
     pub format: vk::Format,
-    pub last_used_frame: u64,   // For LRU eviction
+    pub last_used_frame: u64, // For LRU eviction
 }
 
 /// Request to load a texture or mip level
@@ -76,8 +74,8 @@ pub struct StreamedTexture {
 pub struct TextureLoadRequest {
     pub path: String,
     pub priority: TexturePriority,
-    pub distance: f32,          // Distance from camera (for priority)
-    pub desired_mip: u32,       // Which mip level to load (0 = full res)
+    pub distance: f32,    // Distance from camera (for priority)
+    pub desired_mip: u32, // Which mip level to load (0 = full res)
 }
 
 /// Texture streaming manager
@@ -140,19 +138,95 @@ impl TextureStreamingManager {
     }
 
     /// Process pending texture loads (call once per frame)
-    pub fn process_loads(&mut self, max_uploads: usize) {
+    pub fn process_loads(&mut self, graphics_context: &super::GraphicsContext, max_uploads: usize) {
         self.frame_count += 1;
 
         // Sort by priority (highest first)
         self.pending.sort_by(|a, b| b.priority.cmp(&a.priority));
 
         // Process up to max_uploads
-        let to_process: Vec<_> = self.pending.drain(..max_uploads.min(self.pending.len())).collect();
+        let to_process: Vec<_> = self
+            .pending
+            .drain(..max_uploads.min(self.pending.len()))
+            .collect();
 
         for request in to_process {
-            // TODO: Actually load the texture (requires graphics context)
-            // For now, just log
-            log::debug!("Would load texture: {} (priority: {:?})", request.path, request.priority);
+            log::info!(
+                "Loading texture: {} (priority: {:?})",
+                request.path,
+                request.priority
+            );
+
+            // Read file
+            let data = match std::fs::read(&request.path) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::error!("Failed to read texture file {}: {:?}", request.path, e);
+                    continue;
+                }
+            };
+
+            // Create Texture from KTX2
+            match graphics_context.create_texture_from_ktx2(&data) {
+                Ok((image, memory, view)) => {
+                    // Create default sampler
+                    let sampler_info = vk::SamplerCreateInfo::builder()
+                        .mag_filter(vk::Filter::LINEAR)
+                        .min_filter(vk::Filter::LINEAR)
+                        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                        .address_mode_u(vk::SamplerAddressMode::REPEAT)
+                        .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                        .address_mode_w(vk::SamplerAddressMode::REPEAT)
+                        .max_anisotropy(16.0)
+                        .anisotropy_enable(true) // Should check device limits, but Quest 3 supports it
+                        .max_lod(vk::LOD_CLAMP_NONE); // Allows access to all mips provided by ImageView
+
+                    let sampler = unsafe {
+                        graphics_context
+                            .device
+                            .create_sampler(&sampler_info, None)
+                            .unwrap()
+                    };
+
+                    // Determine dimensions/format from image (we don't have them easily from return value without querying or parsing again)
+                    // Better to have create_texture_from_ktx2 return a Texture struct or metadata.
+                    // But we can just assume it worked. For width/height/mips, we could parse header again or refactor create_function.
+                    // Since we parsed header in create_texture_from_ktx2, it would be nice to return it.
+                    // But for now, let's just peek header again here or pass 0/fake if unused by renderer (renderer usually uses descriptor).
+                    // Actually, KTX2 parsing is cheap enough to do again or we assume it's valid.
+
+                    // Let's parse just to get metadata for StreamedTexture
+                    // Use the crate rooted at ::ktx2
+                    let reader = ::ktx2::Reader::new(&data).unwrap();
+                    let header = reader.header();
+                    let width = header.pixel_width;
+                    let height = header.pixel_height;
+                    let mip_levels = header.level_count;
+                    // Use local helper
+                    let format =
+                        self::ktx2::ktx2_format_to_vk(header.format.unwrap().0.get()).unwrap();
+
+                    let streamed = StreamedTexture {
+                        image,
+                        memory,
+                        view,
+                        sampler,
+                        width,
+                        height,
+                        mip_levels,
+                        resident_mips: mip_levels, // We loaded all mips in create_texture_from_ktx2
+                        format,
+                        last_used_frame: self.frame_count,
+                    };
+
+                    self.current_memory += data.len(); // Approximate usage
+                    self.textures.insert(request.path.clone(), streamed);
+                    log::info!("Texture loaded: {}", request.path);
+                }
+                Err(e) => {
+                    log::error!("Failed to create KTX2 texture {}: {:?}", request.path, e);
+                }
+            }
         }
     }
 
@@ -184,7 +258,9 @@ impl TextureStreamingManager {
         }
 
         // Collect textures sorted by last used (oldest first)
-        let mut by_age: Vec<_> = self.textures.iter()
+        let mut by_age: Vec<_> = self
+            .textures
+            .iter()
             .map(|(path, tex)| (path.clone(), tex.last_used_frame))
             .collect();
         by_age.sort_by_key(|(_, frame)| *frame);
@@ -194,7 +270,7 @@ impl TextureStreamingManager {
             if self.current_memory <= self.memory_budget - target_free {
                 break;
             }
-            
+
             // TODO: Actually destroy texture resources
             if let Some(_tex) = self.textures.remove(&path) {
                 log::info!("Evicted texture: {}", path);
@@ -206,7 +282,7 @@ impl TextureStreamingManager {
 
 /// KTX2 header parsing utilities
 pub mod ktx2 {
-    use anyhow::{Result, bail};
+    use anyhow::{bail, Result};
 
     /// KTX2 file header
     #[derive(Debug)]
@@ -238,7 +314,11 @@ pub mod ktx2 {
 
         // Check magic
         let magic = &data[0..12];
-        if magic != [0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A] {
+        if magic
+            != [
+                0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A,
+            ]
+        {
             bail!("Invalid KTX2 magic");
         }
 
@@ -303,7 +383,7 @@ mod tests {
         let mut manager = TextureStreamingManager::new(256);
         manager.request_texture("test.ktx2", 3.0); // Should be Critical
         assert_eq!(manager.pending[0].priority, TexturePriority::Critical);
-        
+
         manager.request_texture("far.ktx2", 100.0); // Should be Low
         assert_eq!(manager.pending[1].priority, TexturePriority::Low);
     }

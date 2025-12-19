@@ -1,0 +1,30 @@
+   Compiling stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+error[E0599]: no method named `context` found for enum `std::option::Option` in the current scope
+   --> src/graphics/mod.rs:518:18
+    |
+512 | /             instance
+513 | |                 .get_physical_device_queue_family_properties(physical_device)
+514 | |                 .into_iter()
+515 | |                 .enumerate()
+516 | |                 .find(|(_, props)| props.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+517 | |                 .map(|(i, _)| i as u32)
+518 | |                 .context("No graphics queue found")?
+    | |_________________-^^^^^^^
+    |
+   ::: /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anyhow-1.0.100/src/lib.rs:622:8
+    |
+622 |       fn context<C>(self, context: C) -> Result<T, Error>
+    |          ------- the method is available for `std::option::Option<u32>` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Context` which provides `context` is implemented but not in scope; perhaps you want to import it
+    |
+1   + use anyhow::Context;
+    |
+help: there is a method `with_context` with a similar name
+    |
+518 |                 .with_context("No graphics queue found")?
+    |                  ~~~~~~~~~~~~
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `stfsc_engine` (lib) due to 1 previous error
