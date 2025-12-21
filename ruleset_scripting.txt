@@ -1,6 +1,9 @@
 # STFSC Engine: "Fuck Script" Ruleset & Technical Guide
 
-This document serves as a guide for future AI agents and developers working on the STFSC engine's scripting system.
+This document serves as a guide for future AI agents and developers working with the STFSC engine's scripting system.
+
+
+This is where we get Intimate with the engine, hence the name "Fuck Script" :3
 
 ## 1. System Overview
 "Fuck Scripts" (trait `FuckScript`) are the primary way to define dynamic entity behaviors in Rust. They are integrated into the engine's `hecs` ECS.
@@ -10,7 +13,16 @@ This document serves as a guide for future AI agents and developers working on t
 - **Methods**:
     - `on_start(&mut self, ctx: &mut ScriptContext)`: Called when the script first runs.
     - `on_update(&mut self, ctx: &mut ScriptContext)`: Called every logic frame.
-- **ScriptContext**: Holds the `entity` ID, a mutable reference to the `world` (ECS), a mutable reference to the `physics` engine, and `dt` (delta time).
+    - `on_enable(&mut self, ctx: &mut ScriptContext)`: Called when the script/entity is enabled.
+    - `on_disable(&mut self, ctx: &mut ScriptContext)`: Called when disabled or removed (cleanup).
+    - `on_collision_start(&mut self, ctx: &mut ScriptContext, other: Entity)`: Collision begins.
+    - `on_collision_end(&mut self, ctx: &mut ScriptContext, other: Entity)`: Collision ends.
+    - `on_trigger_start(&mut self, ctx: &mut ScriptContext, other: Entity)`: Trigger volume overlap starts.
+- **ScriptContext Helpers**:
+    - `get_component<T>()`: Get a read-only ref to a component.
+    - `get_component_mut<T>()`: Get a mutable ref to a component.
+    - `transform()` / `transform_mut()`: Quick access to the entity's transform.
+    - `despawn_self()`: Safely remove the current entity from the world.
 
 ## 3. ECS Integration
 - **DynamicScript Component**: Holds the script in an `Option<Box<dyn FuckScript>>`.
@@ -22,29 +34,53 @@ This document serves as a guide for future AI agents and developers working on t
     3. Put the script back into the component.
     *Failure to do this will result in borrow checker errors (E0502).*
 
-## 4. Registration & Deployment
-- **ScriptRegistry**: Maps string names (e.g., "CrowdAgent") to script constructors.
-- **Registration**: Done in `GameWorld::new()` using `reg.register("Name", || ScriptStruct)`.
-- **Deployment**: The editor sends a `SceneUpdate::AttachScript { id, name }` command over TCP. The engine handles this in `update_streaming` by looking up the name in the registry and inserting a `DynamicScript` component.
+## 4. Player Tracking
+- **Player Marker**: A `Player` component exists in the ECS. 
+- **Platform Sync**: The engine (in `main.rs` and `lib.rs`) automatically spawns a `Player` entity and syncs its `Transform` to the camera/headset pose every frame.
+- **Accessing Player**: Use a query to find the player position in scripts:
+  ```rust
+  for (_e, (t, _p)) in ctx.world.query::<(&Transform, &Player)>().iter() {
+      let player_pos = t.position;
+      // ... logic
+  }
+  ```
 
-## 5. Scripting Standards
+## 5. Built-in Script Archetypes
+- **TestBounce**: Simple oscillating movement.
+- **CrowdAgent**: Standard NPC movement with target seeking, steering, and **Stuck Detection** (picks new target if stationary for 1.5s).
+- **PoliceAgent**: Chases the player within a 30m radius using steering.
+- **TrafficAI**: Vehicle AI that handles physics-based suspensions and uses raycasts (5m) to **Stop for Obstacles** or other cars.
+- **WeaponNPC**: Basic combat logic that makes the entity rotate smoothly to face the player.
+
+## 6. Registration & Deployment
+- **ScriptRegistry**: Maps string names to script constructors in `GameWorld::new()`.
+- **Deployment**: The editor sends `SceneUpdate::AttachScript { id, name }`. Ensure new script names are registered in `src/world/mod.rs`.
+
+## 7. Scripting Standards
 - Scripts should be `Send + Sync`.
 - Avoid heavy allocations inside `on_update`.
-- Use `ctx.world.get::<&mut Transform>(ctx.entity)` to move entities.
-- For AI, keep state inside the script struct (e.g., `pub struct MyAI { target: Vec3 }`).
+- For movements, prefer updating the `Transform` position or applying forces to a `RigidBodyHandle` if the entity is physics-enabled.
 
-## 6. Example Script Template
-```rust
-pub struct MyScript;
-impl FuckScript for MyScript {
-    fn on_update(&mut self, ctx: &mut ScriptContext) {
-        // Your logic here
-    }
-}
-```
+## 9. Advanced Features (Scripting Update v2)
 
-## 7. Editor Support
-Adding new scripts requires updating:
-1. `src/world/scripting.rs`: Define the script.
-2. `src/world/mod.rs`: Register in `GameWorld::new`.
-3. `src/bin/editor.rs`: Add to the Inspector UI or test scene if needed.
+### Collision & Trigger Events
+Scripts can now react to physics interactions.
+- **`on_collision_start`**: Triggered the frame a collision begins.
+- **`on_collision_end`**: Triggered the frame a collision ends.
+- **Mapping**: The engine uses `RigidBody` user-data to map handles back to ECS `Entity` IDs. Ensure any manually spawned physics entities set their `user_data` to `entity.to_bits().get() as u128`.
+
+### Component Access
+Use the `ScriptContext` helpers for ergonomic ECS manipulation:
+- `ctx.get_component::<T>()` -> `Option<Ref<T>>`
+- `ctx.get_component_mut::<T>()` -> `Option<RefMut<T>>`
+- `ctx.despawn_self()`: Deletes the entity the script is attached to.
+
+### Lifecycle Flow
+1. **`on_start`**: Initialization.
+2. **`on_enable`**: Activation (can be called multiple times if toggle-able).
+3. **`on_update`**: Per-frame logic.
+4. **`on_disable`**: Cleanup/Deactivation (called on entity deletion or script removal).
+
+---
+*Note: Always remember to handle the 'Take Pattern' when calling functions that might re-borrow the world.*
+

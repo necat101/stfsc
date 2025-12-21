@@ -3,7 +3,7 @@
 **Steal This Fucking Source Code** — *Because gaming deserves better.*
 
 <p align="center">
-  <strong>v0.2 Alpha Test</strong>
+  <strong>v0.3 Alpha</strong>
 </p>
 
 ---
@@ -29,15 +29,37 @@ STFSC is the foundation for **556**—an upcoming open-world crime simulator aim
 
 ---
 
-## ✨ Features (v0.1 Alpha)
+## ✨ Features (v0.3 Alpha)
 
 ### Rendering
 - **Vulkan-based renderer** with multiview stereo rendering
 - **PBR lighting pipeline** with shadow mapping (PCF soft shadows)
+- **Dynamic shadow resolution** — Automatic sizing based on scene scale
 - **Application Space Warp (AppSW)** support for 36fps→72Hz upscaling
 - **Motion vector generation** for temporal reprojection
 - **Instanced rendering** with batched draw calls
 - **Dynamic Lights** (Point, Spot, Directional) with PCF Shadows
+- **Reversed-Z depth buffer** for maximum precision on large worlds
+- **Normal Offset Shadow Mapping** for reduced shadow acne
+
+### Physics
+- **Rapier3D integration** for rigid body dynamics
+- **Collision detection** with event callbacks
+- **Static & dynamic bodies** with configurable shapes
+- **Physics-synced transforms** for realistic movement
+
+### Audio
+- **3D Spatial Audio** with distance attenuation
+- **Multiple attenuation models** (Inverse, Linear, Exponential)
+- **Streaming audio support** for ambient sounds
+- **Editor integration** for sound placement and preview
+
+### Scripting — "Fuck Script" 🔥
+- **Native Rust scripting** via `FuckScript` trait
+- **Lifecycle hooks**: `on_start`, `on_update`, `on_enable`, `on_disable`
+- **Collision callbacks**: `on_collision_start`, `on_collision_end`, `on_trigger_start`
+- **Built-in scripts**: CrowdAgent, PoliceAgent, TrafficAI, VehicleAI, WeaponNPC
+- **Script registry** for editor attachment
 
 ### Engine Architecture
 - **Entity Component System (ECS)** via `hecs`
@@ -50,8 +72,12 @@ STFSC is the foundation for **556**—an upcoming open-world crime simulator aim
 ### Editor Integration
 - **Live scene deployment** over TCP/IP
 - **Real-time entity manipulation** (spawn, transform, delete)
+- **Scene clearing** with proper entity lifecycle management
 - **Primitive mesh library** (cube, sphere, cylinder, cone, capsule, plane)
 - **Custom mesh & texture streaming** from editor
+- **Ground plane textures** with shadow frustum optimization
+- **Script attachment** via inspector panel
+- **3D Audio source placement** with live preview
 
 ### VR/XR
 - **OpenXR integration** for Meta Quest devices
@@ -68,6 +94,7 @@ STFSC is the foundation for **556**—an upcoming open-world crime simulator aim
 | Language | Rust 🦀 |
 | Graphics API | Vulkan 1.1+ |
 | XR Runtime | OpenXR |
+| Physics | Rapier3D |
 | ECS | hecs |
 | Math | glam |
 | Serialization | bincode / serde |
@@ -102,30 +129,32 @@ adb shell am start -n com.stfsc.engine/android.app.NativeActivity
 
 ---
 
+## 🖥️ Linux Desktop Build
+
+For development and testing without a Quest headset:
+
+```bash
+cargo run
+```
+
+That's it! The Linux client provides a windowed preview with WASD + mouse controls for rapid iteration.
+
+---
+
 ## 🎛️ Editor Usage
 
-1. Start the engine on Quest
+1. Start the engine on Quest (or Linux desktop)
 2. Run the editor on your development machine:
    ```bash
    cargo run --bin editor
    ```
-3. Connect via ADB port forwarding:
+3. Connect via ADB port forwarding (Quest) or localhost (Linux):
    ```bash
    adb forward tcp:8080 tcp:8080
    ```
 4. Deploy scenes in real-time!
 
 ---
-
-ADDED LINUX BUILD TARGET FOR TESTING SINCE MY QUEST CABLE BROKE AND IM BUYING A NEW ONE TOMORROW OR THE DAY AFTER WHENEVER I CAN!
-
-linux build:
-```bash
-cargo run
-```
-
-thats it for the linux client build!
-
 
 ## 📊 Performance Targets
 
@@ -141,20 +170,28 @@ thats it for the linux client build!
 
 ## 🗺️ Roadmap
 
-### v0.2 (Alpha Test)
+### v0.2 (Alpha Test) ✅
 - [x] Dynamic lighting system
 - [x] Parallel Resource Loading
 
-### v0.2.5 (Planned)
+### v0.2.5 ✅
+- [x] 3D Audio system integration
 - [ ] Occlusion culling
 - [ ] Compressed texture streaming (KTX2/ASTC)
-- [ ] Audio system integration
 
-### v0.3 (Planned)
-- [ ] Physics integration (Rapier)
-- [ ] Vehicle systems
-- [ ] NPC AI framework
+### v0.3 (Current) ✅
+- [x] Physics integration (Rapier3D)
+- [x] Vehicle systems
+- [x] NPC AI framework (FuckScript)
+- [x] Collision event system
+- [x] Scene clearing with lifecycle management
 - [ ] Navmesh pathfinding
+
+### v0.4 (Planned)
+- [ ] Weapon systems
+- [ ] Player inventory
+- [ ] Save/Load game state
+- [ ] Advanced NPC behaviors
 
 ### v1.0 (556 Launch)
 - [ ] Complete open-world streaming
@@ -177,7 +214,7 @@ STFSC is open because optimization knowledge shouldn't be gatekept.
 
 ## ⚠️ Alpha Disclaimer
 
-This is **v0.2 Alpha Test** software. Expect:
+This is **v0.3 Alpha** software. Expect:
 - Incomplete features
 - API changes
 - The occasional crash

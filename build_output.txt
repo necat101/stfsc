@@ -1,18 +1,12 @@
-Using package `stfsc_engine` in `/home/netcat/Downloads/STFSC engine/Cargo.toml`
-   Compiling stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
-error: unexpected closing delimiter: `}`
-   --> src/lib.rs:747:1
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+warning: variable `audio_source_count` is assigned to, but never used
+   --> src/main.rs:472:33
     |
-47  | fn android_main(app: AndroidApp) {
-    |                                  - this delimiter might not be properly closed...
-...
-405 |                         _ => {}
-    |                              -- block is empty, you might have not meant to close it
-...
-746 |     }
-    |     - ...as it matches this but it has different indentation
-747 | }
-    | ^ unexpected closing delimiter
+472 |                         let mut audio_source_count = 0;
+    |                                 ^^^^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_audio_source_count` instead
+    = note: `#[warn(unused_variables)]` on by default
 
-error: could not compile `stfsc_engine` (lib) due to 1 previous error
-Error: Command `AR_aarch64-linux-android=/home/netcat/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar CARGO_ENCODED_RUSTFLAGS=-Clink-arg=--target=aarch64-linux-android23\u{1f}-L\u{1f}/home/netcat/Downloads/STFSC engine/target/cargo-apk-temp-extra-link-libraries CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=/home/netcat/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=/home/netcat/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/clang CC_aarch64-linux-android=/home/netcat/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/clang CFLAGS_aarch64-linux-android=--target=aarch64-linux-android23 CXXFLAGS_aarch64-linux-android=--target=aarch64-linux-android23 CXX_aarch64-linux-android=/home/netcat/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ cargo build --release --target aarch64-linux-android` had a non-zero exit code.
+warning: `stfsc_engine` (bin "stfsc_engine") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.22s
