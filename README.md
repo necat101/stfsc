@@ -3,7 +3,7 @@
 **Steal This Fucking Source Code** — *Because gaming deserves better.*
 
 <p align="center">
-  <strong>v0.3.5 Alpha — "Turbo Parallel" Update</strong>
+  <strong>v0.3.5 Alpha —</strong>
 </p>
 
 ---
@@ -170,7 +170,8 @@ That's it! The Linux client provides a windowed preview with WASD + mouse contro
 - [x] Real-time Material live-sync
 
 ### v0.4 (Combat & Persistence)
-- [ ] Weapon & Ballistics system
+- [ ] Weapon/Ballistics system
+- [ ] Collision system
 - [ ] Global Save/Load state
 - [ ] Navmesh pathfinding for NPCs
 - [ ] Advanced Traffic steering behaviors
