@@ -143,7 +143,7 @@ fn main() {
             scale: glam::Vec3::new(ground_scale, 1.0, ground_scale),
         },
         MeshHandle(3), // Plane
-        Material { color: [0.15, 0.15, 0.15, 1.0], albedo_texture: None },
+        Material { color: [0.15, 0.15, 0.15, 1.0], albedo_texture: None, metallic: 0.0, roughness: 0.5 },
         RigidBodyHandle(floor_rb),
         stfsc_engine::world::GroundPlane::new(GROUND_PLANE_HALF_EXTENT, GROUND_PLANE_HALF_EXTENT),
     ));
@@ -160,7 +160,7 @@ fn main() {
             scale: glam::Vec3::splat(1.0),
         },
         MeshHandle(1), // Sphere
-        Material { color: [0.3, 0.8, 0.3, 1.0], albedo_texture: None },
+        Material { color: [0.3, 0.8, 0.3, 1.0], albedo_texture: None, metallic: 0.0, roughness: 0.5 },
         RigidBodyHandle(sphere_rb),
     ));
     // Update physics user data with entity bits
@@ -181,7 +181,7 @@ fn main() {
             scale: glam::Vec3::splat(1.0),
         },
         MeshHandle(0), 
-        Material { color: [0.8, 0.3, 0.3, 1.0], albedo_texture: None },
+        Material { color: [0.8, 0.3, 0.3, 1.0], albedo_texture: None, metallic: 0.0, roughness: 0.5 },
         RigidBodyHandle(cube_rb),
     ));
     physics_world.rigid_body_set.get_mut(cube_rb).unwrap().user_data = cube_id.to_bits().get() as u128;
@@ -272,17 +272,24 @@ fn main() {
                     world.update_streaming(pos, physics);
                     world.update_logic(physics, 0.016);
                     
-                    // Sync physics to ECS
-                    let mut updates = Vec::new();
-                    for (id, (_transform, handle)) in state.world.ecs.query::<(&Transform, &RigidBodyHandle)>().iter() {
-                        if let Some(body) = state.physics.rigid_body_set.get(handle.0) {
-                            let p = body.translation();
-                            let r = body.rotation();
-                            updates.push((id, glam::Vec3::new(p.x, p.y, p.z), glam::Quat::from_xyzw(r.i, r.j, r.k, r.w)));
-                        }
-                    }
+                    // Sync physics to ECS - Parallelized gathering
+                    use rayon::prelude::*;
+                    let updates: Vec<_> = world.ecs.query::<(&Transform, &RigidBodyHandle)>()
+                        .iter()
+                        .map(|(id, (_, handle))| (id, handle.0)) // Copy handles out
+                        .collect::<Vec<_>>() 
+                        .into_par_iter()
+                        .filter_map(|(id, handle_idx)| {
+                            physics.rigid_body_set.get(handle_idx).map(|body| {
+                                let p = body.translation();
+                                let r = body.rotation();
+                                (id, glam::Vec3::new(p.x, p.y, p.z), glam::Quat::from_xyzw(r.i, r.j, r.k, r.w))
+                            })
+                        })
+                        .collect();
+
                     for (id, p, r) in updates {
-                        if let Ok(mut t) = state.world.ecs.get::<&mut Transform>(id) {
+                        if let Ok(mut t) = world.ecs.get::<&mut Transform>(id) {
                             t.position = p;
                             t.rotation = r;
                         }
@@ -673,63 +680,97 @@ fn main() {
 
                     occlusion_culler.update_frustum(view_proj);
 
-                    // Collect Regular MeshHandles (separate textured vs non-textured)
+                    // Parallel preparation of render data
+                    use rayon::prelude::*;
                     
-                    for (id, (handle, transform)) in state.world.ecs.query::<(&MeshHandle, &Transform)>().iter() {
-                        if handle.0 < mesh_library.len() {
-                            let gpu_mesh = &mesh_library[handle.0];
-                            let model = glam::Mat4::from_scale_rotation_translation(transform.scale, transform.rotation, transform.position);
-                            if true || occlusion_culler.is_visible(&gpu_mesh.aabb.transform(model)) {
-                                let entity_id = id.id() as u64;
-                                let prev_model = *prev_transforms.get(&entity_id).unwrap_or(&model);
-                                prev_transforms.insert(entity_id, model);
-                                let material = state.world.ecs.get::<&Material>(id).ok();
-                                let color = material.as_ref().map(|m| m.color).unwrap_or([1.0, 1.0, 1.0, 1.0]);
-                                
-                                // Check if entity has a custom texture
-                                let has_custom_texture = material
-                                    .as_ref()
-                                    .and_then(|m| m.albedo_texture.as_ref())
-                                    .and_then(|tex_id| texture_cache.get(tex_id));
-                                
-                                if let Some(tex_entry) = has_custom_texture {
-                                    // Draw textured entities individually with their custom descriptor set
-                                    textured_draws.push((handle.0, InstanceData { model, prev_model, color }, tex_entry.material_descriptor_set));
-                                } else {
-                                    // Batch non-textured entities
-                                    batch_map.entry(handle.0).or_default().push(InstanceData { model, prev_model, color });
-                                }
-                            }
-                        }
-                    }
-                    // Collect Custom GpuMeshes
-                    for (id, (gpu_mesh, transform)) in state.world.ecs.query::<(&GpuMesh, &Transform)>().iter() {
-                        if state.world.ecs.get::<&MeshHandle>(id).is_ok() { continue; }
+                    // 1. Process regular MeshHandles
+                    let mesh_data: Vec<_> = state.world.ecs.query::<(&MeshHandle, &Transform, &Material)>()
+                        .iter()
+                        .map(|(id, (h, t, m))| (id, *h, *t, m.clone()))
+                        .collect();
+
+                    let frustum = *occlusion_culler.get_frustum();
+
+                    let mesh_results: Vec<_> = mesh_data.into_par_iter().filter_map(|(id, handle, transform, material)| {
+                        if handle.0 >= mesh_library.len() { return None; }
+                        
+                        let gpu_mesh = &mesh_library[handle.0];
                         let model = glam::Mat4::from_scale_rotation_translation(transform.scale, transform.rotation, transform.position);
-                        if true || occlusion_culler.is_visible(&gpu_mesh.aabb.transform(model)) {
+                        
+                        if frustum.intersects_aabb(&gpu_mesh.aabb.transform(model)) {
                             let entity_id = id.id() as u64;
-                            let prev_model = *prev_transforms.get(&entity_id).unwrap_or(&model);
-                            prev_transforms.insert(entity_id, model);
-                            let color = state.world.ecs.get::<&Material>(id).map(|m| m.color).unwrap_or([1.0, 1.0, 1.0, 1.0]);
-                            custom_draws.push((gpu_mesh.clone(), InstanceData { model, prev_model, color }));
+                            let color = material.color;
+                            
+                            // Check for custom texture (texture_cache is sync-friendly for reads)
+                            let tex_info = material.albedo_texture.as_ref()
+                                .and_then(|tex_id| texture_cache.get(tex_id).map(|entry| entry.material_descriptor_set));
+
+                            Some((entity_id, handle.0, model, color, tex_info))
+                        } else {
+                            None
+                        }
+                    }).collect();
+
+                    // 2. Process custom GpuMeshes
+                    let custom_entities: Vec<_> = state.world.ecs.query::<(&GpuMesh, &Transform, &Material)>()
+                        .iter()
+                        .filter(|(id, _)| state.world.ecs.get::<&MeshHandle>(*id).is_err())
+                        .map(|(id, (g, t, m))| (id, g.clone(), *t, m.clone()))
+                        .collect();
+                    
+                    let custom_results: Vec<_> = custom_entities.into_par_iter().filter_map(|(id, gpu_mesh, transform, material)| {
+                        let model = glam::Mat4::from_scale_rotation_translation(transform.scale, transform.rotation, transform.position);
+                        if frustum.intersects_aabb(&gpu_mesh.aabb.transform(model)) {
+                            let entity_id = id.id() as u64;
+                            Some((entity_id, gpu_mesh, model, material.color))
+                        } else {
+                            None
+                        }
+                    }).collect();
+
+                    // Apply results (sequential final batching)
+                    for (entity_id, mesh_idx, model, color, tex_info) in mesh_results {
+                        let prev_model = *prev_transforms.get(&entity_id).unwrap_or(&model);
+                        prev_transforms.insert(entity_id, model);
+                        
+                        let instance = InstanceData { model, prev_model, color };
+                        if let Some(desc_set) = tex_info {
+                            textured_draws.push((mesh_idx, instance, desc_set));
+                        } else {
+                            batch_map.entry(mesh_idx).or_default().push(instance);
                         }
                     }
 
-                    // Lights
+                    for (entity_id, gpu_mesh, model, color) in custom_results {
+                        let prev_model = *prev_transforms.get(&entity_id).unwrap_or(&model);
+                        prev_transforms.insert(entity_id, model);
+                        custom_draws.push((gpu_mesh, InstanceData { model, prev_model, color }));
+                    }
+
+                    // Lights - Parallelized gathering
+                    let light_data: Vec<_> = state.world.ecs.query::<(&stfsc_engine::world::LightComponent, &Transform)>()
+                        .iter()
+                        .map(|(id, (l, t))| (id, l.clone(), *t))
+                        .collect::<Vec<_>>()
+                        .into_par_iter()
+                        .filter_map(|(_id, light, transform)| {
+                            let direction = transform.rotation * glam::Vec3::NEG_Z;
+                            Some(GpuLightData::from_light(&lighting::Light {
+                                light_type: match light.light_type {
+                                    stfsc_engine::world::LightType::Point => lighting::LightType::Point,
+                                    stfsc_engine::world::LightType::Spot => lighting::LightType::Spot,
+                                    stfsc_engine::world::LightType::Directional => lighting::LightType::Directional,
+                                },
+                                color: glam::Vec3::from_array([light.color[0], light.color[1], light.color[2]]),
+                                intensity: light.intensity, range: light.range,
+                                inner_cone_angle: light.inner_cone_angle, outer_cone_angle: light.outer_cone_angle,
+                                cast_shadows: light.cast_shadows,
+                            }, transform.position, direction, -1))
+                        })
+                        .collect();
+
                     let mut light_ubo = LightUBO::new();
-                    for (_id, (light, transform)) in state.world.ecs.query::<(&stfsc_engine::world::LightComponent, &Transform)>().iter() {
-                        let direction = transform.rotation * glam::Vec3::NEG_Z;
-                        let gpu_light = GpuLightData::from_light(&lighting::Light {
-                            light_type: match light.light_type {
-                                stfsc_engine::world::LightType::Point => lighting::LightType::Point,
-                                stfsc_engine::world::LightType::Spot => lighting::LightType::Spot,
-                                stfsc_engine::world::LightType::Directional => lighting::LightType::Directional,
-                            },
-                            color: glam::Vec3::from_array([light.color[0], light.color[1], light.color[2]]),
-                            intensity: light.intensity, range: light.range,
-                            inner_cone_angle: light.inner_cone_angle, outer_cone_angle: light.outer_cone_angle,
-                            cast_shadows: light.cast_shadows,
-                        }, transform.position, direction, -1);
+                    for gpu_light in light_data {
                         if !light_ubo.add_light(gpu_light) { break; }
                     }
                     unsafe { *light_ptr = light_ubo; }

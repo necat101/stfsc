@@ -2,6 +2,8 @@
 // Hierarchical Z-Buffer (Hi-Z) based GPU occlusion culling for mobile VR
 
 use glam::{Mat4, Vec3};
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Axis-Aligned Bounding Box for visibility testing
 #[derive(Clone, Copy, Debug)]
@@ -279,6 +281,11 @@ impl OcclusionCuller {
         self.stats
     }
 
+    /// Get the current frustum for parallel visibility checks
+    pub fn get_frustum(&self) -> &Frustum {
+        &self.frustum
+    }
+
     /// Batch visibility test for multiple AABBs
     /// Returns indices of visible objects
     pub fn cull_batch(&mut self, aabbs: &[AABB]) -> Vec<usize> {
@@ -289,6 +296,38 @@ impl OcclusionCuller {
                 visible.push(i);
             }
         }
+
+        visible
+    }
+
+    /// Parallel batch visibility test for multiple AABBs using rayon
+    /// Returns indices of visible objects - best for large batches (100+ objects)
+    pub fn cull_batch_parallel(&mut self, aabbs: &[AABB]) -> Vec<usize> {
+        // Use atomics for thread-safe stats
+        let total = AtomicU32::new(0);
+        let visible_count = AtomicU32::new(0);
+        let culled_count = AtomicU32::new(0);
+        let frustum = self.frustum; // Copy for parallel access
+
+        let visible: Vec<usize> = aabbs
+            .par_iter()
+            .enumerate()
+            .filter_map(|(i, aabb)| {
+                total.fetch_add(1, Ordering::Relaxed);
+                if frustum.intersects_aabb(aabb) {
+                    visible_count.fetch_add(1, Ordering::Relaxed);
+                    Some(i)
+                } else {
+                    culled_count.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
+            })
+            .collect();
+
+        // Update stats after parallel work
+        self.stats.total_objects += total.load(Ordering::Relaxed);
+        self.stats.visible += visible_count.load(Ordering::Relaxed);
+        self.stats.frustum_culled += culled_count.load(Ordering::Relaxed);
 
         visible
     }
@@ -303,6 +342,16 @@ impl Default for OcclusionCuller {
 /// Compute AABB for a mesh given its transform
 pub fn compute_mesh_aabb(base_aabb: &AABB, transform: Mat4) -> AABB {
     base_aabb.transform(transform)
+}
+
+/// Parallel visibility check for a batch of transformed AABBs
+/// Returns Vec of bools matching each input AABB's visibility
+/// This is a stateless function that can be called from any thread
+pub fn check_visibility_parallel(frustum: &Frustum, aabbs: &[AABB]) -> Vec<bool> {
+    aabbs
+        .par_iter()
+        .map(|aabb| frustum.intersects_aabb(aabb))
+        .collect()
 }
 
 /// Unit cube AABB (centered at origin, size 1)

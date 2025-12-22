@@ -30,7 +30,7 @@ pub struct ChunkData {
     pub transform: Option<Transform>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Transform {
     pub position: glam::Vec3,
     pub rotation: glam::Quat,
@@ -96,6 +96,8 @@ pub struct DecodedImage {
 pub struct Material {
     pub color: [f32; 4],
     pub albedo_texture: Option<String>,  // Texture ID for custom albedo texture
+    pub metallic: f32,
+    pub roughness: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -398,6 +400,14 @@ pub enum SceneUpdate {
         half_extents: [f32; 2], // X and Z half-extents for shadow frustum
         albedo_texture: Option<String>, // Texture ID for custom albedo texture
     },
+    /// Update an entity's material properties in real-time
+    UpdateMaterial {
+        id: u32,
+        color: Option<[f32; 4]>,
+        albedo_texture: Option<Option<String>>, // Some(Some(id)) to set, Some(None) to clear, None for no change
+        metallic: Option<f32>,
+        roughness: Option<f32>,
+    },
 }
 
 impl GameWorld {
@@ -446,12 +456,32 @@ impl GameWorld {
         let pc_x = (player_pos.x / chunk_size).floor() as i32;
         let pc_z = (player_pos.z / chunk_size).floor() as i32;
 
+        let mut chunks_to_generate = Vec::new();
         for x in (pc_x - load_radius)..=(pc_x + load_radius) {
             for z in (pc_z - load_radius)..=(pc_z + load_radius) {
                 if !self.loaded_chunks.contains(&(x, z)) {
-                    // Load this chunk
-                    self.loaded_chunks.insert((x, z));
-                    self.generate_chunk(x, z, chunk_size);
+                    chunks_to_generate.push((x, z));
+                }
+            }
+        }
+
+        if !chunks_to_generate.is_empty() {
+            use rayon::prelude::*;
+            // Parallelize the data generation for chunks (Read-only data access)
+            // Use a local copy of procedural settings to avoid capturing &mut self
+            let procedural_enabled = self.procedural_generation_enabled;
+            
+            let chunk_data: Vec<_> = chunks_to_generate.par_iter().map(|&(x, z)| {
+                if !procedural_enabled { return Vec::new(); }
+                self.calculate_chunk_entities(x, z, chunk_size)
+            }).collect();
+
+            // Sequential update of the world state
+            for (i, entities) in chunk_data.into_iter().enumerate() {
+                let (x, z) = chunks_to_generate[i];
+                self.loaded_chunks.insert((x, z));
+                for (transform, mesh, material) in entities {
+                    self.ecs.spawn((transform, mesh, material, Procedural));
                 }
             }
         }
@@ -484,6 +514,8 @@ impl GameWorld {
                         Material {
                             color: [color[0], color[1], color[2], 1.0],
                             albedo_texture,
+                            metallic: 0.0,
+                            roughness: 0.5,
                         },
                     ));
                     info!(
@@ -508,6 +540,8 @@ impl GameWorld {
                         Material {
                             color: [1.0, 1.0, 1.0, 1.0],
                             albedo_texture: None,
+                            metallic: 0.0,
+                            roughness: 0.5,
                         }, // Default white for mesh
                     ));
                     info!("Spawned mesh with EditorEntityId({})", id);
@@ -782,6 +816,8 @@ impl GameWorld {
                         Material {
                             color: [color[0], color[1], color[2], 1.0],
                             albedo_texture,
+                            metallic: 0.0,
+                            roughness: 0.5,
                         },
                         GroundPlane::new(half_extents[0], half_extents[1]),
                     ));
@@ -789,6 +825,26 @@ impl GameWorld {
                         "Spawned GroundPlane with EditorEntityId({}) - half_extents: {:?}",
                         id, half_extents
                     );
+                }
+                SceneUpdate::UpdateMaterial { id, color, albedo_texture, metallic, roughness } => {
+                    for (_entity, (editor_id, mat)) in self.ecs.query_mut::<(&EditorEntityId, &mut Material)>() {
+                        if editor_id.0 == id {
+                            if let Some(c) = color {
+                                mat.color = c;
+                            }
+                            if let Some(tex) = albedo_texture {
+                                mat.albedo_texture = tex;
+                            }
+                            if let Some(m) = metallic {
+                                mat.metallic = m;
+                            }
+                            if let Some(r) = roughness {
+                                mat.roughness = r;
+                            }
+                            info!("Updated material for entity {}", id);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -807,6 +863,7 @@ impl GameWorld {
             }
         };
 
+        // 1. Process Collision Events - Dispatch sequentially for now
         for event in collision_events {
             match event {
                 rapier3d::prelude::CollisionEvent::Started(c1, c2, _flags) => {
@@ -817,6 +874,9 @@ impl GameWorld {
                 }
             }
         }
+
+        // 1.1 Parallel Agent Logic Update
+        self.update_agents_parallel(dt);
 
         // 2. Update Scripts
         let entities: Vec<Entity> = self.ecs.query::<&DynamicScript>()
@@ -846,6 +906,96 @@ impl GameWorld {
                 if let Ok(mut comp) = self.ecs.get::<&mut DynamicScript>(entity) {
                     comp.script = Some(s);
                     comp.started = started;
+                }
+            }
+        }
+    }
+
+    fn update_agents_parallel(&mut self, dt: f32) {
+        use rayon::prelude::*;
+
+        // Gather all agents and their transforms
+        let agent_data: Vec<_> = self.ecs.query_mut::<(&mut CrowdAgent, &Transform)>()
+            .into_iter()
+            .map(|(e, (a, t))| (e, a.clone(), t.clone()))
+            .collect();
+
+        // Find player pos (global data for agents)
+        let mut player_pos = None;
+        for (_e, (t, _p)) in self.ecs.query::<(&Transform, &Player)>().iter() {
+            player_pos = Some(t.position);
+            break;
+        }
+
+        // Parallel update
+        let results: Vec<_> = agent_data.into_par_iter().map(|(entity, mut agent, transform)| {
+            let pos = transform.position;
+            
+            // Re-implementing the core CrowdAgent logic from scripting.rs for parallel speed
+            let mut seed = (entity.id() as u32).wrapping_mul(12345) ^ (pos.x * 100.0) as u32;
+            let mut rand = || {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (seed as f32) / (u32::MAX as f32)
+            };
+
+            if (pos - agent.last_pos).length() < 0.1 * dt {
+                agent.stuck_timer += dt;
+            } else {
+                agent.stuck_timer = 0.0;
+            }
+            agent.last_pos = pos;
+
+            if agent.stuck_timer > 1.5 {
+                agent.target = glam::Vec3::new((rand() - 0.5) * 60.0, pos.y, (rand() - 0.5) * 60.0);
+                agent.velocity = glam::Vec3::new(rand() - 0.5, 0.0, rand() - 0.5).normalize() * 2.0;
+                agent.stuck_timer = 0.0;
+            }
+
+            if let Some(p_pos) = player_pos {
+                if agent.state == AgentState::Fleeing && (p_pos - pos).length() < 12.0 {
+                    let away = (pos - p_pos).normalize();
+                    agent.target = pos + away * 15.0;
+                }
+            }
+
+            let to_target = agent.target - pos;
+            let dist = to_target.length();
+
+            if dist < 1.5 || agent.target.length_squared() < 0.001 {
+                agent.target = glam::Vec3::new((rand() - 0.5) * 60.0, pos.y, (rand() - 0.5) * 60.0);
+                agent.velocity = (agent.target - pos).normalize() * 0.1;
+                (entity, agent, None)
+            } else {
+                let desired = to_target.normalize() * agent.max_speed;
+                let steer_force = if agent.state == AgentState::Fleeing { 20.0 } else { 8.0 };
+                let steering = (desired - agent.velocity) * steer_force;
+
+                agent.velocity += steering * dt;
+                if agent.velocity.length() > agent.max_speed {
+                    agent.velocity = agent.velocity.normalize() * agent.max_speed;
+                }
+
+                let new_pos = pos + agent.velocity * dt;
+                let new_rot = if agent.velocity.length_squared() > 0.1 {
+                    let angle = agent.velocity.x.atan2(agent.velocity.z);
+                    glam::Quat::from_rotation_y(angle)
+                } else {
+                    transform.rotation
+                };
+                
+                (entity, agent, Some((new_pos, new_rot)))
+            }
+        }).collect();
+
+        // Apply results
+        for (entity, agent, transform_update) in results {
+            if let Ok(mut a) = self.ecs.get::<&mut CrowdAgent>(entity) {
+                *a = agent;
+            }
+            if let Some((pos, rot)) = transform_update {
+                if let Ok(mut t) = self.ecs.get::<&mut Transform>(entity) {
+                    t.position = pos;
+                    t.rotation = rot;
                 }
             }
         }
@@ -900,15 +1050,12 @@ impl GameWorld {
         // NOTE: Runtime removed. If async IO is needed, pass a handle or use a separate IO system.
     }
 
-    fn generate_chunk(&mut self, cx: i32, cz: i32, size: f32) {
-        // Check if procedural generation is enabled
-        if !self.procedural_generation_enabled {
-            return; // Procedural generation disabled
-        }
-
+    fn calculate_chunk_entities(&self, cx: i32, cz: i32, size: f32) -> Vec<(Transform, MeshHandle, Material)> {
+        let mut entities = Vec::new();
+        
         // Skip center chunks (clear spawn area)
         if cx.abs() <= 1 && cz.abs() <= 1 {
-            return; // Don't generate buildings near spawn
+            return entities;
         }
 
         // Deterministic generation based on chunk coord
@@ -918,24 +1065,21 @@ impl GameWorld {
             (seed as f32) / (u32::MAX as f32)
         };
 
-        // Spawn buildings/props in this chunk
-        // 4x4 subgrid
         let count = 4;
         let step = size / count as f32;
 
         for i in 0..count {
             for j in 0..count {
                 if rand() > 0.7 {
-                    // 30% chance of building
                     let lx = (i as f32) * step + step * 0.5 - size * 0.5;
                     let lz = (j as f32) * step + step * 0.5 - size * 0.5;
 
                     let wx = (cx as f32) * size + lx;
                     let wz = (cz as f32) * size + lz;
 
-                    let height = 0.5 + rand() * 5.0; // 0.5 to 5.5m tall
+                    let height = 0.5 + rand() * 5.0;
 
-                    self.ecs.spawn((
+                    entities.push((
                         Transform {
                             position: glam::Vec3::new(wx, height * 0.5, wz),
                             rotation: glam::Quat::IDENTITY,
@@ -945,12 +1089,14 @@ impl GameWorld {
                         Material {
                             color: [0.7, 0.7, 0.8, 1.0],
                             albedo_texture: None,
+                            metallic: 0.0,
+                            roughness: 0.5,
                         },
-                        Procedural,
                     ));
                 }
             }
         }
+        entities
     }
 }
 

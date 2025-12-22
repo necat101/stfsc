@@ -1,12 +1,15 @@
-   Compiling stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
-warning: variable `audio_source_count` is assigned to, but never used
-   --> src/main.rs:476:33
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
+error[E0506]: cannot assign to `entity.material.albedo_texture` because it is borrowed
+   --> src/bin/editor.rs:803:25
     |
-476 |                         let mut audio_source_count = 0;
-    |                                 ^^^^^^^^^^^^^^^^^^
-    |
-    = note: consider using `_audio_source_count` instead
-    = note: `#[warn(unused_variables)]` on by default
+787 |             if let Some(texture_path) = &entity.material.albedo_texture {
+    |                                         ------------------------------- `entity.material.albedo_texture` is borrowed here
+...
+803 |                         entity.material.albedo_texture = Some(p);
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `entity.material.albedo_texture` is assigned to here but it was already borrowed
+...
+810 |                     eprintln!("Warning: Could not load texture at '{}'", texture_path);
+    |                                                                          ------------ borrow later used here
 
-warning: `stfsc_engine` (bin "stfsc_engine") generated 1 warning
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.99s
+For more information about this error, try `rustc --explain E0506`.
+error: could not compile `stfsc_engine` (bin "editor") due to 1 previous error

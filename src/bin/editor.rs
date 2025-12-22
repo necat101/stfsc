@@ -1,4 +1,5 @@
 use eframe::egui;
+use rayon::prelude::*;
 use std::io::Write;
 use std::net::TcpStream;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -75,6 +76,7 @@ impl Vec3 {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Camera3D {
     target: Vec3,
     distance: f32,
@@ -413,6 +415,34 @@ enum AppEvent {
 }
 
 // ============================================================================
+// PENDING ACTIONS (for unsaved changes dialog)
+// ============================================================================
+#[derive(Clone)]
+enum PendingAction {
+    NewScene,
+    OpenScene(String),
+    LoadTestScene,
+    Exit,
+}
+
+// ============================================================================
+// UNDO/REDO ACTION HISTORY
+// ============================================================================
+#[derive(Clone)]
+enum EditorAction {
+    /// Entity was added - undo by removing, redo by adding back
+    AddEntity { entity: SceneEntity },
+    /// Entity was deleted - undo by adding back, redo by removing
+    DeleteEntity { entity: SceneEntity },
+    /// Entity was modified - stores before and after states
+    ModifyEntity { 
+        id: u32,
+        before: SceneEntity,
+        after: SceneEntity,
+    },
+}
+
+// ============================================================================
 // EDITOR
 // ============================================================================
 struct EditorApp {
@@ -435,6 +465,25 @@ struct EditorApp {
     drag_button: Option<egui::PointerButton>,
     last_mouse: egui::Pos2,
     dragging_id: Option<u32>,
+    drag_start_entity: Option<SceneEntity>,  // Entity state at drag start for undo
+    inspector_start_entity: Option<SceneEntity>,  // Entity state at inspector edit start for undo
+    last_selected_id: Option<u32>,  // Track selection changes
+
+    // Scene file management
+    current_scene_path: Option<String>,    // Path to currently loaded scene file
+    scene_dirty: bool,                      // True if scene has unsaved changes
+    recent_scenes: Vec<String>,             // Recently opened scene files
+    show_open_scene_dialog: bool,           // Open scene file browser dialog
+    show_save_as_dialog: bool,              // Save as dialog
+    save_as_path: String,                   // Buffer for save-as filename input
+    open_scene_files: Vec<String>,          // Cached list of scene files for browser
+    show_unsaved_warning: bool,             // Unsaved changes warning dialog
+    pending_action: Option<PendingAction>,  // What to do after unsaved warning
+
+    // Clipboard and History
+    clipboard: Option<SceneEntity>,         // Copied entity for paste
+    undo_stack: Vec<EditorAction>,          // History of actions for undo
+    redo_stack: Vec<EditorAction>,          // Undone actions for redo
 }
 
 impl EditorApp {
@@ -487,6 +536,9 @@ impl EditorApp {
             }
         });
 
+        // Create assets/textures if it doesn't exist
+        let _ = std::fs::create_dir_all("assets/textures");
+
         Self {
             ip: "127.0.0.1:8080".into(),
             status: "Disconnected".into(),
@@ -505,6 +557,23 @@ impl EditorApp {
             drag_button: None,
             last_mouse: egui::pos2(0.0, 0.0),
             dragging_id: None,
+            drag_start_entity: None,
+            inspector_start_entity: None,
+            last_selected_id: None,
+            // Scene file management
+            current_scene_path: None,
+            scene_dirty: false,
+            recent_scenes: Vec::new(),
+            show_open_scene_dialog: false,
+            show_save_as_dialog: false,
+            save_as_path: String::new(),
+            open_scene_files: Vec::new(),
+            show_unsaved_warning: false,
+            pending_action: None,
+            // Clipboard and History
+            clipboard: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -652,7 +721,7 @@ impl EditorApp {
     fn add_primitive(&mut self, ptype: PrimitiveType) {
         if let Some(scene) = &mut self.current_scene {
             let id = scene.entities.iter().map(|e| e.id).max().unwrap_or(0) + 1;
-            scene.entities.push(SceneEntity {
+            let new_entity = SceneEntity {
                 id,
                 name: format!("{} {}", ptype.name(), id),
                 position: [0.0, 2.0, 0.0],
@@ -662,8 +731,298 @@ impl EditorApp {
                 material: Material::default(),
                 script: None,
                 deployed: false,
-            });
+            };
+            // Push to undo stack
+            self.undo_stack.push(EditorAction::AddEntity { entity: new_entity.clone() });
+            self.redo_stack.clear();
+            
+            scene.entities.push(new_entity);
             self.selected_entity_id = Some(id);
+            self.scene_dirty = true;
+        }
+    }
+
+    // ========================================================================
+    // SCENE FILE MANAGEMENT
+    // ========================================================================
+    
+    /// Mark the current scene as having unsaved changes
+    #[allow(dead_code)]
+    fn mark_scene_dirty(&mut self) {
+        self.scene_dirty = true;
+    }
+
+    /// Save the current scene to the specified path
+    fn save_scene_to_path(&mut self, path: &str) -> Result<(), String> {
+        if let Some(scene) = &self.current_scene {
+            // Ensure scenes directory exists
+            std::fs::create_dir_all("scenes").map_err(|e| e.to_string())?;
+            
+            let json = serde_json::to_string_pretty(scene)
+                .map_err(|e| format!("Serialization error: {}", e))?;
+            
+            std::fs::write(path, json)
+                .map_err(|e| format!("Write error: {}", e))?;
+            
+            self.current_scene_path = Some(path.to_string());
+            self.scene_dirty = false;
+            self.add_to_recent(path);
+            self.status = format!("Saved: {}", path);
+            Ok(())
+        } else {
+            Err("No scene to save".into())
+        }
+    }
+
+    /// Load a scene from the specified file path
+    fn load_scene_from_path(&mut self, path: &str) -> Result<(), String> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| format!("Read error: {}", e))?;
+        
+        let mut scene: Scene = serde_json::from_str(&contents)
+            .map_err(|e| format!("Parse error: {}", e))?;
+        
+        // Reload texture bytes from disk for each entity with a texture path
+        for entity in &mut scene.entities {
+            if let Some(texture_path) = entity.material.albedo_texture.clone() {
+                // Try multiple paths:
+                // 1. As stored (absolute or relative to current project root)
+                // 2. Relative to the scene file being loaded
+                // 3. In the project's assets/textures folder
+                let paths_to_try = vec![
+                    texture_path.clone(),
+                    format!("{}/{}", std::path::Path::new(path).parent().unwrap_or(std::path::Path::new(".")).display(), texture_path),
+                    format!("assets/textures/{}", std::path::Path::new(&texture_path).file_name().unwrap_or_default().to_string_lossy()),
+                ];
+                
+                let mut loaded_path = None;
+                for p in paths_to_try {
+                    if let Ok(bytes) = std::fs::read(&p) {
+                        entity.material.albedo_texture_data = Some(bytes);
+                        loaded_path = Some(p);
+                        break;
+                    }
+                }
+                
+                if let Some(p) = loaded_path {
+                    // Update to the working path for future sessions
+                    entity.material.albedo_texture = Some(p);
+                } else {
+                    eprintln!("Warning: Could not load texture at '{}'", texture_path);
+                }
+            }
+        }
+        
+        self.current_scene = Some(scene);
+        self.current_scene_path = Some(path.to_string());
+        self.scene_dirty = false;
+        self.selected_entity_id = None;
+        // Clear undo/redo on scene load
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.add_to_recent(path);
+        self.status = format!("Loaded: {}", path);
+        Ok(())
+    }
+
+    /// Scan the scenes directory for .json files
+    fn scan_scene_files(&mut self) {
+        self.open_scene_files.clear();
+        if let Ok(entries) = std::fs::read_dir("scenes") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "json") {
+                    if let Some(path_str) = path.to_str() {
+                        self.open_scene_files.push(path_str.to_string());
+                    }
+                }
+            }
+        }
+        self.open_scene_files.sort();
+    }
+
+    /// Add a path to the recent scenes list (max 5 entries)
+    fn add_to_recent(&mut self, path: &str) {
+        // Remove if already present
+        self.recent_scenes.retain(|p| p != path);
+        // Add to front
+        self.recent_scenes.insert(0, path.to_string());
+        // Keep max 5
+        self.recent_scenes.truncate(5);
+    }
+
+    /// Check for unsaved changes and prompt user if needed
+    /// Returns true if it's safe to proceed, false if action was deferred
+    fn check_unsaved_and_set_action(&mut self, action: PendingAction) -> bool {
+        if self.scene_dirty {
+            self.pending_action = Some(action);
+            self.show_unsaved_warning = true;
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Execute the pending action after user confirms in unsaved dialog
+    fn execute_pending_action(&mut self) {
+        if let Some(action) = self.pending_action.take() {
+            match action {
+                PendingAction::NewScene => {
+                    self.show_new_scene_dialog = true;
+                    self.new_scene_name.clear();
+                }
+                PendingAction::OpenScene(path) => {
+                    if let Err(e) = self.load_scene_from_path(&path) {
+                        self.status = format!("Error: {}", e);
+                    }
+                }
+                PendingAction::LoadTestScene => {
+                    self.current_scene = Some(Scene::create_test_scene());
+                    self.current_scene_path = None;
+                    self.scene_dirty = false;
+                    self.status = "Loaded Test Engine Scene".into();
+                }
+                PendingAction::Exit => {
+                    std::process::exit(0);
+                }
+            }
+        }
+        self.show_unsaved_warning = false;
+    }
+
+    /// Get the window title with dirty indicator
+    #[allow(dead_code)]
+    fn get_window_title(&self) -> String {
+        let scene_name = self.current_scene.as_ref()
+            .map(|s| s.name.as_str())
+            .unwrap_or("Untitled");
+        let dirty = if self.scene_dirty { "*" } else { "" };
+        format!("STFSC Editor - 556 Engine - [{}]{}", scene_name, dirty)
+    }
+
+    // ========================================================================
+    // CLIPBOARD & UNDO/REDO
+    // ========================================================================
+    
+    /// Copy selected entity to clipboard
+    fn copy_selected(&mut self) {
+        if let Some(id) = self.selected_entity_id {
+            if let Some(scene) = &self.current_scene {
+                if let Some(entity) = scene.entities.iter().find(|e| e.id == id) {
+                    self.clipboard = Some(entity.clone());
+                    self.status = format!("Copied: {}", entity.name);
+                }
+            }
+        }
+    }
+
+    /// Paste entity from clipboard with new ID and offset position
+    fn paste_from_clipboard(&mut self) {
+        if let Some(copied) = self.clipboard.clone() {
+            if let Some(scene) = &mut self.current_scene {
+                let new_id = scene.entities.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+                let mut new_entity = copied;
+                new_entity.id = new_id;
+                new_entity.name = format!("{} (Copy)", new_entity.name);
+                // Offset position slightly so it's visible
+                new_entity.position[0] += 1.0;
+                new_entity.position[2] += 1.0;
+                new_entity.deployed = false;
+                
+                // Push to undo stack
+                self.undo_stack.push(EditorAction::AddEntity { entity: new_entity.clone() });
+                self.redo_stack.clear(); // Clear redo on new action
+                
+                scene.entities.push(new_entity);
+                self.selected_entity_id = Some(new_id);
+                self.scene_dirty = true;
+                self.status = format!("Pasted entity #{}", new_id);
+            }
+        }
+    }
+
+    /// Push action to undo stack (clears redo stack)
+    #[allow(dead_code)]
+    fn push_undo_action(&mut self, action: EditorAction) {
+        self.undo_stack.push(action);
+        self.redo_stack.clear();
+        // Limit history to 50 actions
+        if self.undo_stack.len() > 50 {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    /// Undo the last action
+    fn undo(&mut self) {
+        if let Some(action) = self.undo_stack.pop() {
+            match &action {
+                EditorAction::AddEntity { entity } => {
+                    // Undo add = delete
+                    if let Some(scene) = &mut self.current_scene {
+                        scene.entities.retain(|e| e.id != entity.id);
+                        if self.selected_entity_id == Some(entity.id) {
+                            self.selected_entity_id = None;
+                        }
+                    }
+                    self.status = format!("Undo: Removed {}", entity.name);
+                }
+                EditorAction::DeleteEntity { entity } => {
+                    // Undo delete = add back
+                    if let Some(scene) = &mut self.current_scene {
+                        scene.entities.push(entity.clone());
+                        self.selected_entity_id = Some(entity.id);
+                    }
+                    self.status = format!("Undo: Restored {}", entity.name);
+                }
+                EditorAction::ModifyEntity { id, before, .. } => {
+                    // Undo modify = restore before state
+                    if let Some(scene) = &mut self.current_scene {
+                        if let Some(e) = scene.entities.iter_mut().find(|e| e.id == *id) {
+                            *e = before.clone();
+                        }
+                    }
+                    self.status = format!("Undo: Restored entity #{}", id);
+                }
+            }
+            self.redo_stack.push(action);
+            self.scene_dirty = true;
+        }
+    }
+
+    /// Redo the last undone action
+    fn redo(&mut self) {
+        if let Some(action) = self.redo_stack.pop() {
+            match &action {
+                EditorAction::AddEntity { entity } => {
+                    // Redo add = add again
+                    if let Some(scene) = &mut self.current_scene {
+                        scene.entities.push(entity.clone());
+                        self.selected_entity_id = Some(entity.id);
+                    }
+                    self.status = format!("Redo: Added {}", entity.name);
+                }
+                EditorAction::DeleteEntity { entity } => {
+                    // Redo delete = delete again
+                    if let Some(scene) = &mut self.current_scene {
+                        scene.entities.retain(|e| e.id != entity.id);
+                        if self.selected_entity_id == Some(entity.id) {
+                            self.selected_entity_id = None;
+                        }
+                    }
+                    self.status = format!("Redo: Deleted {}", entity.name);
+                }
+                EditorAction::ModifyEntity { id, after, .. } => {
+                    // Redo modify = apply after state
+                    if let Some(scene) = &mut self.current_scene {
+                        if let Some(e) = scene.entities.iter_mut().find(|e| e.id == *id) {
+                            *e = after.clone();
+                        }
+                    }
+                    self.status = format!("Redo: Modified entity #{}", id);
+                }
+            }
+            self.undo_stack.push(action);
+            self.scene_dirty = true;
         }
     }
 
@@ -713,6 +1072,7 @@ impl EditorApp {
                                 && (start_pos.y - c.y).abs() < size + 5.0
                             {
                                 self.dragging_id = Some(entity.id);
+                                self.drag_start_entity = Some(entity.clone()); // Capture state for undo
                                 self.selected_entity_id = Some(entity.id);
                                 break;
                             }
@@ -723,6 +1083,22 @@ impl EditorApp {
         }
 
         if response.drag_released() {
+            // Push undo for move if entity position changed
+            if let (Some(start_entity), Some(drag_id)) = (self.drag_start_entity.take(), self.dragging_id) {
+                if let Some(scene) = &self.current_scene {
+                    if let Some(after_entity) = scene.entities.iter().find(|e| e.id == drag_id) {
+                        // Only push if position actually changed
+                        if start_entity.position != after_entity.position {
+                            self.undo_stack.push(EditorAction::ModifyEntity {
+                                id: drag_id,
+                                before: start_entity,
+                                after: after_entity.clone(),
+                            });
+                            self.redo_stack.clear();
+                        }
+                    }
+                }
+            }
             self.drag_button = None;
             self.dragging_id = None;
         }
@@ -757,6 +1133,7 @@ impl EditorApp {
                                 let new_pos = cam_pos.add(&ray_dir.mul(t));
                                 entity.position[0] = new_pos.x;
                                 entity.position[2] = new_pos.z;
+                                self.scene_dirty = true;
                             }
                         }
                     }
@@ -836,30 +1213,28 @@ impl EditorApp {
             }
         }
 
-        // Draw entities
+        // Draw entities - parallel projection computation
         let mut clicked_entity: Option<u32> = None;
         if let Some(scene) = &self.current_scene {
-            for entity in &scene.entities {
+            let camera = self.camera; // Copy for parallel access
+            let selected_id = self.selected_entity_id;
+            
+            // Parallel: Compute all entity render data (projections, colors, etc.)
+            let entity_renders: Vec<_> = scene.entities.par_iter().map(|entity| {
                 let pos = Vec3::new(entity.position[0], entity.position[1], entity.position[2]);
                 let half = Vec3::new(
                     entity.scale[0] * 0.5,
                     entity.scale[1] * 0.5,
                     entity.scale[2] * 0.5,
                 );
-                let is_selected = self.selected_entity_id == Some(entity.id);
-
-                let base_color = egui::Color32::from_rgb(
+                let is_selected = selected_id == Some(entity.id);
+                
+                let base_color = [
                     (entity.material.albedo_color[0] * 200.0) as u8,
                     (entity.material.albedo_color[1] * 200.0) as u8,
                     (entity.material.albedo_color[2] * 200.0) as u8,
-                );
-                let wire_color = if is_selected {
-                    egui::Color32::GOLD
-                } else {
-                    base_color
-                };
-                let stroke = egui::Stroke::new(if is_selected { 2.5 } else { 1.0 }, wire_color);
-
+                ];
+                
                 // Box corners
                 let corners = [
                     Vec3::new(pos.x - half.x, pos.y - half.y, pos.z - half.z),
@@ -871,59 +1246,48 @@ impl EditorApp {
                     Vec3::new(pos.x + half.x, pos.y + half.y, pos.z + half.z),
                     Vec3::new(pos.x - half.x, pos.y + half.y, pos.z + half.z),
                 ];
-                let proj: Vec<_> = corners
-                    .iter()
-                    .map(|c| {
-                        self.camera
-                            .project(*c, available)
-                            .map(|p| egui::pos2(rect.min.x + p.x, rect.min.y + p.y))
-                    })
-                    .collect();
-
+                
+                // Project all 8 corners + center in parallel (within this entity)
+                let proj: Vec<Option<egui::Pos2>> = corners.iter().map(|c| {
+                    camera.project(*c, available).map(|p| egui::pos2(rect.min.x + p.x, rect.min.y + p.y))
+                }).collect();
+                
+                let center_proj = camera.project(pos, available)
+                    .map(|p| egui::pos2(rect.min.x + p.x, rect.min.y + p.y));
+                
+                (entity.id, is_selected, base_color, proj, center_proj)
+            }).collect();
+            
+            // Sequential: Draw using pre-computed projections
+            for (id, is_selected, base_color, proj, center_proj) in entity_renders {
+                let base = egui::Color32::from_rgb(base_color[0], base_color[1], base_color[2]);
+                let wire_color = if is_selected { egui::Color32::GOLD } else { base };
+                let stroke = egui::Stroke::new(if is_selected { 2.5 } else { 1.0 }, wire_color);
+                
+                // Draw wireframe
                 for (i, j) in [
-                    (0, 1),
-                    (1, 2),
-                    (2, 3),
-                    (3, 0),
-                    (4, 5),
-                    (5, 6),
-                    (6, 7),
-                    (7, 4),
-                    (0, 4),
-                    (1, 5),
-                    (2, 6),
-                    (3, 7),
+                    (0, 1), (1, 2), (2, 3), (3, 0),
+                    (4, 5), (5, 6), (6, 7), (7, 4),
+                    (0, 4), (1, 5), (2, 6), (3, 7),
                 ] {
                     if let (Some(p1), Some(p2)) = (proj[i], proj[j]) {
                         painter.line_segment([p1, p2], stroke);
                     }
                 }
-
+                
                 // Center dot + click detection
-                if let Some(center) = self.camera.project(pos, available) {
-                    let c = egui::pos2(rect.min.x + center.x, rect.min.y + center.y);
+                if let Some(c) = center_proj {
                     let size = (8.0 + 400.0 / self.camera.distance).clamp(4.0, 25.0);
-                    painter.circle_filled(c, size, base_color.linear_multiply(0.6));
+                    painter.circle_filled(c, size, base.linear_multiply(0.6));
                     if is_selected {
-                        painter.circle_stroke(
-                            c,
-                            size + 2.0,
-                            egui::Stroke::new(2.0, egui::Color32::GOLD),
-                        );
+                        painter.circle_stroke(c, size + 2.0, egui::Stroke::new(2.0, egui::Color32::GOLD));
                     }
-
+                    
                     if response.clicked() {
-                        // Prevent clicking if we just dragged (simple check, or rely on clicked being false if dragged)
-                        if (self.last_mouse.x
-                            - response.interact_pointer_pos().unwrap_or(self.last_mouse).x)
-                            .abs()
-                            < 2.0
-                        {
+                        if (self.last_mouse.x - response.interact_pointer_pos().unwrap_or(self.last_mouse).x).abs() < 2.0 {
                             if let Some(click) = response.interact_pointer_pos() {
-                                if (click.x - c.x).abs() < size + 5.0
-                                    && (click.y - c.y).abs() < size + 5.0
-                                {
-                                    clicked_entity = Some(entity.id);
+                                if (click.x - c.x).abs() < size + 5.0 && (click.y - c.y).abs() < size + 5.0 {
+                                    clicked_entity = Some(id);
                                 }
                             }
                         }
@@ -967,39 +1331,132 @@ impl eframe::App for EditorApp {
             }
         }
 
+        // Keyboard shortcuts (global)
+        ctx.input(|i| {
+            if i.modifiers.ctrl {
+                if i.key_pressed(egui::Key::C) {
+                    // Ctrl+C: Copy
+                }
+                if i.key_pressed(egui::Key::V) {
+                    // Ctrl+V: Paste
+                }
+                if i.key_pressed(egui::Key::Z) {
+                    // Ctrl+Z: Undo
+                }
+                if i.key_pressed(egui::Key::Y) {
+                    // Ctrl+Y: Redo
+                }
+            }
+        });
+
+        // Now handle the shortcuts outside the input closure to avoid borrow issues
+        let do_copy = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C));
+        let do_paste = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::V));
+        let do_undo = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z));
+        let do_redo = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Y));
+
+        if do_copy {
+            self.copy_selected();
+        }
+        if do_paste {
+            self.paste_from_clipboard();
+        }
+        if do_undo {
+            self.undo();
+        }
+        if do_redo {
+            self.redo();
+        }
+
         // MENU
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("📄 New Scene").clicked() {
-                        self.show_new_scene_dialog = true;
+                        if self.check_unsaved_and_set_action(PendingAction::NewScene) {
+                            self.show_new_scene_dialog = true;
+                            self.new_scene_name.clear();
+                        }
                         ui.close_menu();
                     }
                     if ui.button("🧪 Test Engine Scene").clicked() {
-                        self.current_scene = Some(Scene::create_test_scene());
-                        if !self.scenes.contains(&"Test".to_string()) {
-                            self.scenes.push("Test".into());
+                        if self.check_unsaved_and_set_action(PendingAction::LoadTestScene) {
+                            self.current_scene = Some(Scene::create_test_scene());
+                            self.current_scene_path = None;
+                            self.scene_dirty = false;
+                            if !self.scenes.contains(&"Test".to_string()) {
+                                self.scenes.push("Test".into());
+                            }
+                            self.status = "Loaded Test Engine Scene".into();
                         }
-                        self.status = "Loaded Test Engine Scene".into();
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("💾 Save Scene").clicked() {
-                        if let Some(scene) = &self.current_scene {
-                            std::fs::create_dir_all("scenes").ok();
-                            let path = format!("scenes/{}.json", scene.name.to_lowercase());
-                            if let Ok(json) = serde_json::to_string_pretty(scene) {
-                                match std::fs::write(&path, json) {
-                                    Ok(_) => self.status = format!("Saved: {}", path),
-                                    Err(e) => self.status = format!("Error: {}", e),
+                    
+                    // Open Scene
+                    if ui.button("📂 Open Scene...").clicked() {
+                        self.scan_scene_files();
+                        self.show_open_scene_dialog = true;
+                        ui.close_menu();
+                    }
+                    
+                    // Recent Scenes submenu
+                    if !self.recent_scenes.is_empty() {
+                        ui.menu_button("📋 Recent Scenes", |ui| {
+                            let recent_clone = self.recent_scenes.clone();
+                            for path in &recent_clone {
+                                let display_name = std::path::Path::new(path)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(path);
+                                if ui.button(display_name).clicked() {
+                                    let path_clone = path.clone();
+                                    if self.check_unsaved_and_set_action(PendingAction::OpenScene(path_clone.clone())) {
+                                        if let Err(e) = self.load_scene_from_path(&path_clone) {
+                                            self.status = format!("Error: {}", e);
+                                        }
+                                    }
+                                    ui.close_menu();
                                 }
+                            }
+                        });
+                    }
+                    
+                    ui.separator();
+                    
+                    // Save Scene (to known path or trigger Save As)
+                    if ui.button("💾 Save Scene").clicked() {
+                        if let Some(path) = self.current_scene_path.clone() {
+                            if let Err(e) = self.save_scene_to_path(&path) {
+                                self.status = format!("Error: {}", e);
+                            }
+                        } else if let Some(scene) = &self.current_scene {
+                            // Default to scene name if no path
+                            let path = format!("scenes/{}.json", scene.name.to_lowercase().replace(" ", "_"));
+                            if let Err(e) = self.save_scene_to_path(&path) {
+                                self.status = format!("Error: {}", e);
                             }
                         }
                         ui.close_menu();
                     }
+                    
+                    // Save Scene As
+                    if ui.button("💾 Save Scene As...").clicked() {
+                        if let Some(scene) = &self.current_scene {
+                            self.save_as_path = format!("scenes/{}.json", scene.name.to_lowercase().replace(" ", "_"));
+                        } else {
+                            self.save_as_path = "scenes/untitled.json".to_string();
+                        }
+                        self.show_save_as_dialog = true;
+                        ui.close_menu();
+                    }
+                    
                     ui.separator();
                     if ui.button("Exit").clicked() {
-                        std::process::exit(0);
+                        if self.check_unsaved_and_set_action(PendingAction::Exit) {
+                            std::process::exit(0);
+                        }
+                        ui.close_menu();
                     }
                 });
                 ui.menu_button("Edit", |ui| {
@@ -1371,104 +1828,190 @@ impl eframe::App for EditorApp {
             
             let mut delete_id: Option<u32> = None;
             let mut deploy_id: Option<u32> = None;
+            let mut inspector_dirty = false; // Track if any inspector field changed
+            
+            // Capture entity state when selection changes (for undo tracking)
+            if self.selected_entity_id != self.last_selected_id {
+                // Push undo for previous entity if it was modified
+                if let (Some(start), Some(prev_id)) = (self.inspector_start_entity.take(), self.last_selected_id) {
+                    if let Some(scene) = &self.current_scene {
+                        if let Some(after) = scene.entities.iter().find(|e| e.id == prev_id) {
+                            // Only push if something changed (compare key fields)
+                            // Comparing all fields including material and script
+                            if start.name != after.name || start.position != after.position 
+                               || start.scale != after.scale 
+                               || start.material.albedo_color != after.material.albedo_color
+                               || start.material.albedo_texture != after.material.albedo_texture
+                               || start.material.metallic != after.material.metallic
+                               || start.material.roughness != after.material.roughness
+                               || start.script != after.script {
+                                self.undo_stack.push(EditorAction::ModifyEntity {
+                                    id: prev_id,
+                                    before: start,
+                                    after: after.clone(),
+                                });
+                                self.redo_stack.clear();
+                            }
+                        }
+                    }
+                }
+                // Capture new entity's state
+                if let Some(id) = self.selected_entity_id {
+                    if let Some(scene) = &self.current_scene {
+                        if let Some(entity) = scene.entities.iter().find(|e| e.id == id) {
+                            self.inspector_start_entity = Some(entity.clone());
+                        }
+                    }
+                }
+                self.last_selected_id = self.selected_entity_id;
+            }
             
             if let Some(id) = self.selected_entity_id {
                 if let Some(scene) = &mut self.current_scene {
                     if let Some(entity) = scene.entities.iter_mut().find(|e| e.id == id) {
-                        ui.horizontal(|ui| { ui.label("Name:"); ui.text_edit_singleline(&mut entity.name); });
+                        ui.horizontal(|ui| { 
+                            ui.label("Name:"); 
+                            if ui.text_edit_singleline(&mut entity.name).changed() {
+                                inspector_dirty = true;
+                            }
+                        });
                         ui.horizontal(|ui| {
                             ui.label("📜 Script:");
                             let mut script_name = entity.script.clone().unwrap_or_default();
                             if ui.text_edit_singleline(&mut script_name).changed() {
                                 entity.script = if script_name.is_empty() { None } else { Some(script_name) };
+                                inspector_dirty = true;
                             }
                         });
                         ui.label(format!("ID: {} | Deployed: {}", entity.id, if entity.deployed { "✓" } else { "✗" }));
                         
                         ui.add_space(8.0);
-                        ui.label("⚙ Transform");
-                        egui::Grid::new("transform").show(ui, |ui| {
-                            ui.label("Position"); 
-                            ui.add(egui::DragValue::new(&mut entity.position[0]).speed(0.1).prefix("X:"));
-                            ui.add(egui::DragValue::new(&mut entity.position[1]).speed(0.1).prefix("Y:"));
-                            ui.add(egui::DragValue::new(&mut entity.position[2]).speed(0.1).prefix("Z:"));
-                            ui.end_row();
-                            ui.label("Scale");
-                            ui.add(egui::DragValue::new(&mut entity.scale[0]).speed(0.1).prefix("X:"));
-                            ui.add(egui::DragValue::new(&mut entity.scale[1]).speed(0.1).prefix("Y:"));
-                            ui.add(egui::DragValue::new(&mut entity.scale[2]).speed(0.1).prefix("Z:"));
+                        ui.label("📍 Transform");
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                if ui.add(egui::DragValue::new(&mut entity.position[0]).speed(0.1).prefix("X:")).changed() { inspector_dirty = true; }
+                                if ui.add(egui::DragValue::new(&mut entity.position[1]).speed(0.1).prefix("Y:")).changed() { inspector_dirty = true; }
+                                if ui.add(egui::DragValue::new(&mut entity.position[2]).speed(0.1).prefix("Z:")).changed() { inspector_dirty = true; }
+                            });
+                            ui.horizontal(|ui| {
+                                if ui.add(egui::DragValue::new(&mut entity.scale[0]).speed(0.1).prefix("X:")).changed() { inspector_dirty = true; }
+                                if ui.add(egui::DragValue::new(&mut entity.scale[1]).speed(0.1).prefix("Y:")).changed() { inspector_dirty = true; }
+                                if ui.add(egui::DragValue::new(&mut entity.scale[2]).speed(0.1).prefix("Z:")).changed() { inspector_dirty = true; }
+                            });
                         });
                         
-                        let show_material = matches!(entity.entity_type, 
-                            EntityType::Primitive(_) | EntityType::Mesh {..} | EntityType::Vehicle | 
-                            EntityType::CrowdAgent {..} | EntityType::Building {..} | EntityType::Ground);
+                        ui.add_space(8.0);
+                        ui.label("🎨 Material");
+                        ui.horizontal(|ui| {
+                            ui.label("Albedo:");
+                            let mut c = egui::Color32::from_rgb(
+                                (entity.material.albedo_color[0]*255.0) as u8,
+                                (entity.material.albedo_color[1]*255.0) as u8,
+                                (entity.material.albedo_color[2]*255.0) as u8);
+                            if ui.color_edit_button_srgba(&mut c).changed() {
+                                entity.material.albedo_color = [c.r() as f32/255.0, c.g() as f32/255.0, c.b() as f32/255.0];
+                                inspector_dirty = true;
+                            }
+                        });
+                        if ui.add(egui::Slider::new(&mut entity.material.metallic, 0.0..=1.0).text("Metallic")).changed() { inspector_dirty = true; }
+                        if ui.add(egui::Slider::new(&mut entity.material.roughness, 0.0..=1.0).text("Roughness")).changed() { inspector_dirty = true; }
                         
-                        if show_material {
-                            ui.add_space(8.0);
-                            ui.label("🎨 Material");
-                            ui.horizontal(|ui| {
-                                ui.label("Albedo:");
-                                let mut c = egui::Color32::from_rgb(
-                                    (entity.material.albedo_color[0]*255.0) as u8,
-                                    (entity.material.albedo_color[1]*255.0) as u8,
-                                    (entity.material.albedo_color[2]*255.0) as u8);
-                                if ui.color_edit_button_srgba(&mut c).changed() {
-                                    entity.material.albedo_color = [c.r() as f32/255.0, c.g() as f32/255.0, c.b() as f32/255.0];
-                                }
-                            });
-                            ui.add(egui::Slider::new(&mut entity.material.metallic, 0.0..=1.0).text("Metallic"));
-                            ui.add(egui::Slider::new(&mut entity.material.roughness, 0.0..=1.0).text("Roughness"));
+                        // Albedo Texture Drag & Drop
+                        ui.horizontal(|ui| {
+                            ui.label("Albedo Texture:");
+                            let texture_display_name = entity.material.albedo_texture.as_ref()
+                                .and_then(|p| std::path::Path::new(p).file_name())
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "(drop image)".into());
                             
-                            // Albedo Texture Drag & Drop
-                            ui.horizontal(|ui| {
-                                ui.label("Albedo Texture:");
-                                let texture_name = entity.material.albedo_texture.clone().unwrap_or_else(|| "(drop image)".into());
-                                
-                                // Create a drop zone frame
-                                let drop_zone = egui::Frame::none()
-                                    .stroke(egui::Stroke::new(1.0, egui::Color32::GRAY))
-                                    .inner_margin(4.0)
-                                    .show(ui, |ui| {
-                                        ui.label(&texture_name);
-                                    });
-                                
-                                let drop_rect = drop_zone.response.rect;
-                                
-                                // Check for dropped files anywhere (not just when hovered)
-                                let dropped_file = ui.ctx().input(|i| {
-                                    i.raw.dropped_files.first().and_then(|f| f.path.clone())
+                            // Create a drop zone frame
+                            let drop_zone = egui::Frame::none()
+                                .stroke(egui::Stroke::new(1.0, egui::Color32::GRAY))
+                                .inner_margin(4.0)
+                                .show(ui, |ui| {
+                                    ui.label(&texture_display_name);
                                 });
-                                
-                                // If a file was dropped and mouse is over our drop zone
-                                if let Some(path) = dropped_file {
-                                    let mouse_pos = ui.ctx().input(|i| i.pointer.hover_pos());
-                                    if let Some(pos) = mouse_pos {
-                                        if drop_rect.contains(pos) {
-                                            if let Ok(bytes) = std::fs::read(&path) {
-                                                if let Some(name) = path.file_name() {
-                                                    let name_str = name.to_string_lossy().to_string();
-                                                    entity.material.albedo_texture = Some(name_str.clone());
-                                                    entity.material.albedo_texture_data = Some(bytes.clone());
-                                                    
-                                                    // Upload immediately if connected
-                                                    let _ = command_tx.send(AppCommand::Send(SceneUpdate::UploadTexture {
-                                                        id: name_str,
-                                                        data: bytes,
-                                                    }));
+                            
+                            // Warning for missing files
+                            if entity.material.albedo_texture.is_some() && entity.material.albedo_texture_data.is_none() {
+                                ui.colored_label(egui::Color32::RED, "⚠ File missing on disk");
+                                if ui.link("Help").on_hover_text("The editor can't find this texture file. Drag it back into this box to re-import it into the project's assets folder.").clicked() {
+                                    // Just show tooltip
+                                }
+                            }
+                            
+                            let drop_rect = drop_zone.response.rect;
+                            
+                            // Check for dropped files anywhere (not just when hovered)
+                            let dropped_file = ui.ctx().input(|i| {
+                                i.raw.dropped_files.first().and_then(|f| f.path.clone())
+                            });
+                            
+                            // If a file was dropped and mouse is over our drop zone
+                            if let Some(path) = dropped_file {
+                                let mouse_pos = ui.ctx().input(|i| i.pointer.hover_pos());
+                                if let Some(pos) = mouse_pos {
+                                    if drop_rect.contains(pos) {
+                                        if let Ok(bytes) = std::fs::read(&path) {
+                                            if let Some(filename) = path.file_name() {
+                                                let dest_path = format!("assets/textures/{}", filename.to_string_lossy());
+                                                // Copy to local assets if it's not already there
+                                                if path.to_string_lossy() != dest_path {
+                                                    let _ = std::fs::copy(&path, &dest_path);
                                                 }
+                                                
+                                                entity.material.albedo_texture = Some(dest_path.clone());
+                                                entity.material.albedo_texture_data = Some(bytes.clone());
+                                                inspector_dirty = true;
+                                                
+                                                // Upload immediately if connected
+                                                let texture_id = filename.to_string_lossy().to_string();
+                                                let _ = command_tx.send(AppCommand::Send(SceneUpdate::UploadTexture {
+                                                    id: texture_id.clone(),
+                                                    data: bytes,
+                                                }));
+                                                
+                                                // Link to material
+                                                let _ = command_tx.send(AppCommand::Send(SceneUpdate::UpdateMaterial {
+                                                    id: entity.id,
+                                                    color: None,
+                                                    albedo_texture: Some(Some(texture_id)),
+                                                    metallic: None,
+                                                    roughness: None,
+                                                }));
                                             }
                                         }
                                     }
                                 }
-                                
-                                // Clear button
-                                if entity.material.albedo_texture.is_some() {
-                                    if ui.small_button("❌").clicked() {
-                                        entity.material.albedo_texture = None;
-                                        entity.material.albedo_texture_data = None;
-                                    }
+                            }
+                            
+                            // Clear button
+                            if entity.material.albedo_texture.is_some() {
+                                if ui.small_button("❌").clicked() {
+                                    entity.material.albedo_texture = None;
+                                    entity.material.albedo_texture_data = None;
+                                    inspector_dirty = true;
+                                    
+                                    let _ = command_tx.send(AppCommand::Send(SceneUpdate::UpdateMaterial {
+                                        id: entity.id,
+                                        color: None,
+                                        albedo_texture: Some(None),
+                                        metallic: None,
+                                        roughness: None,
+                                    }));
                                 }
-                            });
+                            }
+                        });
+                        
+                        // Real-time material updates for color/PBR
+                        if inspector_dirty && self.is_connected {
+                            let _ = command_tx.send(AppCommand::Send(SceneUpdate::UpdateMaterial {
+                                id: entity.id,
+                                color: Some([entity.material.albedo_color[0], entity.material.albedo_color[1], entity.material.albedo_color[2], 1.0]),
+                                albedo_texture: None, // Only update color/PBR here
+                                metallic: Some(entity.material.metallic),
+                                roughness: Some(entity.material.roughness),
+                            }));
                         }
                         
                         ui.add_space(8.0);
@@ -1588,9 +2131,22 @@ impl eframe::App for EditorApp {
                 }
             }
             if let Some(id) = delete_id {
+                // Save entity before deletion for undo
+                if let Some(scene) = &self.current_scene {
+                    if let Some(entity) = scene.entities.iter().find(|e| e.id == id) {
+                        self.undo_stack.push(EditorAction::DeleteEntity { entity: entity.clone() });
+                        self.redo_stack.clear();
+                    }
+                }
                 if self.is_connected { let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::DeleteEntity { id })); }
                 if let Some(scene) = &mut self.current_scene { scene.entities.retain(|e| e.id != id); }
                 self.selected_entity_id = None;
+                self.scene_dirty = true;
+            }
+            
+            // Apply inspector dirty tracking
+            if inspector_dirty {
+                self.scene_dirty = true;
             }
         });
 
@@ -1654,12 +2210,138 @@ impl eframe::App for EditorApp {
                         if ui.button("Create").clicked() && !self.new_scene_name.is_empty() {
                             self.scenes.push(self.new_scene_name.clone());
                             self.current_scene = Some(Scene::new(&self.new_scene_name));
+                            self.current_scene_path = None;
+                            self.scene_dirty = false;
                             self.selected_scene_idx = Some(self.scenes.len() - 1);
+                            self.selected_entity_id = None;
                             self.new_scene_name.clear();
                             self.show_new_scene_dialog = false;
                         }
                         if ui.button("Cancel").clicked() {
                             self.show_new_scene_dialog = false;
+                        }
+                    });
+                });
+        }
+
+        // Save Scene As Dialog
+        if self.show_save_as_dialog {
+            egui::Window::new("Save Scene As")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("File path:");
+                        ui.text_edit_singleline(&mut self.save_as_path);
+                    });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("💾 Save").clicked() {
+                            let path = self.save_as_path.clone();
+                            // Ensure .json extension
+                            let path = if !path.ends_with(".json") {
+                                format!("{}.json", path)
+                            } else {
+                                path
+                            };
+                            if let Err(e) = self.save_scene_to_path(&path) {
+                                self.status = format!("Error: {}", e);
+                            }
+                            self.show_save_as_dialog = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_save_as_dialog = false;
+                        }
+                    });
+                });
+        }
+
+        // Open Scene Dialog
+        if self.show_open_scene_dialog {
+            egui::Window::new("Open Scene")
+                .collapsible(false)
+                .resizable(true)
+                .min_width(400.0)
+                .show(ctx, |ui| {
+                    ui.label("Select a scene file to open:");
+                    ui.add_space(4.0);
+                    
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            let files_clone = self.open_scene_files.clone();
+                            for file in &files_clone {
+                                let display_name = std::path::Path::new(file)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(file);
+                                if ui.selectable_label(false, format!("📄 {}", display_name)).clicked() {
+                                    let file_path = file.clone();
+                                    if self.check_unsaved_and_set_action(PendingAction::OpenScene(file_path.clone())) {
+                                        if let Err(e) = self.load_scene_from_path(&file_path) {
+                                            self.status = format!("Error: {}", e);
+                                        }
+                                    }
+                                    self.show_open_scene_dialog = false;
+                                }
+                            }
+                            if files_clone.is_empty() {
+                                ui.label("No scene files found in 'scenes/' directory.");
+                            }
+                        });
+                    
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("🔄 Refresh").clicked() {
+                            self.scan_scene_files();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_open_scene_dialog = false;
+                        }
+                    });
+                });
+        }
+
+        // Unsaved Changes Warning Dialog
+        if self.show_unsaved_warning {
+            egui::Window::new("⚠️ Unsaved Changes")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    let scene_name = self.current_scene.as_ref()
+                        .map(|s| s.name.as_str())
+                        .unwrap_or("Untitled");
+                    ui.label(format!("Save changes to \"{}\"?", scene_name));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("💾 Save").clicked() {
+                            // Save first, then execute pending action
+                            if let Some(path) = self.current_scene_path.clone() {
+                                if let Err(e) = self.save_scene_to_path(&path) {
+                                    self.status = format!("Error: {}", e);
+                                    self.show_unsaved_warning = false;
+                                    self.pending_action = None;
+                                    return;
+                                }
+                            } else if let Some(scene) = &self.current_scene {
+                                let path = format!("scenes/{}.json", scene.name.to_lowercase().replace(" ", "_"));
+                                if let Err(e) = self.save_scene_to_path(&path) {
+                                    self.status = format!("Error: {}", e);
+                                    self.show_unsaved_warning = false;
+                                    self.pending_action = None;
+                                    return;
+                                }
+                            }
+                            self.execute_pending_action();
+                        }
+                        if ui.button("🚫 Don't Save").clicked() {
+                            self.scene_dirty = false; // Discard changes
+                            self.execute_pending_action();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_unsaved_warning = false;
+                            self.pending_action = None;
                         }
                     });
                 });

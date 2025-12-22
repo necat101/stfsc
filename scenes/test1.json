@@ -31,7 +31,7 @@
         ],
         "metallic": 0.0,
         "roughness": 0.5,
-        "albedo_texture": "A_Erect_human_penis.jpeg"
+        "albedo_texture": "assets/textures/A_Erect_human_penis.jpeg"
       },
       "script": null
     },
@@ -207,13 +207,13 @@
       "material": {
         "name": "Default",
         "albedo_color": [
-          0.2,
           1.0,
-          0.2
+          1.0,
+          1.0
         ],
-        "metallic": 0.0,
+        "metallic": 0.31,
         "roughness": 0.5,
-        "albedo_texture": null
+        "albedo_texture": "assets/textures/image.png"
       },
       "script": "CrowdAgent"
     },
@@ -239,19 +239,19 @@
       "entity_type": {
         "CrowdAgent": {
           "state": "Running",
-          "speed": 5.0
+          "speed": 6.5
         }
       },
       "material": {
         "name": "Default",
         "albedo_color": [
-          0.2,
           1.0,
-          0.2
+          1.0,
+          1.0
         ],
         "metallic": 0.0,
-        "roughness": 0.5,
-        "albedo_texture": null
+        "roughness": 0.4,
+        "albedo_texture": "assets/textures/image (1).png"
       },
       "script": "CrowdAgent"
     },
