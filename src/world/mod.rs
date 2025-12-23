@@ -320,6 +320,7 @@ pub enum SceneUpdate {
         rotation: [f32; 4],
         color: [f32; 3],
         albedo_texture: Option<String>,  // Texture ID for custom albedo texture
+        collision_enabled: bool,
     },
     SpawnMesh {
         id: u32,
@@ -399,6 +400,7 @@ pub enum SceneUpdate {
         color: [f32; 3],
         half_extents: [f32; 2], // X and Z half-extents for shadow frustum
         albedo_texture: Option<String>, // Texture ID for custom albedo texture
+        collision_enabled: bool,
     },
     /// Update an entity's material properties in real-time
     UpdateMaterial {
@@ -407,6 +409,10 @@ pub enum SceneUpdate {
         albedo_texture: Option<Option<String>>, // Some(Some(id)) to set, Some(None) to clear, None for no change
         metallic: Option<f32>,
         roughness: Option<f32>,
+    },
+    SetCollision {
+        id: u32,
+        enabled: bool,
     },
 }
 
@@ -500,9 +506,8 @@ impl GameWorld {
                     rotation,
                     color,
                     albedo_texture,
+                    collision_enabled,
                 } => {
-                    // Use MeshHandle(primitive index)
-                    // The mesh library in lib.rs must be initialized with corresponding meshes
                     self.ecs.spawn((
                         EditorEntityId(id), // Track this entity's ID for deletion
                         Transform {
@@ -518,9 +523,17 @@ impl GameWorld {
                             roughness: 0.5,
                         },
                     ));
+
+                    let target_entity = self.ecs.query::<&EditorEntityId>().iter().find(|(_, id_comp)| id_comp.0 == id).map(|(e, _)| e);
+                    if let Some(entity) = target_entity {
+                        if collision_enabled {
+                            self.attach_physics_to_entity(entity, physics, primitive, position, rotation, [1.0, 1.0, 1.0]);
+                        }
+                    }
+
                     info!(
-                        "Spawned entity with EditorEntityId({}) using MeshHandle({})",
-                        id, primitive
+                        "Spawned entity with EditorEntityId({}) using MeshHandle({}) (collision: {})",
+                        id, primitive, collision_enabled
                     );
                 }
                 SceneUpdate::SpawnMesh {
@@ -577,6 +590,12 @@ impl GameWorld {
                             let mut ctx = ScriptContext::new(entity, &mut self.ecs, physics, 0.0);
                             s.on_disable(&mut ctx);
                         }
+                        
+                        // Remove physics rigid body if it exists
+                        if let Ok(rb_handle) = self.ecs.get::<&RigidBodyHandle>(entity) {
+                            physics.remove_rigid_body(rb_handle.0);
+                        }
+
                         let _ = self.ecs.despawn(entity);
                         info!("Deleted entity with EditorEntityId({})", id);
                     } else {
@@ -804,7 +823,16 @@ impl GameWorld {
                         warn!("AttachScript: Script '{}' not found in registry", name);
                     }
                 }
-                SceneUpdate::SpawnGroundPlane { id, primitive, position, scale, color, half_extents, albedo_texture } => {
+                SceneUpdate::SpawnGroundPlane {
+                    id,
+                    primitive,
+                    position,
+                    scale,
+                    color,
+                    half_extents,
+                    albedo_texture,
+                    collision_enabled,
+                } => {
                     self.ecs.spawn((
                         EditorEntityId(id),
                         Transform {
@@ -821,9 +849,17 @@ impl GameWorld {
                         },
                         GroundPlane::new(half_extents[0], half_extents[1]),
                     ));
+
+                    let target_entity = self.ecs.query::<&EditorEntityId>().iter().find(|(_, id_comp)| id_comp.0 == id).map(|(e, _)| e);
+                    if let Some(entity) = target_entity {
+                        if collision_enabled {
+                            self.attach_physics_to_entity(entity, physics, primitive, position, [0.0, 0.0, 0.0, 1.0], scale);
+                        }
+                    }
+
                     info!(
-                        "Spawned GroundPlane with EditorEntityId({}) - half_extents: {:?}",
-                        id, half_extents
+                        "Spawned GroundPlane with EditorEntityId({}) - half_extents: {:?} (collision: {})",
+                        id, half_extents, collision_enabled
                     );
                 }
                 SceneUpdate::UpdateMaterial { id, color, albedo_texture, metallic, roughness } => {
@@ -843,6 +879,37 @@ impl GameWorld {
                             }
                             info!("Updated material for entity {}", id);
                             break;
+                        }
+                    }
+                }
+                SceneUpdate::SetCollision { id, enabled } => {
+                    let mut target_entity = None;
+                    for (entity, editor_id) in self.ecs.query::<&EditorEntityId>().iter() {
+                        if editor_id.0 == id {
+                            target_entity = Some(entity);
+                            break;
+                        }
+                    }
+
+                    if let Some(entity) = target_entity {
+                        if enabled {
+                            // Only attach if not already present
+                            if self.ecs.get::<&RigidBodyHandle>(entity).is_err() {
+                                let transform = *self.ecs.get::<&Transform>(entity).expect("Entity must have transform");
+                                let primitive = if let Ok(h) = self.ecs.get::<&MeshHandle>(entity) { h.0 as u8 } else { 0 };
+                                self.attach_physics_to_entity(entity, physics, primitive, transform.position.into(), transform.rotation.into(), transform.scale.into());
+                                info!("Enabled collision for entity {}", id);
+                            }
+                        } else {
+                            let mut rb_to_remove = None;
+                            if let Ok(rb_handle) = self.ecs.get::<&RigidBodyHandle>(entity) {
+                                rb_to_remove = Some(rb_handle.0);
+                            }
+                            if let Some(handle) = rb_to_remove {
+                                physics.remove_rigid_body(handle);
+                                let _ = self.ecs.remove_one::<RigidBodyHandle>(entity);
+                                info!("Disabled collision for entity {}", id);
+                            }
                         }
                     }
                 }
@@ -1048,6 +1115,74 @@ impl GameWorld {
         // let tx = self.chunk_sender.clone();
         // self.runtime.spawn(async move { ... });
         // NOTE: Runtime removed. If async IO is needed, pass a handle or use a separate IO system.
+    }
+
+    pub fn attach_physics_to_entity(
+        &mut self,
+        entity: Entity,
+        physics: &mut PhysicsWorld,
+        primitive: u8,
+        position: [f32; 3],
+        rotation: [f32; 4],
+        scale: [f32; 3],
+    ) {
+        let entity_bits = entity.to_bits().get() as u128;
+        let rb_handle = match primitive {
+            0 | 3 => {
+                // Cube or Plane (use box)
+                physics.add_box_rigid_body(
+                    entity_bits,
+                    position,
+                    [scale[0] * 0.5, scale[1] * 0.5, scale[2] * 0.5],
+                    false,
+                )
+            }
+            1 => {
+                // Sphere
+                physics.add_sphere_rigid_body(entity_bits, position, scale[0] * 0.5, false)
+            }
+            2 | 5 => {
+                // Cylinder or Cone (as cylinder)
+                physics.add_cylinder_rigid_body(
+                    entity_bits,
+                    position,
+                    scale[1] * 0.5,
+                    scale[0] * 0.5,
+                    false,
+                )
+            }
+            4 => {
+                // Capsule
+                physics.add_capsule_rigid_body(
+                    entity_bits,
+                    position,
+                    scale[1] * 0.5,
+                    scale[0] * 0.5,
+                    false,
+                )
+            }
+            _ => physics.add_box_rigid_body(
+                entity_bits,
+                position,
+                [scale[0] * 0.5, scale[1] * 0.5, scale[2] * 0.5],
+                false,
+            ),
+        };
+
+        // Sync rotation if fixed (Rapier fixed bodies can still have rotation set at creation or via set_rotation)
+        if let Some(rb) = physics.rigid_body_set.get_mut(rb_handle) {
+            rb.set_rotation(
+                rapier3d::na::UnitQuaternion::from_quaternion(rapier3d::na::Quaternion::new(
+                    rotation[3],
+                    rotation[0],
+                    rotation[1],
+                    rotation[2],
+                )),
+                true,
+            );
+        }
+
+        let _ = self.ecs.insert_one(entity, RigidBodyHandle(rb_handle));
     }
 
     fn calculate_chunk_entities(&self, cx: i32, cz: i32, size: f32) -> Vec<(Transform, MeshHandle, Material)> {

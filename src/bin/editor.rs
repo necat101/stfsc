@@ -231,6 +231,8 @@ struct SceneEntity {
     entity_type: EntityType,
     material: Material,
     script: Option<String>,
+    #[serde(default)]
+    collision_enabled: bool,
     #[serde(skip)]
     deployed: bool,
 }
@@ -309,6 +311,7 @@ impl Scene {
             entity_type: EntityType::Ground,
             material: m.clone(),
             script: None,
+            collision_enabled: true,
             deployed: false,
         });
         // Physics Cube
@@ -324,6 +327,7 @@ impl Scene {
                 ..m.clone()
             },
             script: Some("TestBounce".into()),
+            collision_enabled: true,
             deployed: false,
         });
         // Vehicle
@@ -336,6 +340,7 @@ impl Scene {
             entity_type: EntityType::Vehicle,
             material: m.clone(),
             script: None,
+            collision_enabled: true,
             deployed: false,
         });
         // Agents
@@ -362,6 +367,7 @@ impl Scene {
                     ..m.clone()
                 },
                 script: Some("CrowdAgent".into()),
+                collision_enabled: true,
                 deployed: false,
             });
         }
@@ -380,6 +386,7 @@ impl Scene {
                     ..m.clone()
                 },
                 script: Some("TestBounce".into()),
+                collision_enabled: true,
                 deployed: false,
             });
         }
@@ -396,6 +403,7 @@ impl Scene {
                 ..m
             },
             script: None,
+            collision_enabled: false,
             deployed: false,
         });
         s
@@ -670,6 +678,7 @@ impl EditorApp {
                         color,
                         half_extents: [entity.scale[0] / 2.0, entity.scale[2] / 2.0], // Half of X and Z scale
                         albedo_texture: entity.material.albedo_texture.clone(),
+                        collision_enabled: entity.collision_enabled,
                     }));
                 } else {
                     let primitive = match &entity.entity_type {
@@ -694,6 +703,7 @@ impl EditorApp {
                         rotation: entity.rotation,
                         color,
                         albedo_texture: entity.material.albedo_texture.clone(),
+                        collision_enabled: entity.collision_enabled,
                     }));
                 }
             }
@@ -730,6 +740,7 @@ impl EditorApp {
                 entity_type: EntityType::Primitive(ptype),
                 material: Material::default(),
                 script: None,
+                collision_enabled: true,
                 deployed: false,
             };
             // Push to undo stack
@@ -1509,6 +1520,7 @@ impl eframe::App for EditorApp {
                                     ..Default::default()
                                 },
                                 script: None,
+                                collision_enabled: true,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1530,6 +1542,7 @@ impl eframe::App for EditorApp {
                                 },
                                 material: Material::default(),
                                 script: Some("CrowdAgent".into()),
+                                collision_enabled: true,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1551,6 +1564,7 @@ impl eframe::App for EditorApp {
                                     ..Default::default()
                                 },
                                 script: None,
+                                collision_enabled: false,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1579,6 +1593,7 @@ impl eframe::App for EditorApp {
                                     ..Default::default()
                                 },
                                 script: None,
+                                collision_enabled: false,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1605,6 +1620,7 @@ impl eframe::App for EditorApp {
                                     ..Default::default()
                                 },
                                 script: None,
+                                collision_enabled: false,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1631,6 +1647,7 @@ impl eframe::App for EditorApp {
                                     ..Default::default()
                                 },
                                 script: None,
+                                collision_enabled: false,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1660,6 +1677,7 @@ impl eframe::App for EditorApp {
                                     ..Default::default()
                                 },
                                 script: None,
+                                collision_enabled: false,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1844,7 +1862,8 @@ impl eframe::App for EditorApp {
                                || start.material.albedo_texture != after.material.albedo_texture
                                || start.material.metallic != after.material.metallic
                                || start.material.roughness != after.material.roughness
-                               || start.script != after.script {
+                               || start.script != after.script
+                               || start.collision_enabled != after.collision_enabled {
                                 self.undo_stack.push(EditorAction::ModifyEntity {
                                     id: prev_id,
                                     before: start,
@@ -1883,6 +1902,15 @@ impl eframe::App for EditorApp {
                                 inspector_dirty = true;
                             }
                         });
+                        if ui.checkbox(&mut entity.collision_enabled, "🧱 Toggle Collision").changed() {
+                            inspector_dirty = true;
+                            if self.is_connected {
+                                let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetCollision {
+                                    id: entity.id,
+                                    enabled: entity.collision_enabled,
+                                }));
+                            }
+                        }
                         ui.label(format!("ID: {} | Deployed: {}", entity.id, if entity.deployed { "✓" } else { "✗" }));
                         
                         ui.add_space(8.0);
@@ -2122,6 +2150,7 @@ impl eframe::App for EditorApp {
                                 let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::Spawn {
                                     id: e.id, primitive, position: e.position, rotation: e.rotation, color,
                                     albedo_texture: e.material.albedo_texture.clone(),
+                                    collision_enabled: e.collision_enabled,
                                 }));
                             }
                             e.deployed = true;

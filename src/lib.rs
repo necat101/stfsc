@@ -21,7 +21,7 @@ use graphics::{GpuMesh, GraphicsContext, InstanceData, Texture};
 use world::GameWorld;
 
 #[cfg(target_os = "android")]
-use resource_loader::ResourceLoader;
+use resource_loader::{ResourceLoader, ResourceLoadRequest, ResourceLoadResult};
 #[cfg(target_os = "android")]
 use android_activity::{AndroidApp, MainEvent, PollEvent};
 #[cfg(target_os = "android")]
@@ -37,6 +37,13 @@ use oxr::{Duration, EventDataBuffer, SessionState, ViewConfigurationType};
 use graphics::occlusion::{OcclusionCuller, AABB};
 
 // GpuMesh and InstanceData moved to graphics/mod.rs
+
+#[cfg(target_os = "android")]
+struct TextureEntry {
+    #[allow(dead_code)]
+    texture: Texture,
+    material_descriptor_set: vk::DescriptorSet,
+}
 
 #[derive(Debug)]
 pub enum AndroidEvent {
@@ -220,6 +227,8 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             return;
         }
     };
+
+    let mut texture_cache: HashMap<String, TextureEntry> = HashMap::new();
 
     // Create Global Instance Buffer (10k instances)
     let max_instances = 10000;
@@ -849,6 +858,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
     let mut cached_player_position = glam::Vec3::ZERO;
     let mut cached_batch_map: HashMap<usize, Vec<InstanceData>> = HashMap::new();
     let mut cached_custom_draws: Vec<(GpuMesh, InstanceData)> = Vec::new();
+    let mut cached_textured_draws: Vec<(usize, InstanceData, vk::DescriptorSet)> = Vec::new();
     let mut cached_light_ubo: lighting::LightUBO = lighting::LightUBO::default();
     let mut cached_player_start = world::Transform {
         position: glam::Vec3::ZERO,
@@ -961,6 +971,17 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             // physics_world.step();
             // game_world.update_streaming();
 
+            // Texture Processing - Queue GPU textures for background loading
+            if let Ok(mut state) = game_state.try_write() {
+                let pending: Vec<_> = state.world.pending_texture_uploads.drain().collect();
+                for (texture_id, data) in pending {
+                    if !texture_cache.contains_key(&texture_id) {
+                        info!("TEXTURE: Queuing background load for '{}' ({} bytes)", texture_id, data.len());
+                        resource_loader.queue_texture(texture_id, data);
+                    }
+                }
+            }
+
             // Mesh Upload Logic (Background Thread)
             // 1. Queue new meshes for upload
             if let Ok(state) = game_state.try_read() {
@@ -978,7 +999,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                     }
 
                     // Queue for upload
-                    resource_loader.queue_upload(id, mesh.clone());
+                    resource_loader.queue_mesh(id, mesh.clone());
                     pending_uploads.insert(id);
 
                     // Limit queue rate? For now, queue all.
@@ -986,44 +1007,63 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             }
 
             // 2. Process finished uploads
-            for (id, loaded_data) in resource_loader.poll_processed() {
-                pending_uploads.remove(&id);
+            for result in resource_loader.poll_processed() {
+                match result {
+                    ResourceLoadResult::Mesh(id, loaded_data) => {
+                        pending_uploads.remove(&id);
 
-                // Create Material Descriptor Set
-                let albedo_ref = loaded_data.albedo_texture.as_ref().unwrap_or(&albedo_tex);
+                        // Create Material Descriptor Set
+                        let albedo_ref = loaded_data.albedo_texture.as_ref().unwrap_or(&albedo_tex);
 
-                let material_descriptor_set = match graphics_context.create_material_descriptor_set(
-                    albedo_ref,
-                    &normal_tex,
-                    &mr_tex,
-                ) {
-                    Ok(set) => set,
-                    Err(e) => {
-                        error!("Failed to create descriptor set for loaded mesh: {:?}", e);
-                        continue;
+                        let material_descriptor_set = match graphics_context.create_material_descriptor_set(
+                            albedo_ref,
+                            &normal_tex,
+                            &mr_tex,
+                        ) {
+                            Ok(set) => set,
+                            Err(e) => {
+                                error!("Failed to create descriptor set for loaded mesh: {:?}", e);
+                                continue;
+                            }
+                        };
+
+                        let mut custom_textures = Vec::new();
+                        if let Some(tex) = loaded_data.albedo_texture {
+                            custom_textures.push(tex);
+                        }
+
+                        let gpu_mesh = GpuMesh {
+                            vertex_buffer: loaded_data.vertex_buffer,
+                            vertex_memory: loaded_data.vertex_memory,
+                            index_buffer: loaded_data.index_buffer,
+                            index_memory: loaded_data.index_memory,
+                            index_count: loaded_data.index_count,
+                            material_descriptor_set,
+                            custom_textures,
+                            aabb: loaded_data.aabb,
+                        };
+
+                        // Add to ECS
+                        if let Ok(mut state) = game_state.write() {
+                            let _ = state.world.ecs.insert_one(id, gpu_mesh);
+                            info!("Uploaded mesh for entity {:?}", id);
+                        }
                     }
-                };
-
-                let mut custom_textures = Vec::new();
-                if let Some(tex) = loaded_data.albedo_texture {
-                    custom_textures.push(tex);
-                }
-
-                let gpu_mesh = GpuMesh {
-                    vertex_buffer: loaded_data.vertex_buffer,
-                    vertex_memory: loaded_data.vertex_memory,
-                    index_buffer: loaded_data.index_buffer,
-                    index_memory: loaded_data.index_memory,
-                    index_count: loaded_data.index_count,
-                    material_descriptor_set,
-                    custom_textures,
-                    aabb: loaded_data.aabb,
-                };
-
-                // Add to ECS
-                if let Ok(mut state) = game_state.write() {
-                    let _ = state.world.ecs.insert_one(id, gpu_mesh);
-                    info!("Uploaded mesh for entity {:?}", id);
+                    ResourceLoadResult::Texture(texture_id, texture) => {
+                        // Create descriptor set with custom albedo + default normal/mr
+                        match graphics_context.create_material_descriptor_set(&texture, &normal_tex, &mr_tex) {
+                            Ok(descriptor_set) => {
+                                info!("TEXTURE: Background load complete for '{}' with descriptor set", texture_id);
+                                texture_cache.insert(texture_id, TextureEntry {
+                                    texture,
+                                    material_descriptor_set: descriptor_set,
+                                });
+                            }
+                            Err(e) => {
+                                error!("TEXTURE ERROR: Failed to create descriptor set for background load '{}': {:?}", texture_id, e);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1355,6 +1395,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                 let mut batch_map: HashMap<usize, Vec<InstanceData>> =
                                     HashMap::new();
                                 let mut custom_draws: Vec<(GpuMesh, InstanceData)> = Vec::new();
+                                let mut textured_draws: Vec<(usize, InstanceData, vk::DescriptorSet)> = Vec::new();
 
                                 if let Ok(state) = game_state.try_read() {
                                     // Update cached player position for shadow calculations
@@ -1384,21 +1425,32 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                                     .unwrap_or(&model);
                                                 prev_transforms.insert(entity_id, model);
 
-                                                let color = if let Ok(mat) =
+                                                let (color, albedo_texture) = if let Ok(mat) =
                                                     state.world.ecs.get::<&world::Material>(id)
                                                 {
-                                                    mat.color
+                                                    (mat.color, mat.albedo_texture.clone())
                                                 } else {
-                                                    [1.0, 1.0, 1.0, 1.0]
+                                                    ([1.0, 1.0, 1.0, 1.0], None)
                                                 };
 
-                                                batch_map.entry(handle.0).or_default().push(
-                                                    InstanceData {
-                                                        model,
-                                                        prev_model,
-                                                        color,
-                                                    },
-                                                );
+                                                let instance = InstanceData {
+                                                    model,
+                                                    prev_model,
+                                                    color,
+                                                };
+
+                                                // Check for custom texture in cache
+                                                let mut textured = false;
+                                                if let Some(tex_id) = albedo_texture {
+                                                    if let Some(entry) = texture_cache.get(&tex_id) {
+                                                        textured_draws.push((handle.0, instance, entry.material_descriptor_set));
+                                                        textured = true;
+                                                    }
+                                                }
+
+                                                if !textured {
+                                                    batch_map.entry(handle.0).or_default().push(instance);
+                                                }
                                             }
                                         }
                                     }
@@ -1444,21 +1496,31 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                                         .unwrap_or(&model);
                                                     prev_transforms.insert(entity_id, model);
 
-                                                    let color = if let Ok(mat) =
+                                                    let (color, albedo_texture) = if let Ok(mat) =
                                                         state.world.ecs.get::<&world::Material>(id)
                                                     {
-                                                        mat.color
+                                                        (mat.color, mat.albedo_texture.clone())
                                                     } else {
-                                                        [1.0, 1.0, 1.0, 1.0]
+                                                        ([1.0, 1.0, 1.0, 1.0], None)
                                                     };
 
-                                                    batch_map.entry(handle.0).or_default().push(
-                                                        InstanceData {
-                                                            model,
-                                                            prev_model,
-                                                            color,
-                                                        },
-                                                    );
+                                                    let instance = InstanceData {
+                                                        model,
+                                                        prev_model,
+                                                        color,
+                                                    };
+
+                                                    let mut textured = false;
+                                                    if let Some(tex_id) = albedo_texture {
+                                                        if let Some(entry) = texture_cache.get(&tex_id) {
+                                                            textured_draws.push((handle.0, instance, entry.material_descriptor_set));
+                                                            textured = true;
+                                                        }
+                                                    }
+
+                                                    if !textured {
+                                                        batch_map.entry(handle.0).or_default().push(instance);
+                                                    }
                                                 }
                                             }
                                         }
@@ -1524,19 +1586,22 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                     // Update cache for next potential lock failure
                                     cached_batch_map = batch_map.clone();
                                     cached_custom_draws = custom_draws.clone();
+                                    cached_textured_draws = textured_draws.clone();
                                     cached_light_ubo = light_ubo;
                                 } else {
                                     // Lock failed (likely TREX stall) - use cached data to prevent flicker
                                     batch_map = cached_batch_map.clone();
                                     custom_draws = cached_custom_draws.clone();
+                                    textured_draws = cached_textured_draws.clone();
                                     // Also restore cached light UBO to GPU to prevent lighting flicker
                                     *light_ptr = cached_light_ubo;
                                 }
 
                                 // Upload to Instance Buffer
                                 let mut instance_offset = 0;
-                                let mut draw_calls: Vec<(usize, u32, u32)> = Vec::new(); // (mesh_idx, first_instance, instance_count)
+                                let mut batched_draw_calls: Vec<(usize, u32, u32)> = Vec::new(); // (mesh_idx, first_instance, instance_count)
                                 let mut custom_draw_calls: Vec<(GpuMesh, u32, u32)> = Vec::new(); // (mesh, first_instance, instance_count)
+                                let mut textured_draw_calls: Vec<(usize, u32, u32, vk::DescriptorSet)> = Vec::new();
 
                                 // Batch Maps
                                 for (mesh_idx, instances) in batch_map {
@@ -1552,12 +1617,26 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                     let dest = instance_ptr.add(instance_offset);
                                     std::ptr::copy_nonoverlapping(instances.as_ptr(), dest, count);
 
-                                    draw_calls.push((
+                                    batched_draw_calls.push((
                                         mesh_idx,
                                         instance_offset as u32,
                                         count as u32,
                                     ));
                                     instance_offset += count;
+                                }
+
+                                // Textured Draws (Included in draw_calls for shadow pass, just using standard mesh)
+                                for (mesh_idx, instance_data, descriptor_set) in &textured_draws {
+                                    if instance_offset + 1 > 10000 {
+                                        error!("Instance buffer overflow (textured)!");
+                                        break;
+                                    }
+                                    let dest = instance_ptr.add(instance_offset);
+                                    std::ptr::write(dest, *instance_data);
+                                    
+                                    let first_instance = instance_offset as u32;
+                                    textured_draw_calls.push((*mesh_idx, first_instance, 1, *descriptor_set));
+                                    instance_offset += 1;
                                 }
 
                                 // Custom Draws
@@ -1672,7 +1751,33 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                     );
 
                                     // Draw Batches
-                                    for (mesh_idx, first_instance, instance_count) in &draw_calls {
+                                    // 1. Draw Regular Batches
+                                    for (mesh_idx, first_instance, instance_count) in &batched_draw_calls {
+                                        let gpu_mesh = &mesh_library[*mesh_idx];
+                                        graphics_context.device.cmd_bind_vertex_buffers(
+                                            graphics_context.command_buffer,
+                                            0,
+                                            &[gpu_mesh.vertex_buffer],
+                                            &[0],
+                                        );
+                                        graphics_context.device.cmd_bind_index_buffer(
+                                            graphics_context.command_buffer,
+                                            gpu_mesh.index_buffer,
+                                            0,
+                                            vk::IndexType::UINT32,
+                                        );
+                                        graphics_context.device.cmd_draw_indexed(
+                                            graphics_context.command_buffer,
+                                            gpu_mesh.index_count,
+                                            *instance_count,
+                                            0,
+                                            0,
+                                            *first_instance,
+                                        );
+                                    }
+
+                                    // 2. Draw Textured Batches (They just use standard mesh geometry)
+                                    for (mesh_idx, first_instance, instance_count, _descriptor_set) in &textured_draw_calls {
                                         let gpu_mesh = &mesh_library[*mesh_idx];
                                         graphics_context.device.cmd_bind_vertex_buffers(
                                             graphics_context.command_buffer,
@@ -1854,7 +1959,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                     );
 
                                     // Draw Batches
-                                    for (mesh_idx, first_instance, instance_count) in &draw_calls {
+                                    for (mesh_idx, first_instance, instance_count) in &batched_draw_calls {
                                         let gpu_mesh = &mesh_library[*mesh_idx];
 
                                         // Bind Material Set
@@ -1864,6 +1969,42 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                             graphics_context.pipeline_layout,
                                             1,
                                             &[gpu_mesh.material_descriptor_set],
+                                            &[],
+                                        );
+
+                                        graphics_context.device.cmd_bind_vertex_buffers(
+                                            graphics_context.command_buffer,
+                                            0,
+                                            &[gpu_mesh.vertex_buffer],
+                                            &[0],
+                                        );
+                                        graphics_context.device.cmd_bind_index_buffer(
+                                            graphics_context.command_buffer,
+                                            gpu_mesh.index_buffer,
+                                            0,
+                                            vk::IndexType::UINT32,
+                                        );
+                                        graphics_context.device.cmd_draw_indexed(
+                                            graphics_context.command_buffer,
+                                            gpu_mesh.index_count,
+                                            *instance_count,
+                                            0,
+                                            0,
+                                            *first_instance,
+                                        );
+                                    }
+
+                                    // Draw Textured Batches
+                                    for (mesh_idx, first_instance, instance_count, descriptor_set) in &textured_draw_calls {
+                                        let gpu_mesh = &mesh_library[*mesh_idx];
+
+                                        // Bind Custom Material Set
+                                        graphics_context.device.cmd_bind_descriptor_sets(
+                                            graphics_context.command_buffer,
+                                            vk::PipelineBindPoint::GRAPHICS,
+                                            graphics_context.pipeline_layout,
+                                            1,
+                                            &[*descriptor_set],
                                             &[],
                                         );
 

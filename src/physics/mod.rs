@@ -140,4 +140,71 @@ impl PhysicsWorld {
             .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);
         body_handle
     }
+
+    pub fn add_capsule_rigid_body(
+        &mut self,
+        entity_id: u128,
+        translation: [f32; 3],
+        half_height: f32,
+        radius: f32,
+        dynamic: bool,
+    ) -> RigidBodyHandle {
+        let rigid_body = if dynamic {
+            RigidBodyBuilder::dynamic()
+                .translation(vector![translation[0], translation[1], translation[2]])
+                .user_data(entity_id)
+                .ccd_enabled(true)
+                .build()
+        } else {
+            RigidBodyBuilder::fixed()
+                .translation(vector![translation[0], translation[1], translation[2]])
+                .user_data(entity_id)
+                .build()
+        };
+
+        let collider = ColliderBuilder::capsule_y(half_height, radius).build();
+        let body_handle = self.rigid_body_set.insert(rigid_body);
+        self.collider_set
+            .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);
+        body_handle
+    }
+
+    pub fn add_cylinder_rigid_body(
+        &mut self,
+        entity_id: u128,
+        translation: [f32; 3],
+        half_height: f32,
+        radius: f32,
+        dynamic: bool,
+    ) -> RigidBodyHandle {
+        let rigid_body = if dynamic {
+            RigidBodyBuilder::dynamic()
+                .translation(vector![translation[0], translation[1], translation[2]])
+                .user_data(entity_id)
+                .ccd_enabled(true)
+                .build()
+        } else {
+            RigidBodyBuilder::fixed()
+                .translation(vector![translation[0], translation[1], translation[2]])
+                .user_data(entity_id)
+                .build()
+        };
+
+        let collider = ColliderBuilder::cylinder(half_height, radius).build();
+        let body_handle = self.rigid_body_set.insert(rigid_body);
+        self.collider_set
+            .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);
+        body_handle
+    }
+
+    pub fn remove_rigid_body(&mut self, handle: RigidBodyHandle) {
+        self.rigid_body_set.remove(
+            handle,
+            &mut self.island_manager,
+            &mut self.collider_set,
+            &mut self.impulse_joint_set,
+            &mut self.multibody_joint_set,
+            true,
+        );
+    }
 }

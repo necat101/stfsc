@@ -2,7 +2,7 @@ use stfsc_engine::graphics::{GraphicsContext, GpuMesh, InstanceData, Texture, ca
 use stfsc_engine::world::{GameWorld, MeshHandle, Material, Transform, RigidBodyHandle, Mesh, AudioSource};
 use stfsc_engine::audio::{AudioSystem, AudioBuffer, AudioSourceProperties, AttenuationModel, AudioBufferHandle};
 use stfsc_engine::physics::PhysicsWorld;
-use stfsc_engine::resource_loader::ResourceLoader;
+use stfsc_engine::resource_loader::{ResourceLoader, ResourceLoadResult};
 use stfsc_engine::lighting::{self, LightUBO, GpuLightData};
 use stfsc_engine::graphics::occlusion::OcclusionCuller;
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -237,8 +237,20 @@ fn main() {
                             let mut data = vec![0u8; len];
                             if socket.read_exact(&mut data).await.is_err() { break; }
                             if let Ok(update) = bincode::deserialize::<stfsc_engine::world::SceneUpdate>(&data) {
-                                println!("NETWORK: Received SceneUpdate: {:?}", update);
-                                info!("Received client update: {:?}", update);
+                                match &update {
+                                    stfsc_engine::world::SceneUpdate::UploadTexture { id, .. } => {
+                                        println!("NETWORK: Received UploadTexture (ID: {}, Size: {} bytes)", id, len);
+                                        info!("Received UploadTexture (ID: {}, Size: {} bytes)", id, len);
+                                    }
+                                    stfsc_engine::world::SceneUpdate::UploadSound { id, .. } => {
+                                        println!("NETWORK: Received UploadSound (ID: {}, Size: {} bytes)", id, len);
+                                        info!("Received UploadSound (ID: {}, Size: {} bytes)", id, len);
+                                    }
+                                    _ => {
+                                        println!("NETWORK: Received SceneUpdate: {:?}", update);
+                                        info!("Received client update: {:?}", update);
+                                    }
+                                }
                                 let _ = tx.send(update).await;
                             } else {
                                 println!("NETWORK ERROR: Failed to deserialize SceneUpdate (len: {})", len);
@@ -573,32 +585,13 @@ fn main() {
                     audio.update(dt);
                 }
 
-                // Texture Processing - Create GPU textures from pending uploads
+                // Texture Processing - Queue GPU textures for background loading
                 if let Ok(mut state) = game_state.write() {
                     let pending: Vec<_> = state.world.pending_texture_uploads.drain().collect();
                     for (texture_id, data) in pending {
                         if !texture_cache.contains_key(&texture_id) {
-                            println!("TEXTURE: Creating GPU texture '{}' ({} bytes)", texture_id, data.len());
-                            match graphics_context.create_texture_from_bytes(&data) {
-                                Ok(texture) => {
-                                    // Create descriptor set with custom albedo + default normal/mr
-                                    match graphics_context.create_material_descriptor_set(&texture, &normal_tex, &mr_tex) {
-                                        Ok(descriptor_set) => {
-                                            println!("TEXTURE: Created texture '{}' with descriptor set", texture_id);
-                                            texture_cache.insert(texture_id, TextureEntry {
-                                                texture,
-                                                material_descriptor_set: descriptor_set,
-                                            });
-                                        }
-                                        Err(e) => {
-                                            println!("TEXTURE ERROR: Failed to create descriptor set for '{}': {:?}", texture_id, e);
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    println!("TEXTURE ERROR: Failed to create '{}': {:?}", texture_id, e);
-                                }
-                            }
+                            println!("TEXTURE: Queuing background load for '{}' ({} bytes)", texture_id, data.len());
+                            resource_loader.queue_texture(texture_id, data);
                         }
                     }
                 }
@@ -623,23 +616,42 @@ fn main() {
                     for (id, (mesh, _)) in state.world.ecs.query::<(&Mesh, &Transform)>().iter() {
                         if state.world.ecs.get::<&GpuMesh>(id).is_ok() { continue; }
                         if pending_uploads.contains(&id) { continue; }
-                        resource_loader.queue_upload(id, mesh.clone());
+                        resource_loader.queue_mesh(id, mesh.clone());
                         pending_uploads.insert(id);
                     }
                 }
-                for (id, loaded_data) in resource_loader.poll_processed() {
-                    pending_uploads.remove(&id);
-                    let material_descriptor_set = graphics_context.create_material_descriptor_set(
-                        loaded_data.albedo_texture.as_ref().unwrap_or(&albedo_tex), &normal_tex, &mr_tex
-                    ).unwrap();
-                    let gpu_mesh = GpuMesh {
-                        vertex_buffer: loaded_data.vertex_buffer, vertex_memory: loaded_data.vertex_memory,
-                        index_buffer: loaded_data.index_buffer, index_memory: loaded_data.index_memory,
-                        index_count: loaded_data.index_count, material_descriptor_set,
-                        custom_textures: Vec::new(), aabb: loaded_data.aabb,
-                    };
-                    if let Ok(mut state) = game_state.write() {
-                        let _ = state.world.ecs.insert_one(id, gpu_mesh);
+                for result in resource_loader.poll_processed() {
+                    match result {
+                        ResourceLoadResult::Mesh(id, loaded_data) => {
+                            pending_uploads.remove(&id);
+                            let material_descriptor_set = graphics_context.create_material_descriptor_set(
+                                loaded_data.albedo_texture.as_ref().unwrap_or(&albedo_tex), &normal_tex, &mr_tex
+                            ).unwrap();
+                            let gpu_mesh = GpuMesh {
+                                vertex_buffer: loaded_data.vertex_buffer, vertex_memory: loaded_data.vertex_memory,
+                                index_buffer: loaded_data.index_buffer, index_memory: loaded_data.index_memory,
+                                index_count: loaded_data.index_count, material_descriptor_set,
+                                custom_textures: Vec::new(), aabb: loaded_data.aabb,
+                            };
+                            if let Ok(mut state) = game_state.write() {
+                                let _ = state.world.ecs.insert_one(id, gpu_mesh);
+                            }
+                        }
+                        ResourceLoadResult::Texture(texture_id, texture) => {
+                            // Create descriptor set with custom albedo + default normal/mr
+                            match graphics_context.create_material_descriptor_set(&texture, &normal_tex, &mr_tex) {
+                                Ok(descriptor_set) => {
+                                    println!("TEXTURE: Background load complete for '{}' with descriptor set", texture_id);
+                                    texture_cache.insert(texture_id, TextureEntry {
+                                        texture,
+                                        material_descriptor_set: descriptor_set,
+                                    });
+                                }
+                                Err(e) => {
+                                    println!("TEXTURE ERROR: Failed to create descriptor set for background load '{}': {:?}", texture_id, e);
+                                }
+                            }
+                        }
                     }
                 }
 
