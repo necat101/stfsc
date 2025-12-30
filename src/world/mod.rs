@@ -183,6 +183,13 @@ pub struct Player;
 #[derive(Clone, Copy, Debug)]
 pub struct Obstacle;
 
+// Collision Layers
+pub const LAYER_DEFAULT: u32 = 1;
+pub const LAYER_ENVIRONMENT: u32 = 2;
+pub const LAYER_PROP: u32 = 4;
+pub const LAYER_CHARACTER: u32 = 8;
+pub const LAYER_VEHICLE: u32 = 16;
+
 /// Component to hold scripts on an entity
 pub struct DynamicScript {
     pub script: Option<Box<dyn FuckScript>>,
@@ -321,6 +328,7 @@ pub enum SceneUpdate {
         color: [f32; 3],
         albedo_texture: Option<String>,  // Texture ID for custom albedo texture
         collision_enabled: bool,
+        layer: u32,
     },
     SpawnMesh {
         id: u32,
@@ -401,6 +409,7 @@ pub enum SceneUpdate {
         half_extents: [f32; 2], // X and Z half-extents for shadow frustum
         albedo_texture: Option<String>, // Texture ID for custom albedo texture
         collision_enabled: bool,
+        layer: u32,
     },
     /// Update an entity's material properties in real-time
     UpdateMaterial {
@@ -413,6 +422,7 @@ pub enum SceneUpdate {
     SetCollision {
         id: u32,
         enabled: bool,
+        layer: u32,
     },
 }
 
@@ -507,6 +517,7 @@ impl GameWorld {
                     color,
                     albedo_texture,
                     collision_enabled,
+                    layer,
                 } => {
                     self.ecs.spawn((
                         EditorEntityId(id), // Track this entity's ID for deletion
@@ -527,7 +538,9 @@ impl GameWorld {
                     let target_entity = self.ecs.query::<&EditorEntityId>().iter().find(|(_, id_comp)| id_comp.0 == id).map(|(e, _)| e);
                     if let Some(entity) = target_entity {
                         if collision_enabled {
-                            self.attach_physics_to_entity(entity, physics, primitive, position, rotation, [1.0, 1.0, 1.0]);
+                            // Determine if dynamic based on primitive. 3 (Plane) is always static.
+                            let is_dynamic = primitive != 3;
+                            self.attach_physics_to_entity(entity, physics, primitive, position, rotation, [1.0, 1.0, 1.0], is_dynamic, layer);
                         }
                     }
 
@@ -832,6 +845,7 @@ impl GameWorld {
                     half_extents,
                     albedo_texture,
                     collision_enabled,
+                    layer,
                 } => {
                     self.ecs.spawn((
                         EditorEntityId(id),
@@ -853,7 +867,8 @@ impl GameWorld {
                     let target_entity = self.ecs.query::<&EditorEntityId>().iter().find(|(_, id_comp)| id_comp.0 == id).map(|(e, _)| e);
                     if let Some(entity) = target_entity {
                         if collision_enabled {
-                            self.attach_physics_to_entity(entity, physics, primitive, position, [0.0, 0.0, 0.0, 1.0], scale);
+                            // Ground is usually Environment
+                            self.attach_physics_to_entity(entity, physics, primitive, position, [0.0, 0.0, 0.0, 1.0], scale, false, layer);
                         }
                     }
 
@@ -882,7 +897,7 @@ impl GameWorld {
                         }
                     }
                 }
-                SceneUpdate::SetCollision { id, enabled } => {
+                SceneUpdate::SetCollision { id, enabled, layer } => {
                     let mut target_entity = None;
                     for (entity, editor_id) in self.ecs.query::<&EditorEntityId>().iter() {
                         if editor_id.0 == id {
@@ -892,24 +907,27 @@ impl GameWorld {
                     }
 
                     if let Some(entity) = target_entity {
-                        if enabled {
-                            // Only attach if not already present
-                            if self.ecs.get::<&RigidBodyHandle>(entity).is_err() {
-                                let transform = *self.ecs.get::<&Transform>(entity).expect("Entity must have transform");
-                                let primitive = if let Ok(h) = self.ecs.get::<&MeshHandle>(entity) { h.0 as u8 } else { 0 };
-                                self.attach_physics_to_entity(entity, physics, primitive, transform.position.into(), transform.rotation.into(), transform.scale.into());
-                                info!("Enabled collision for entity {}", id);
-                            }
-                        } else {
-                            let mut rb_to_remove = None;
-                            if let Ok(rb_handle) = self.ecs.get::<&RigidBodyHandle>(entity) {
-                                rb_to_remove = Some(rb_handle.0);
-                            }
-                            if let Some(handle) = rb_to_remove {
-                                physics.remove_rigid_body(handle);
-                                let _ = self.ecs.remove_one::<RigidBodyHandle>(entity);
+                        // Always remove existing body to ensure clean state update (layer change or disable)
+                         let mut rb_to_remove = None;
+                        if let Ok(rb_handle) = self.ecs.get::<&RigidBodyHandle>(entity) {
+                            rb_to_remove = Some(rb_handle.0);
+                        }
+                        if let Some(handle) = rb_to_remove {
+                            physics.remove_rigid_body(handle);
+                            let _ = self.ecs.remove_one::<RigidBodyHandle>(entity);
+                            // log only if we are actually disabling
+                            if !enabled {
                                 info!("Disabled collision for entity {}", id);
                             }
+                        }
+
+                        if enabled {
+                            let transform = *self.ecs.get::<&Transform>(entity).expect("Entity must have transform");
+                            let primitive = if let Ok(h) = self.ecs.get::<&MeshHandle>(entity) { h.0 as u8 } else { 0 };
+                            // Infer dynamic. For primitives in editor, we used true unless ground (primitive 3).
+                            let is_dynamic = primitive != 3; 
+                            self.attach_physics_to_entity(entity, physics, primitive, transform.position.into(), transform.rotation.into(), transform.scale.into(), is_dynamic, layer);
+                            info!("Updated collision for entity {} (Layer: {})", id, layer);
                         }
                     }
                 }
@@ -1125,8 +1143,23 @@ impl GameWorld {
         position: [f32; 3],
         rotation: [f32; 4],
         scale: [f32; 3],
+        is_dynamic: bool,
+        layer: u32,
     ) {
         let entity_bits = entity.to_bits().get() as u128;
+        
+        // Determine collision mask based on layer
+        // Props (Cubes) should not collide with Characters
+        let filter = if layer == LAYER_PROP {
+            LAYER_ENVIRONMENT | LAYER_PROP | LAYER_VEHICLE
+        } else if layer == LAYER_CHARACTER {
+            LAYER_ENVIRONMENT | LAYER_CHARACTER | LAYER_VEHICLE
+        } else if layer == LAYER_ENVIRONMENT {
+            u32::MAX
+        } else {
+            u32::MAX
+        };
+
         let rb_handle = match primitive {
             0 | 3 => {
                 // Cube or Plane (use box)
@@ -1134,12 +1167,14 @@ impl GameWorld {
                     entity_bits,
                     position,
                     [scale[0] * 0.5, scale[1] * 0.5, scale[2] * 0.5],
-                    false,
+                    is_dynamic,
+                    layer,
+                    filter,
                 )
             }
             1 => {
                 // Sphere
-                physics.add_sphere_rigid_body(entity_bits, position, scale[0] * 0.5, false)
+                physics.add_sphere_rigid_body(entity_bits, position, scale[0] * 0.5, is_dynamic, layer, filter)
             }
             2 | 5 => {
                 // Cylinder or Cone (as cylinder)
@@ -1148,7 +1183,9 @@ impl GameWorld {
                     position,
                     scale[1] * 0.5,
                     scale[0] * 0.5,
-                    false,
+                    is_dynamic,
+                    layer,
+                    filter,
                 )
             }
             4 => {
@@ -1158,14 +1195,18 @@ impl GameWorld {
                     position,
                     scale[1] * 0.5,
                     scale[0] * 0.5,
-                    false,
+                    is_dynamic,
+                    layer,
+                    filter,
                 )
             }
             _ => physics.add_box_rigid_body(
                 entity_bits,
                 position,
                 [scale[0] * 0.5, scale[1] * 0.5, scale[2] * 0.5],
-                false,
+                is_dynamic,
+                layer,
+                filter,
             ),
         };
 

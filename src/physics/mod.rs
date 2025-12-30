@@ -91,6 +91,8 @@ impl PhysicsWorld {
         translation: [f32; 3],
         half_extents: [f32; 3],
         dynamic: bool,
+        membership: u32,
+        filter: u32,
     ) -> RigidBodyHandle {
         let rigid_body = if dynamic {
             RigidBodyBuilder::dynamic()
@@ -106,7 +108,12 @@ impl PhysicsWorld {
         };
 
         let collider =
-            ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2]).build();
+            ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2])
+                .collision_groups(InteractionGroups::new(
+                    Group::from_bits_truncate(membership),
+                    Group::from_bits_truncate(filter),
+                ))
+                .build();
         let body_handle = self.rigid_body_set.insert(rigid_body);
         self.collider_set
             .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);
@@ -120,6 +127,8 @@ impl PhysicsWorld {
         translation: [f32; 3],
         radius: f32,
         dynamic: bool,
+        membership: u32,
+        filter: u32,
     ) -> RigidBodyHandle {
         let rigid_body = if dynamic {
             RigidBodyBuilder::dynamic()
@@ -134,7 +143,12 @@ impl PhysicsWorld {
                 .build()
         };
 
-        let collider = ColliderBuilder::ball(radius).build();
+        let collider = ColliderBuilder::ball(radius)
+            .collision_groups(InteractionGroups::new(
+                Group::from_bits_truncate(membership),
+                Group::from_bits_truncate(filter),
+            ))
+            .build();
         let body_handle = self.rigid_body_set.insert(rigid_body);
         self.collider_set
             .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);
@@ -148,6 +162,8 @@ impl PhysicsWorld {
         half_height: f32,
         radius: f32,
         dynamic: bool,
+        membership: u32,
+        filter: u32,
     ) -> RigidBodyHandle {
         let rigid_body = if dynamic {
             RigidBodyBuilder::dynamic()
@@ -162,7 +178,12 @@ impl PhysicsWorld {
                 .build()
         };
 
-        let collider = ColliderBuilder::capsule_y(half_height, radius).build();
+        let collider = ColliderBuilder::capsule_y(half_height, radius)
+            .collision_groups(InteractionGroups::new(
+                Group::from_bits_truncate(membership),
+                Group::from_bits_truncate(filter),
+            ))
+            .build();
         let body_handle = self.rigid_body_set.insert(rigid_body);
         self.collider_set
             .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);
@@ -176,6 +197,8 @@ impl PhysicsWorld {
         half_height: f32,
         radius: f32,
         dynamic: bool,
+        membership: u32,
+        filter: u32,
     ) -> RigidBodyHandle {
         let rigid_body = if dynamic {
             RigidBodyBuilder::dynamic()
@@ -190,7 +213,12 @@ impl PhysicsWorld {
                 .build()
         };
 
-        let collider = ColliderBuilder::cylinder(half_height, radius).build();
+        let collider = ColliderBuilder::cylinder(half_height, radius)
+            .collision_groups(InteractionGroups::new(
+                Group::from_bits_truncate(membership),
+                Group::from_bits_truncate(filter),
+            ))
+            .build();
         let body_handle = self.rigid_body_set.insert(rigid_body);
         self.collider_set
             .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);

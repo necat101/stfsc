@@ -14,6 +14,7 @@ use log::info;
 use std::sync::{Arc, RwLock};
 use ash::vk;
 use std::collections::{HashMap, HashSet};
+use rapier3d::prelude::{LockedAxes, vector};
 
 // ============================================================================
 // SCENE CONFIGURATION - Define these before graphics initialization
@@ -107,20 +108,38 @@ fn main() {
         physics: PhysicsWorld,
         world: GameWorld,
         player_entity: Entity,
+        player_rb: RigidBodyHandle,
         player_position: glam::Vec3,
-        player_velocity_y: f32, // For jumping
         player_yaw: f32,
         player_pitch: f32,
     }
 
+    let player_pos = [0.0, 5.0, 5.0];
+    let player_rb = physics_world.add_capsule_rigid_body(
+        0, player_pos, 0.6, 0.3, true, 
+        stfsc_engine::world::LAYER_DEFAULT, u32::MAX
+    );
+    // Lock rotations for player controller
+    {
+        if let Some(body) = physics_world.rigid_body_set.get_mut(player_rb) {
+            body.set_locked_axes(LockedAxes::ROTATION_LOCKED, true);
+            body.set_linear_damping(0.0);
+        }
+    }
+
     let player_entity = game_world.ecs.spawn((
         Transform {
-            position: glam::Vec3::new(0.0, 1.7, 5.0),
+            position: glam::Vec3::from(player_pos),
             rotation: glam::Quat::IDENTITY,
             scale: glam::Vec3::ONE,
         },
+        stfsc_engine::world::RigidBodyHandle(player_rb),
         stfsc_engine::world::Player,
     ));
+    // Link user data
+    if let Some(body) = physics_world.rigid_body_set.get_mut(player_rb) {
+        body.user_data = player_entity.to_bits().get() as u128;
+    }
 
     // --- TEST SCENE FOR ADVANCED SCRIPTING ---
 
@@ -132,7 +151,7 @@ fn main() {
     // For physics, a thin box is safer than a plane to prevent tunneling
     let collider_pos = [0.0, -1.1, 0.0];
     let collider_extents = [GROUND_PLANE_HALF_EXTENT, 1.0, GROUND_PLANE_HALF_EXTENT];
-    let floor_rb = physics_world.add_box_rigid_body(0, collider_pos, collider_extents, false);
+    let floor_rb = physics_world.add_box_rigid_body(0, collider_pos, collider_extents, false, stfsc_engine::world::LAYER_ENVIRONMENT, u32::MAX);
     
     let ground_scale = GROUND_PLANE_HALF_EXTENT * 2.0; // Full size = 2x half-extent
     let floor_id = game_world.ecs.spawn((
@@ -151,7 +170,7 @@ fn main() {
 
     // 2. CollisionLogger Sphere (falls onto floor)
     let sphere_pos = [2.0, 8.0, 0.0];
-    let sphere_rb = physics_world.add_sphere_rigid_body(0, sphere_pos, 0.5, true);
+    let sphere_rb = physics_world.add_sphere_rigid_body(0, sphere_pos, 0.5, true, stfsc_engine::world::LAYER_PROP, u32::MAX);
     let sphere_id = game_world.ecs.spawn((
         stfsc_engine::world::StartupScene, // Marker for ClearScene
         Transform {
@@ -172,7 +191,7 @@ fn main() {
 
     // 3. TouchToDestroy Cube
     let cube_pos = [-2.0, 5.0, 0.0];
-    let cube_rb = physics_world.add_box_rigid_body(0, cube_pos, [0.5, 0.5, 0.5], true);
+    let cube_rb = physics_world.add_box_rigid_body(0, cube_pos, [0.5, 0.5, 0.5], true, stfsc_engine::world::LAYER_PROP, stfsc_engine::world::LAYER_ENVIRONMENT | stfsc_engine::world::LAYER_PROP);
     let cube_id = game_world.ecs.spawn((
         stfsc_engine::world::StartupScene, // Marker for ClearScene
         Transform {
@@ -196,8 +215,8 @@ fn main() {
         physics: physics_world,
         world: game_world,
         player_entity,
-        player_position: glam::Vec3::new(0.0, 1.7, 5.0), // Start further back to see more
-        player_velocity_y: 0.0,
+        player_rb: stfsc_engine::world::RigidBodyHandle(player_rb),
+        player_position: glam::Vec3::from(player_pos), 
         player_yaw: -std::f32::consts::FRAC_PI_2, // Look towards -Z
         player_pitch: 0.0,
     }));
@@ -271,12 +290,22 @@ fn main() {
             {
                 if let Ok(mut state) = game_state_logic.write() {
                     state.physics.step();
-                    let pos = state.player_position;
+            
+                    // Sync player position FROM physics
+                    let player_rb_handle = state.player_rb.0;
+                    let (phys_pos, rot) = {
+                         let body = state.physics.rigid_body_set.get(player_rb_handle).unwrap();
+                         (body.translation().clone(), body.rotation().clone())
+                    };
+                    // Offset camera to eye level (0.8m above 0.9m center = 1.7m standing height)
+                    let eye_offset = glam::Vec3::new(0.0, 0.8, 0.0); 
+                    state.player_position = glam::Vec3::new(phys_pos.x, phys_pos.y, phys_pos.z) + eye_offset;
+                    let pos = state.player_position; // Define pos as Glam Vec3 for update_streaming
+
                     // Sync player entity transform
                     let player_ent = state.player_entity;
                     if let Ok(mut t) = state.world.ecs.get::<&mut Transform>(player_ent) {
-                        t.position = pos;
-                        // Use player yaw/pitch for rotation if needed, or just identity
+                        t.position = state.player_position;
                         t.rotation = glam::Quat::from_rotation_y(-state.player_yaw);
                     }
 
@@ -468,7 +497,7 @@ fn main() {
                 let dt = last_frame_time.elapsed().as_secs_f32();
                 last_frame_time = std::time::Instant::now();
 
-                // 0. Update Player Position - only when cursor is captured (game is "focused")
+                // 0. Update Player Velocity - only when cursor is captured
                 if cursor_captured {
                     if let Ok(mut state) = game_state.write() {
                         let mut move_dir = glam::Vec3::ZERO;
@@ -485,28 +514,28 @@ fn main() {
                             speed = 12.0; // Sprint speed
                         }
 
-                        if move_dir.length_squared() > 0.0 {
-                            state.player_position += move_dir.normalize() * speed * dt;
-                            println!("MOVE: pos={:?}", state.player_position);
-                        }
-
-                        // --- Jump & Gravity Logic ---
-                        let gravity = 20.0;
-                        let jump_force = 8.0;
-                        let floor_y = 1.7; // Head height on ground
-
-                        state.player_velocity_y -= gravity * dt;
-                        state.player_position.y += state.player_velocity_y * dt;
-
-                        if state.player_position.y <= floor_y {
-                            state.player_position.y = floor_y;
-                            state.player_velocity_y = 0.0;
-
-                            // Allow jump if on ground
-                            if keys_pressed.contains(&PhysicalKey::Code(KeyCode::Space)) {
-                                state.player_velocity_y = jump_force;
-                                println!("PLAYER: Jump!");
+                        let rb_handle = state.player_rb.0;
+                        if let Some(body) = state.physics.rigid_body_set.get_mut(rb_handle) {
+                            let current_vel = body.linvel();
+                             let mut target_vel = glam::Vec3::ZERO;
+                            if move_dir.length_squared() > 0.0 {
+                                target_vel = move_dir.normalize() * speed;
                             }
+                            
+                            // Preserve Y velocity (gravity), set X/Z
+                            let mut new_linvel = rapier3d::na::Vector3::new(target_vel.x, current_vel.y, target_vel.z);
+                            
+                            // Jump Logic
+                             if keys_pressed.contains(&PhysicalKey::Code(KeyCode::Space)) {
+                                 // Simple ground check: if nearly stationary vertically or raycasting (skipped for brevity)
+                                 // We'll trust the user or check if Y velocity is small/negative (falling/grounded)
+                                 // Ideally we use a shape cast. For now, allow jump if Vy is small.
+                                 if current_vel.y.abs() < 0.1 {
+                                     new_linvel.y = 5.0; // Jump force
+                                     println!("PLAYER: Jump!");
+                                 }
+                            }
+                            body.set_linvel(new_linvel, true);
                         }
                     }
                 }

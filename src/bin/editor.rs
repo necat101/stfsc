@@ -4,7 +4,7 @@ use std::io::Write;
 use std::net::TcpStream;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
-use stfsc_engine::world::{LightType, SceneUpdate};
+use stfsc_engine::world::{LightType, SceneUpdate, LAYER_ENVIRONMENT, LAYER_PROP, LAYER_CHARACTER, LAYER_VEHICLE, LAYER_DEFAULT};
 
 fn main() -> Result<(), eframe::Error> {
     if let Err(e) = std::process::Command::new("adb")
@@ -233,8 +233,14 @@ struct SceneEntity {
     script: Option<String>,
     #[serde(default)]
     collision_enabled: bool,
+    #[serde(default = "default_layer")]
+    layer: u32,
     #[serde(skip)]
     deployed: bool,
+}
+
+fn default_layer() -> u32 {
+    LAYER_DEFAULT
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -312,6 +318,7 @@ impl Scene {
             material: m.clone(),
             script: None,
             collision_enabled: true,
+            layer: LAYER_ENVIRONMENT,
             deployed: false,
         });
         // Physics Cube
@@ -326,8 +333,9 @@ impl Scene {
                 albedo_color: [1.0, 0.5, 0.2],
                 ..m.clone()
             },
-            script: Some("TestBounce".into()),
+            script: None,
             collision_enabled: true,
+            layer: LAYER_PROP,
             deployed: false,
         });
         // Vehicle
@@ -339,8 +347,9 @@ impl Scene {
             scale: [2.0, 1.0, 4.0],
             entity_type: EntityType::Vehicle,
             material: m.clone(),
-            script: None,
+            script: Some("Vehicle".into()),
             collision_enabled: true,
+            layer: LAYER_VEHICLE,
             deployed: false,
         });
         // Agents
@@ -367,7 +376,8 @@ impl Scene {
                     ..m.clone()
                 },
                 script: Some("CrowdAgent".into()),
-                collision_enabled: true,
+                collision_enabled: false,
+                layer: LAYER_CHARACTER,
                 deployed: false,
             });
         }
@@ -385,8 +395,9 @@ impl Scene {
                     albedo_color: [1.0, 0.5, 0.2],
                     ..m.clone()
                 },
-                script: Some("TestBounce".into()),
-                collision_enabled: true,
+                script: None,
+                collision_enabled: false,
+                layer: LAYER_ENVIRONMENT,
                 deployed: false,
             });
         }
@@ -404,6 +415,7 @@ impl Scene {
             },
             script: None,
             collision_enabled: false,
+            layer: LAYER_DEFAULT,
             deployed: false,
         });
         s
@@ -679,6 +691,7 @@ impl EditorApp {
                         half_extents: [entity.scale[0] / 2.0, entity.scale[2] / 2.0], // Half of X and Z scale
                         albedo_texture: entity.material.albedo_texture.clone(),
                         collision_enabled: entity.collision_enabled,
+                        layer: entity.layer,
                     }));
                 } else {
                     let primitive = match &entity.entity_type {
@@ -704,6 +717,7 @@ impl EditorApp {
                         color,
                         albedo_texture: entity.material.albedo_texture.clone(),
                         collision_enabled: entity.collision_enabled,
+                        layer: entity.layer,
                     }));
                 }
             }
@@ -741,6 +755,7 @@ impl EditorApp {
                 material: Material::default(),
                 script: None,
                 collision_enabled: true,
+                layer: LAYER_PROP, // Default new primitives to Props
                 deployed: false,
             };
             // Push to undo stack
@@ -1521,6 +1536,7 @@ impl eframe::App for EditorApp {
                                 },
                                 script: None,
                                 collision_enabled: true,
+                                layer: LAYER_VEHICLE,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1543,6 +1559,7 @@ impl eframe::App for EditorApp {
                                 material: Material::default(),
                                 script: Some("CrowdAgent".into()),
                                 collision_enabled: true,
+                                layer: LAYER_CHARACTER,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1565,6 +1582,7 @@ impl eframe::App for EditorApp {
                                 },
                                 script: None,
                                 collision_enabled: false,
+                                layer: LAYER_DEFAULT,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1594,6 +1612,7 @@ impl eframe::App for EditorApp {
                                 },
                                 script: None,
                                 collision_enabled: false,
+                                layer: LAYER_DEFAULT,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1621,6 +1640,7 @@ impl eframe::App for EditorApp {
                                 },
                                 script: None,
                                 collision_enabled: false,
+                                layer: LAYER_DEFAULT,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1648,6 +1668,7 @@ impl eframe::App for EditorApp {
                                 },
                                 script: None,
                                 collision_enabled: false,
+                                layer: LAYER_DEFAULT,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1678,6 +1699,7 @@ impl eframe::App for EditorApp {
                                 },
                                 script: None,
                                 collision_enabled: false,
+                                layer: LAYER_DEFAULT,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1908,9 +1930,65 @@ impl eframe::App for EditorApp {
                                 let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetCollision {
                                     id: entity.id,
                                     enabled: entity.collision_enabled,
+                                    layer: entity.layer,
                                 }));
                             }
                         }
+                        
+                        ui.horizontal(|ui| {
+                            ui.label("Layer:");
+                            egui::ComboBox::from_id_source("layer_combo")
+                                .selected_text(match entity.layer {
+                                    LAYER_DEFAULT => "Default",
+                                    LAYER_ENVIRONMENT => "Environment",
+                                    LAYER_PROP => "Prop",
+                                    LAYER_CHARACTER => "Character",
+                                    LAYER_VEHICLE => "Vehicle",
+                                    _ => "Custom",
+                                })
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_value(&mut entity.layer, LAYER_DEFAULT, "Default").changed() { 
+                                        inspector_dirty = true;
+                                        if entity.collision_enabled && self.is_connected {
+                                            let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetCollision {
+                                                id: entity.id, enabled: true, layer: entity.layer
+                                            }));
+                                        }
+                                    }
+                                    if ui.selectable_value(&mut entity.layer, LAYER_ENVIRONMENT, "Environment").changed() { 
+                                        inspector_dirty = true;
+                                        if entity.collision_enabled && self.is_connected {
+                                            let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetCollision {
+                                                id: entity.id, enabled: true, layer: entity.layer
+                                            }));
+                                        }
+                                    }
+                                    if ui.selectable_value(&mut entity.layer, LAYER_PROP, "Prop").changed() { 
+                                        inspector_dirty = true;
+                                        if entity.collision_enabled && self.is_connected {
+                                            let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetCollision {
+                                                id: entity.id, enabled: true, layer: entity.layer
+                                            }));
+                                        }
+                                    }
+                                    if ui.selectable_value(&mut entity.layer, LAYER_CHARACTER, "Character").changed() { 
+                                        inspector_dirty = true;
+                                        if entity.collision_enabled && self.is_connected {
+                                            let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetCollision {
+                                                id: entity.id, enabled: true, layer: entity.layer
+                                            }));
+                                        }
+                                    }
+                                    if ui.selectable_value(&mut entity.layer, LAYER_VEHICLE, "Vehicle").changed() { 
+                                        inspector_dirty = true;
+                                        if entity.collision_enabled && self.is_connected {
+                                            let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetCollision {
+                                                id: entity.id, enabled: true, layer: entity.layer
+                                            }));
+                                        }
+                                    }
+                                });
+                        });
                         ui.label(format!("ID: {} | Deployed: {}", entity.id, if entity.deployed { "✓" } else { "✗" }));
                         
                         ui.add_space(8.0);
@@ -2151,6 +2229,7 @@ impl eframe::App for EditorApp {
                                     id: e.id, primitive, position: e.position, rotation: e.rotation, color,
                                     albedo_texture: e.material.albedo_texture.clone(),
                                     collision_enabled: e.collision_enabled,
+                                    layer: e.layer,
                                 }));
                             }
                             e.deployed = true;

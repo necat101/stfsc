@@ -241,7 +241,9 @@ impl FuckScript for VehicleScript {
                     ctx.entity.to_bits().get() as u128,
                     position,
                     [1.0, 0.5, 2.0], // Vehicle half-extents
-                    true
+                    true,
+                    super::LAYER_VEHICLE,
+                    u32::MAX,
                 );
                 let _ = ctx.world.insert_one(ctx.entity, crate::world::RigidBodyHandle(handle));
             }
