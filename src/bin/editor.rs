@@ -504,6 +504,10 @@ struct EditorApp {
     clipboard: Option<SceneEntity>,         // Copied entity for paste
     undo_stack: Vec<EditorAction>,          // History of actions for undo
     redo_stack: Vec<EditorAction>,          // Undone actions for redo
+    
+    // Model import
+    show_import_model_dialog: bool,         // Show import model file browser
+    import_model_files: Vec<String>,        // Cached list of model files for browser
 }
 
 impl EditorApp {
@@ -594,6 +598,9 @@ impl EditorApp {
             clipboard: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            // Model import
+            show_import_model_dialog: false,
+            import_model_files: Vec::new(),
         }
     }
 
@@ -693,6 +700,13 @@ impl EditorApp {
                         collision_enabled: entity.collision_enabled,
                         layer: entity.layer,
                     }));
+                } else if let EntityType::Mesh { path } = &entity.entity_type {
+                    // Load mesh from file and send via SpawnFbxMesh
+                    if let Ok(data) = std::fs::read(path) {
+                        self.deploy_mesh_entity(entity, &data);
+                    } else {
+                        println!("EDITOR WARN: Failed to load mesh file: {}", path);
+                    }
                 } else {
                     let primitive = match &entity.entity_type {
                         EntityType::Primitive(p) => match p {
@@ -865,6 +879,99 @@ impl EditorApp {
             }
         }
         self.open_scene_files.sort();
+    }
+
+    /// Scan for 3D model files (OBJ, FBX) in common directories
+    fn scan_model_files() -> Vec<String> {
+        let mut files = Vec::new();
+        let search_dirs = ["assets/models", "models", "assets", "."];
+        
+        for dir in search_dirs {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(ext) = path.extension() {
+                            let ext_lower = ext.to_string_lossy().to_lowercase();
+                            if ext_lower == "obj" || ext_lower == "fbx" {
+                                if let Some(path_str) = path.to_str() {
+                                    files.push(path_str.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        files.sort();
+        files
+    }
+    
+    /// Import a 3D model from file path and add to scene
+    fn import_model_from_path(&mut self, path: &str) -> Result<(), String> {
+        // Read the file
+        let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
+        
+        // Get filename for entity name
+        let filename = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Model")
+            .to_string();
+        
+        let id = if let Some(scene) = &self.current_scene {
+            scene.entities.iter().map(|e| e.id).max().unwrap_or(0) + 1
+        } else {
+            return Err("No scene loaded".into());
+        };
+        
+        let new_entity = SceneEntity {
+            id,
+            name: filename.clone(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0, 1.0, 1.0],
+            entity_type: EntityType::Mesh { path: path.to_string() },
+            material: Material::default(),
+            script: None,
+            collision_enabled: false,
+            layer: LAYER_PROP,
+            deployed: false,
+        };
+        
+        // If connected, deploy immediately (before mutating scene)
+        if self.is_connected {
+            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SpawnFbxMesh {
+                id: new_entity.id,
+                mesh_data: data,
+                position: new_entity.position,
+                rotation: new_entity.rotation,
+                scale: new_entity.scale,
+            }));
+        }
+        
+        // Now add to scene
+        if let Some(scene) = &mut self.current_scene {
+            scene.entities.push(new_entity);
+        }
+        
+        self.selected_entity_id = Some(id);
+        self.scene_dirty = true;
+        self.status = format!("Imported: {}", filename);
+        
+        Ok(())
+    }
+    
+    /// Deploy a mesh entity to the Quest via SpawnFbxMesh
+    fn deploy_mesh_entity(&self, entity: &SceneEntity, mesh_data: &[u8]) {
+        let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SpawnFbxMesh {
+            id: entity.id,
+            mesh_data: mesh_data.to_vec(),
+            position: entity.position,
+            rotation: entity.rotation,
+            scale: entity.scale,
+        }));
     }
 
     /// Add a path to the recent scenes list (max 5 entries)
@@ -1706,6 +1813,14 @@ impl eframe::App for EditorApp {
                         }
                         ui.close_menu();
                     }
+                    ui.separator();
+                    ui.label("📦 Import");
+                    if ui.button("📦 Import 3D Model (.obj)").clicked() {
+                        // Scan for model files
+                        self.import_model_files = Self::scan_model_files();
+                        self.show_import_model_dialog = true;
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Scene", |ui| {
                     if ui.button("🚀 Deploy All to Quest").clicked() {
@@ -2405,6 +2520,65 @@ impl eframe::App for EditorApp {
                         }
                         if ui.button("Cancel").clicked() {
                             self.show_open_scene_dialog = false;
+                        }
+                    });
+                });
+        }
+
+        // Import 3D Model Dialog
+        if self.show_import_model_dialog {
+            egui::Window::new("📦 Import 3D Model")
+                .collapsible(false)
+                .resizable(true)
+                .min_width(450.0)
+                .show(ctx, |ui| {
+                    ui.label("Select a 3D model file to import:");
+                    ui.label("Supported formats: .obj (FBX files should be converted to OBJ using Blender)");
+                    ui.add_space(4.0);
+                    
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            let files_clone = self.import_model_files.clone();
+                            for file in &files_clone {
+                                let display_name = std::path::Path::new(file)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(file);
+                                let icon = if file.ends_with(".fbx") { "⚠️" } else { "📦" };
+                                let tooltip = if file.ends_with(".fbx") {
+                                    "FBX files must be converted to OBJ format using Blender"
+                                } else {
+                                    "Click to import this model"
+                                };
+                                if ui.selectable_label(false, format!("{} {}", icon, display_name))
+                                    .on_hover_text(tooltip)
+                                    .clicked() 
+                                {
+                                    if file.ends_with(".fbx") {
+                                        self.status = "FBX files must be converted to OBJ using Blender. File → Export → Wavefront (.obj)".into();
+                                    } else {
+                                        let file_path = file.clone();
+                                        if let Err(e) = self.import_model_from_path(&file_path) {
+                                            self.status = format!("Import error: {}", e);
+                                        }
+                                        self.show_import_model_dialog = false;
+                                    }
+                                }
+                            }
+                            if files_clone.is_empty() {
+                                ui.label("No model files found.");
+                                ui.label("Place .obj files in: assets/models/, models/, or project root.");
+                            }
+                        });
+                    
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("🔄 Refresh").clicked() {
+                            self.import_model_files = Self::scan_model_files();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_import_model_dialog = false;
                         }
                     });
                 });

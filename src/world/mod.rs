@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use crate::physics::PhysicsWorld;
 
 pub mod scripting;
+pub mod fbx_loader;
 use scripting::{FuckScript, ScriptContext, ScriptRegistry};
 
 pub struct GameWorld {
@@ -423,6 +424,14 @@ pub enum SceneUpdate {
         id: u32,
         enabled: bool,
         layer: u32,
+    },
+    /// Spawn an FBX mesh with full model data
+    SpawnFbxMesh {
+        id: u32,
+        mesh_data: Vec<u8>,  // Raw FBX file bytes
+        position: [f32; 3],
+        rotation: [f32; 4],
+        scale: [f32; 3],
     },
 }
 
@@ -931,6 +940,53 @@ impl GameWorld {
                         }
                     }
                 }
+                SceneUpdate::SpawnFbxMesh {
+                    id,
+                    mesh_data,
+                    position,
+                    rotation,
+                    scale,
+                } => {
+                    match fbx_loader::load_fbx_from_bytes(&mesh_data) {
+                        Ok(fbx_scene) => {
+                            // Merge all meshes from the FBX file
+                            let mesh = fbx_loader::merge_fbx_meshes(&fbx_scene);
+                            
+                            if mesh.vertices.is_empty() {
+                                warn!("FBX file contains no mesh data for entity {}", id);
+                            } else {
+                                let vert_count = mesh.vertices.len();
+                                let idx_count = mesh.indices.len();
+                                self.ecs.spawn((
+                                    EditorEntityId(id),
+                                    Transform {
+                                        position: glam::Vec3::from(position),
+                                        rotation: glam::Quat::from_array(rotation),
+                                        scale: glam::Vec3::from(scale),
+                                    },
+                                    mesh,
+                                    Material {
+                                        color: [1.0, 1.0, 1.0, 1.0],
+                                        albedo_texture: None,
+                                        metallic: 0.0,
+                                        roughness: 0.5,
+                                    },
+                                ));
+                                info!(
+                                    "Spawned mesh EditorEntityId({}) at pos {:?} scale {:?} - {} vertices, {} indices",
+                                    id,
+                                    position,
+                                    scale,
+                                    vert_count,
+                                    idx_count
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to load FBX for entity {}: {}", id, e);
+                        }
+                    }
+                }
             }
         }
 
@@ -1292,51 +1348,69 @@ pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
         anyhow::bail!("No models found in buffer");
     }
 
-    // Take the first model
-    let mesh = &models[0].mesh;
-    let mut vertices = Vec::new();
+    info!("OBJ loaded: {} model(s) found", models.len());
 
-    for i in 0..mesh.positions.len() / 3 {
-        let pos = [
-            mesh.positions[i * 3],
-            mesh.positions[i * 3 + 1],
-            mesh.positions[i * 3 + 2],
-        ];
+    let mut all_vertices = Vec::new();
+    let mut all_indices = Vec::new();
 
-        let normal = if !mesh.normals.is_empty() {
-            [
-                mesh.normals[i * 3],
-                mesh.normals[i * 3 + 1],
-                mesh.normals[i * 3 + 2],
-            ]
-        } else {
-            [0.0, 1.0, 0.0] // Default normal (up)
-        };
+    // Merge ALL models in the OBJ file
+    for (model_idx, model) in models.iter().enumerate() {
+        let mesh = &model.mesh;
+        let base_vertex_idx = all_vertices.len() as u32;
+        
+        let vertex_count = mesh.positions.len() / 3;
+        info!("  Model {} '{}': {} vertices, {} indices", 
+            model_idx, model.name, vertex_count, mesh.indices.len());
 
-        let uv = if !mesh.texcoords.is_empty() {
-            [
-                mesh.texcoords[i * 2],
-                1.0 - mesh.texcoords[i * 2 + 1], // Flip V for Vulkan/OBJ mismatch
-            ]
-        } else {
-            [0.0, 0.0]
-        };
+        for i in 0..vertex_count {
+            let pos = [
+                mesh.positions[i * 3],
+                mesh.positions[i * 3 + 1],
+                mesh.positions[i * 3 + 2],
+            ];
 
-        // TODO: Calc tangents
-        let tangent = [1.0, 0.0, 0.0, 1.0];
+            let normal = if mesh.normals.len() > i * 3 + 2 {
+                [
+                    mesh.normals[i * 3],
+                    mesh.normals[i * 3 + 1],
+                    mesh.normals[i * 3 + 2],
+                ]
+            } else {
+                [0.0, 1.0, 0.0] // Default normal (up)
+            };
 
-        vertices.push(Vertex {
-            position: pos,
-            normal,
-            uv,
-            color: [1.0, 1.0, 1.0], // Default white color
-            tangent,
-        });
+            let uv = if mesh.texcoords.len() > i * 2 + 1 {
+                [
+                    mesh.texcoords[i * 2],
+                    1.0 - mesh.texcoords[i * 2 + 1], // Flip V for Vulkan/OBJ mismatch
+                ]
+            } else {
+                [0.0, 0.0]
+            };
+
+            // TODO: Calc tangents
+            let tangent = [1.0, 0.0, 0.0, 1.0];
+
+            all_vertices.push(Vertex {
+                position: pos,
+                normal,
+                uv,
+                color: [1.0, 1.0, 1.0], // Default white color
+                tangent,
+            });
+        }
+
+        // Offset indices for this model
+        for &idx in &mesh.indices {
+            all_indices.push(idx + base_vertex_idx);
+        }
     }
 
+    info!("OBJ total: {} vertices, {} indices", all_vertices.len(), all_indices.len());
+
     Ok(Mesh {
-        vertices,
-        indices: mesh.indices.clone(),
+        vertices: all_vertices,
+        indices: all_indices,
         albedo: None,
         normal: None,
         metallic_roughness: None,
