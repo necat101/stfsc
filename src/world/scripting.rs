@@ -28,6 +28,9 @@ pub trait FuckScript: Send + Sync {
 
     /// Called when a trigger overlap ends.
     fn on_trigger_end(&mut self, _ctx: &mut ScriptContext, _other: Entity) {}
+
+    /// Called when the player respawns (for global scripts or player-attached scripts)
+    fn on_player_respawn(&mut self, _ctx: &mut ScriptContext) {}
 }
 
 /// Context passed to scripts to allow them to interact with the engine.

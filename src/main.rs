@@ -293,10 +293,22 @@ fn main() {
             
                     // Sync player position FROM physics
                     let player_rb_handle = state.player_rb.0;
-                    let (phys_pos, rot) = {
+                    let (mut phys_pos, _rot) = {
                          let body = state.physics.rigid_body_set.get(player_rb_handle).unwrap();
                          (body.translation().clone(), body.rotation().clone())
                     };
+                    
+                    // Respawn Logic
+                    if state.world.respawn_enabled && phys_pos.y < state.world.respawn_y {
+                        let spawn_pos = state.world.player_start_transform.position;
+                        if let Some(body) = state.physics.rigid_body_set.get_mut(player_rb_handle) {
+                            body.set_translation(rapier3d::na::Vector3::new(spawn_pos.x, spawn_pos.y, spawn_pos.z), true);
+                            body.set_linvel(rapier3d::na::Vector3::zeros(), true);
+                            phys_pos = body.translation().clone();
+                            println!("PLAYER: Respawned! (y < {})", state.world.respawn_y);
+                        }
+                    }
+
                     // Offset camera to eye level (0.8m above 0.9m center = 1.7m standing height)
                     let eye_offset = glam::Vec3::new(0.0, 0.8, 0.0); 
                     state.player_position = glam::Vec3::new(phys_pos.x, phys_pos.y, phys_pos.z) + eye_offset;
@@ -686,7 +698,7 @@ fn main() {
 
                 // 3. Prepare Draw Data
                 let mut batch_map: HashMap<usize, Vec<InstanceData>> = HashMap::new();
-                let mut custom_draws: Vec<(GpuMesh, InstanceData)> = Vec::new();
+                let mut custom_draws: Vec<(GpuMesh, InstanceData, Option<vk::DescriptorSet>)> = Vec::new();
                 let mut textured_draws: Vec<(usize, InstanceData, vk::DescriptorSet)> = Vec::new();
                 let mut view_proj = glam::Mat4::IDENTITY;
                 let mut player_pos = glam::Vec3::ZERO;
@@ -763,7 +775,12 @@ fn main() {
                         let model = glam::Mat4::from_scale_rotation_translation(transform.scale, transform.rotation, transform.position);
                         if frustum.intersects_aabb(&gpu_mesh.aabb.transform(model)) {
                             let entity_id = id.id() as u64;
-                            Some((entity_id, gpu_mesh, model, material.color))
+                            
+                            // Check for custom texture (same as MeshHandles)
+                            let tex_info = material.albedo_texture.as_ref()
+                                .and_then(|tex_id| texture_cache.get(tex_id).map(|entry| entry.material_descriptor_set));
+                            
+                            Some((entity_id, gpu_mesh, model, material.color, tex_info))
                         } else {
                             None
                         }
@@ -782,10 +799,10 @@ fn main() {
                         }
                     }
 
-                    for (entity_id, gpu_mesh, model, color) in custom_results {
+                    for (entity_id, gpu_mesh, model, color, tex_info) in custom_results {
                         let prev_model = *prev_transforms.get(&entity_id).unwrap_or(&model);
                         prev_transforms.insert(entity_id, model);
-                        custom_draws.push((gpu_mesh, InstanceData { model, prev_model, color }));
+                        custom_draws.push((gpu_mesh, InstanceData { model, prev_model, color }, tex_info));
                     }
 
                     // Lights - Parallelized gathering
@@ -827,11 +844,11 @@ fn main() {
                     draw_calls.push((mesh_idx, instance_offset as u32, count as u32));
                     instance_offset += count;
                 }
-                let mut custom_draw_calls = Vec::new();
-                for (mesh, data) in custom_draws {
+                let mut custom_draw_calls: Vec<(GpuMesh, u32, u32, Option<vk::DescriptorSet>)> = Vec::new();
+                for (mesh, data, tex_info) in custom_draws {
                     if instance_offset + 1 > max_instances { break; }
                     unsafe { std::ptr::write(instance_ptr.add(instance_offset), data); }
-                    custom_draw_calls.push((mesh, instance_offset as u32, 1u32));
+                    custom_draw_calls.push((mesh, instance_offset as u32, 1u32, tex_info));
                     instance_offset += 1;
                 }
                 // Upload textured entities (individual draw calls with custom descriptor sets)
@@ -953,6 +970,11 @@ fn main() {
                         graphics_context.device.cmd_bind_index_buffer(cmd, m.index_buffer, 0, vk::IndexType::UINT32);
                         graphics_context.device.cmd_draw_indexed(cmd, m.index_count, *count, 0, 0, *first);
                     }
+                    for (m, first, count, _) in &custom_draw_calls {
+                        graphics_context.device.cmd_bind_vertex_buffers(cmd, 0, &[m.vertex_buffer], &[0]);
+                        graphics_context.device.cmd_bind_index_buffer(cmd, m.index_buffer, 0, vk::IndexType::UINT32);
+                        graphics_context.device.cmd_draw_indexed(cmd, m.index_count, *count, 0, 0, *first);
+                    }
                     graphics_context.device.cmd_end_render_pass(cmd);
 
                     // Main Pass
@@ -983,8 +1005,10 @@ fn main() {
                         graphics_context.device.cmd_bind_index_buffer(cmd, m.index_buffer, 0, vk::IndexType::UINT32);
                         graphics_context.device.cmd_draw_indexed(cmd, m.index_count, *count, 0, 0, *first);
                     }
-                    for (m, first, count) in &custom_draw_calls {
-                        graphics_context.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, graphics_context.pipeline_layout, 1, &[m.material_descriptor_set], &[]);
+                    for (m, first, count, tex_info) in &custom_draw_calls {
+                        // Bind material texture if available, otherwise fallback to GpuMesh's internal descriptor set
+                        let descriptor_set = tex_info.unwrap_or(m.material_descriptor_set);
+                        graphics_context.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, graphics_context.pipeline_layout, 1, &[descriptor_set], &[]);
                         graphics_context.device.cmd_bind_vertex_buffers(cmd, 0, &[m.vertex_buffer], &[0]);
                         graphics_context.device.cmd_bind_index_buffer(cmd, m.index_buffer, 0, vk::IndexType::UINT32);
                         graphics_context.device.cmd_draw_indexed(cmd, m.index_count, *count, 0, 0, *first);

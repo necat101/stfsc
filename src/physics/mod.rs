@@ -94,6 +94,19 @@ impl PhysicsWorld {
         membership: u32,
         filter: u32,
     ) -> RigidBodyHandle {
+        self.add_box_rigid_body_with_offset(entity_id, translation, 0.0, half_extents, dynamic, membership, filter)
+    }
+
+    pub fn add_box_rigid_body_with_offset(
+        &mut self,
+        entity_id: u128,
+        translation: [f32; 3],
+        y_offset: f32,
+        half_extents: [f32; 3],
+        dynamic: bool,
+        membership: u32,
+        filter: u32,
+    ) -> RigidBodyHandle {
         let rigid_body = if dynamic {
             RigidBodyBuilder::dynamic()
                 .translation(vector![translation[0], translation[1], translation[2]])
@@ -109,6 +122,7 @@ impl PhysicsWorld {
 
         let collider =
             ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2])
+                .translation(vector![0.0, y_offset, 0.0])
                 .collision_groups(InteractionGroups::new(
                     Group::from_bits_truncate(membership),
                     Group::from_bits_truncate(filter),

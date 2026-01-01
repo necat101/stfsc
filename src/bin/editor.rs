@@ -235,6 +235,8 @@ struct SceneEntity {
     collision_enabled: bool,
     #[serde(default = "default_layer")]
     layer: u32,
+    #[serde(default)]
+    is_static: bool,  // If true, object is not affected by gravity
     #[serde(skip)]
     deployed: bool,
 }
@@ -290,6 +292,8 @@ struct Scene {
     name: String,
     version: String,
     entities: Vec<SceneEntity>,
+    respawn_enabled: bool,
+    respawn_y: f32,
 }
 
 impl Scene {
@@ -298,11 +302,15 @@ impl Scene {
             name: name.into(),
             version: "1.0".into(),
             entities: Vec::new(),
+            respawn_enabled: false,
+            respawn_y: -20.0,
         }
     }
 
     fn create_test_scene() -> Self {
         let mut s = Scene::new("Test");
+        s.respawn_enabled = true;
+        s.respawn_y = -20.0;
         let m = Material::default();
 
         // Ground - positioned to match main.rs floor (avoiding z-fighting)
@@ -319,6 +327,7 @@ impl Scene {
             script: None,
             collision_enabled: true,
             layer: LAYER_ENVIRONMENT,
+            is_static: false,
             deployed: false,
         });
         // Physics Cube
@@ -336,6 +345,7 @@ impl Scene {
             script: None,
             collision_enabled: true,
             layer: LAYER_PROP,
+            is_static: false,
             deployed: false,
         });
         // Vehicle
@@ -350,6 +360,7 @@ impl Scene {
             script: Some("Vehicle".into()),
             collision_enabled: true,
             layer: LAYER_VEHICLE,
+            is_static: false,
             deployed: false,
         });
         // Agents
@@ -378,6 +389,7 @@ impl Scene {
                 script: Some("CrowdAgent".into()),
                 collision_enabled: false,
                 layer: LAYER_CHARACTER,
+                is_static: false,
                 deployed: false,
             });
         }
@@ -398,6 +410,7 @@ impl Scene {
                 script: None,
                 collision_enabled: false,
                 layer: LAYER_ENVIRONMENT,
+                is_static: true,  // Buildings are static by default
                 deployed: false,
             });
         }
@@ -416,6 +429,7 @@ impl Scene {
             script: None,
             collision_enabled: false,
             layer: LAYER_DEFAULT,
+            is_static: true,
             deployed: false,
         });
         s
@@ -732,6 +746,7 @@ impl EditorApp {
                         albedo_texture: entity.material.albedo_texture.clone(),
                         collision_enabled: entity.collision_enabled,
                         layer: entity.layer,
+                        is_static: entity.is_static,
                     }));
                 }
             }
@@ -750,6 +765,12 @@ impl EditorApp {
 
     fn deploy_all_to_quest(&self) {
         if let Some(scene) = &self.current_scene {
+            // Send global scene settings first
+            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetRespawnSettings {
+                enabled: scene.respawn_enabled,
+                y_threshold: scene.respawn_y,
+            }));
+            
             for entity in &scene.entities {
                 self.deploy_entity_to_quest(entity);
             }
@@ -770,6 +791,7 @@ impl EditorApp {
                 script: None,
                 collision_enabled: true,
                 layer: LAYER_PROP, // Default new primitives to Props
+                is_static: false,
                 deployed: false,
             };
             // Push to undo stack
@@ -937,6 +959,7 @@ impl EditorApp {
             script: None,
             collision_enabled: false,
             layer: LAYER_PROP,
+            is_static: true,  // Imported meshes are static by default (no gravity)
             deployed: false,
         };
         
@@ -948,6 +971,10 @@ impl EditorApp {
                 position: new_entity.position,
                 rotation: new_entity.rotation,
                 scale: new_entity.scale,
+                albedo_texture: None,  // No texture on initial import
+                collision_enabled: new_entity.collision_enabled,
+                layer: new_entity.layer,
+                is_static: new_entity.is_static,
             }));
         }
         
@@ -965,12 +992,24 @@ impl EditorApp {
     
     /// Deploy a mesh entity to the Quest via SpawnFbxMesh
     fn deploy_mesh_entity(&self, entity: &SceneEntity, mesh_data: &[u8]) {
+        // Upload texture if present
+        if let (Some(texture_id), Some(texture_data)) = (&entity.material.albedo_texture, &entity.material.albedo_texture_data) {
+            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::UploadTexture {
+                id: texture_id.clone(),
+                data: texture_data.clone(),
+            }));
+        }
+        
         let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SpawnFbxMesh {
             id: entity.id,
             mesh_data: mesh_data.to_vec(),
             position: entity.position,
             rotation: entity.rotation,
             scale: entity.scale,
+            albedo_texture: entity.material.albedo_texture.clone(),
+            collision_enabled: entity.collision_enabled,
+            layer: entity.layer,
+            is_static: entity.is_static,
         }));
     }
 
@@ -1644,6 +1683,7 @@ impl eframe::App for EditorApp {
                                 script: None,
                                 collision_enabled: true,
                                 layer: LAYER_VEHICLE,
+                                is_static: false,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1667,6 +1707,7 @@ impl eframe::App for EditorApp {
                                 script: Some("CrowdAgent".into()),
                                 collision_enabled: true,
                                 layer: LAYER_CHARACTER,
+                                is_static: false,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1690,6 +1731,7 @@ impl eframe::App for EditorApp {
                                 script: None,
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
+                                is_static: true,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1720,6 +1762,7 @@ impl eframe::App for EditorApp {
                                 script: None,
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
+                                is_static: true,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1748,6 +1791,7 @@ impl eframe::App for EditorApp {
                                 script: None,
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
+                                is_static: true,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1776,6 +1820,7 @@ impl eframe::App for EditorApp {
                                 script: None,
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
+                                is_static: true,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1807,6 +1852,7 @@ impl eframe::App for EditorApp {
                                 script: None,
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
+                                is_static: true,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1865,6 +1911,31 @@ impl eframe::App for EditorApp {
                             );
                         }
                         ui.close_menu();
+                    }
+
+                    ui.separator();
+                    ui.label("Respawn System");
+                    if let Some(scene) = &mut self.current_scene {
+                        let mut changed = false;
+                        if ui.checkbox(&mut scene.respawn_enabled, "Enable Min Y Respawn").changed() {
+                            changed = true;
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label("Min Y:");
+                            if ui.add(egui::DragValue::new(&mut scene.respawn_y).speed(0.1)).changed() {
+                                changed = true;
+                            }
+                        });
+
+                        if changed && self.is_connected {
+                            let _ = self.command_tx.send(AppCommand::Send(
+                                SceneUpdate::SetRespawnSettings {
+                                    enabled: scene.respawn_enabled,
+                                    y_threshold: scene.respawn_y,
+                                },
+                            ));
+                            self.scene_dirty = true;
+                        }
                     }
                 });
                 ui.menu_button("View", |ui| {
@@ -2048,6 +2119,10 @@ impl eframe::App for EditorApp {
                                     layer: entity.layer,
                                 }));
                             }
+                        }
+                        if ui.checkbox(&mut entity.is_static, "⚓ Static (No Gravity)").changed() {
+                            inspector_dirty = true;
+                            // Static toggle requires re-deploy to take effect
                         }
                         
                         ui.horizontal(|ui| {
@@ -2345,6 +2420,7 @@ impl eframe::App for EditorApp {
                                     albedo_texture: e.material.albedo_texture.clone(),
                                     collision_enabled: e.collision_enabled,
                                     layer: e.layer,
+                                    is_static: e.is_static,
                                 }));
                             }
                             e.deployed = true;

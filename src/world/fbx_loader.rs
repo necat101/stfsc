@@ -11,11 +11,10 @@
 //! 2. File → Export → Wavefront (.obj)
 //! 3. Load the OBJ file using `load_obj_from_bytes` in world/mod.rs
 
-use crate::world::{Mesh, Vertex};
-use anyhow::{Context, Result};
+use crate::world::Mesh;
+use anyhow::Result;
 use glam;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Represents a bone in the skeleton hierarchy
 #[derive(Clone, Debug)]
@@ -293,12 +292,29 @@ pub fn merge_model_meshes(scene: &ModelScene) -> Mesh {
         indices.extend(skinned.mesh.indices.iter().map(|i| i + base_idx));
     }
 
+    let mut aabb_min = [0.0, 0.0, 0.0];
+    let mut aabb_max = [0.0, 0.0, 0.0];
+    if !vertices.is_empty() {
+        let mut min = glam::Vec3::splat(f32::MAX);
+        let mut max = glam::Vec3::splat(f32::MIN);
+        for v in &vertices {
+            let p = glam::Vec3::from(v.position);
+            min = min.min(p);
+            max = max.max(p);
+        }
+        aabb_min = min.to_array();
+        aabb_max = max.to_array();
+    }
+
     Mesh {
         vertices,
         indices,
         albedo: None,
         normal: None,
         metallic_roughness: None,
+        albedo_texture: None,
+        aabb_min,
+        aabb_max,
         decoded_albedo: None,
         decoded_normal: None,
         decoded_mr: None,

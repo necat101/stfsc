@@ -23,6 +23,8 @@ pub struct GameWorld {
     pub pending_audio_uploads: std::collections::HashMap<String, Vec<u8>>,
     pub pending_texture_uploads: std::collections::HashMap<String, Vec<u8>>,
     pub script_registry: Arc<ScriptRegistry>,
+    pub respawn_enabled: bool,
+    pub respawn_y: f32,
 }
 
 pub struct ChunkData {
@@ -66,6 +68,11 @@ pub struct Mesh {
     pub albedo: Option<Vec<u8>>, // Raw image bytes (png/jpg)
     pub normal: Option<Vec<u8>>,
     pub metallic_roughness: Option<Vec<u8>>,
+    pub albedo_texture: Option<String>,
+
+    // Bounds for physics/culling
+    pub aabb_min: [f32; 3],
+    pub aabb_max: [f32; 3],
 
     // Runtime-only decoded data (not serialized)
     #[serde(skip)]
@@ -330,6 +337,8 @@ pub enum SceneUpdate {
         albedo_texture: Option<String>,  // Texture ID for custom albedo texture
         collision_enabled: bool,
         layer: u32,
+        #[serde(default)]
+        is_static: bool,  // If true, object is not affected by gravity
     },
     SpawnMesh {
         id: u32,
@@ -428,10 +437,22 @@ pub enum SceneUpdate {
     /// Spawn an FBX mesh with full model data
     SpawnFbxMesh {
         id: u32,
-        mesh_data: Vec<u8>,  // Raw FBX file bytes
+        mesh_data: Vec<u8>,  // Raw FBX/OBJ file bytes
         position: [f32; 3],
         rotation: [f32; 4],
         scale: [f32; 3],
+        #[serde(default)]
+        albedo_texture: Option<String>,  // Optional texture ID
+        #[serde(default)]
+        collision_enabled: bool,
+        #[serde(default)]
+        layer: u32,
+        #[serde(default)]
+        is_static: bool,
+    },
+    SetRespawnSettings {
+        enabled: bool,
+        y_threshold: f32,
     },
 }
 
@@ -467,6 +488,8 @@ impl GameWorld {
                 reg.register("TouchToDestroy", || scripting::TouchToDestroyScript);
                 Arc::new(reg)
             },
+            respawn_enabled: false,
+            respawn_y: -20.0,
         };
         // world.spawn_default_scene(); // Moved to streaming logic or separate init
         world
@@ -527,6 +550,7 @@ impl GameWorld {
                     albedo_texture,
                     collision_enabled,
                     layer,
+                    is_static,
                 } => {
                     self.ecs.spawn((
                         EditorEntityId(id), // Track this entity's ID for deletion
@@ -547,15 +571,15 @@ impl GameWorld {
                     let target_entity = self.ecs.query::<&EditorEntityId>().iter().find(|(_, id_comp)| id_comp.0 == id).map(|(e, _)| e);
                     if let Some(entity) = target_entity {
                         if collision_enabled {
-                            // Determine if dynamic based on primitive. 3 (Plane) is always static.
-                            let is_dynamic = primitive != 3;
+                            // Use is_static to control gravity. Planes (3) are always static.
+                            let is_dynamic = !is_static && primitive != 3;
                             self.attach_physics_to_entity(entity, physics, primitive, position, rotation, [1.0, 1.0, 1.0], is_dynamic, layer);
                         }
                     }
 
                     info!(
-                        "Spawned entity with EditorEntityId({}) using MeshHandle({}) (collision: {})",
-                        id, primitive, collision_enabled
+                        "Spawned entity with EditorEntityId({}) using MeshHandle({}) (collision: {}, static: {})",
+                        id, primitive, collision_enabled, is_static
                     );
                 }
                 SceneUpdate::SpawnMesh {
@@ -940,24 +964,34 @@ impl GameWorld {
                         }
                     }
                 }
+                SceneUpdate::SetRespawnSettings { enabled, y_threshold } => {
+                    self.respawn_enabled = enabled;
+                    self.respawn_y = y_threshold;
+                    info!("Respawn settings updated: enabled={}, y={}", enabled, y_threshold);
+                }
                 SceneUpdate::SpawnFbxMesh {
                     id,
                     mesh_data,
                     position,
                     rotation,
                     scale,
+                    albedo_texture,
+                    collision_enabled,
+                    layer,
+                    is_static,
                 } => {
                     match fbx_loader::load_fbx_from_bytes(&mesh_data) {
                         Ok(fbx_scene) => {
                             // Merge all meshes from the FBX file
-                            let mesh = fbx_loader::merge_fbx_meshes(&fbx_scene);
+                            let mut mesh = fbx_loader::merge_fbx_meshes(&fbx_scene);
+                            mesh.albedo_texture = albedo_texture.clone();
                             
                             if mesh.vertices.is_empty() {
                                 warn!("FBX file contains no mesh data for entity {}", id);
                             } else {
                                 let vert_count = mesh.vertices.len();
                                 let idx_count = mesh.indices.len();
-                                self.ecs.spawn((
+                                let entity = self.ecs.spawn((
                                     EditorEntityId(id),
                                     Transform {
                                         position: glam::Vec3::from(position),
@@ -967,18 +1001,34 @@ impl GameWorld {
                                     mesh,
                                     Material {
                                         color: [1.0, 1.0, 1.0, 1.0],
-                                        albedo_texture: None,
+                                        albedo_texture,
                                         metallic: 0.0,
                                         roughness: 0.5,
                                     },
                                 ));
+
+                                if collision_enabled {
+                                    self.attach_physics_to_entity(
+                                        entity,
+                                        physics,
+                                        255, // 255 = custom mesh using its AABB
+                                        position,
+                                        rotation,
+                                        scale,
+                                        !is_static,
+                                        layer,
+                                    );
+                                }
+
                                 info!(
-                                    "Spawned mesh EditorEntityId({}) at pos {:?} scale {:?} - {} vertices, {} indices",
+                                    "Spawned mesh EditorEntityId({}) at pos {:?} scale {:?} - {} vertices, {} indices (collision: {}, static: {})",
                                     id,
                                     position,
                                     scale,
                                     vert_count,
-                                    idx_count
+                                    idx_count,
+                                    collision_enabled,
+                                    is_static
                                 );
                             }
                         }
@@ -1256,6 +1306,38 @@ impl GameWorld {
                     filter,
                 )
             }
+            255 => {
+                // Custom Mesh: Use its AABB to create a box collider
+                let mut half_extents = [scale[0] * 0.5, scale[1] * 0.5, scale[2] * 0.5];
+                let mut y_offset = 0.0;
+                
+                if let Ok(mesh) = self.ecs.get::<&Mesh>(entity) {
+                    let min = glam::Vec3::from(mesh.aabb_min);
+                    let max = glam::Vec3::from(mesh.aabb_max);
+                    let extent = max - min;
+                    half_extents = [
+                        extent.x * scale[0] * 0.5,
+                        extent.y * scale[1] * 0.5,
+                        extent.z * scale[2] * 0.5,
+                    ];
+                    
+                    // If normalization is Base-Origin, the bottom is at Y=0 and top at Y=1 (roughly)
+                    // The Rapier box is centered at its origin, so we need to offset it UP by half-height
+                    // to match the visual mesh which starts at 0 and goes UP.
+                    y_offset = half_extents[1];
+                    info!("Custom mesh physics: half_extents={:?}, y_offset={}", half_extents, y_offset);
+                }
+
+                physics.add_box_rigid_body_with_offset(
+                    entity_bits,
+                    position,
+                    y_offset,
+                    half_extents,
+                    is_dynamic,
+                    layer,
+                    filter,
+                )
+            }
             _ => physics.add_box_rigid_body(
                 entity_bits,
                 position,
@@ -1359,9 +1441,11 @@ pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
         let base_vertex_idx = all_vertices.len() as u32;
         
         let vertex_count = mesh.positions.len() / 3;
-        info!("  Model {} '{}': {} vertices, {} indices", 
-            model_idx, model.name, vertex_count, mesh.indices.len());
+        let has_normals = mesh.normals.len() >= vertex_count * 3;
+        info!("  Model {} '{}': {} vertices, {} indices, has_normals: {}", 
+            model_idx, model.name, vertex_count, mesh.indices.len(), has_normals);
 
+        // First pass: create vertices with placeholder normals if needed
         for i in 0..vertex_count {
             let pos = [
                 mesh.positions[i * 3],
@@ -1369,14 +1453,14 @@ pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
                 mesh.positions[i * 3 + 2],
             ];
 
-            let normal = if mesh.normals.len() > i * 3 + 2 {
+            let normal = if has_normals {
                 [
                     mesh.normals[i * 3],
                     mesh.normals[i * 3 + 1],
                     mesh.normals[i * 3 + 2],
                 ]
             } else {
-                [0.0, 1.0, 0.0] // Default normal (up)
+                [0.0, 0.0, 0.0] // Will be computed from faces
             };
 
             let uv = if mesh.texcoords.len() > i * 2 + 1 {
@@ -1388,14 +1472,13 @@ pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
                 [0.0, 0.0]
             };
 
-            // TODO: Calc tangents
             let tangent = [1.0, 0.0, 0.0, 1.0];
 
             all_vertices.push(Vertex {
                 position: pos,
                 normal,
                 uv,
-                color: [1.0, 1.0, 1.0], // Default white color
+                color: [1.0, 1.0, 1.0],
                 tangent,
             });
         }
@@ -1406,7 +1489,136 @@ pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
         }
     }
 
+    // If no normals were provided, compute face normals and accumulate to vertices
+    let needs_normals = all_vertices.iter().any(|v| v.normal == [0.0, 0.0, 0.0]);
+    if needs_normals && all_indices.len() >= 3 {
+        info!("Computing face normals for {} triangles", all_indices.len() / 3);
+        
+        // Accumulate face normals to vertices
+        for tri in all_indices.chunks(3) {
+            if tri.len() < 3 { continue; }
+            let i0 = tri[0] as usize;
+            let i1 = tri[1] as usize;
+            let i2 = tri[2] as usize;
+            
+            if i0 >= all_vertices.len() || i1 >= all_vertices.len() || i2 >= all_vertices.len() {
+                continue;
+            }
+            
+            let p0 = glam::Vec3::from(all_vertices[i0].position);
+            let p1 = glam::Vec3::from(all_vertices[i1].position);
+            let p2 = glam::Vec3::from(all_vertices[i2].position);
+            
+            let edge1 = p1 - p0;
+            let edge2 = p2 - p0;
+            let face_normal = edge1.cross(edge2);
+            
+            // Accumulate (will normalize later)
+            for &idx in &[i0, i1, i2] {
+                let v = &mut all_vertices[idx];
+                v.normal[0] += face_normal.x;
+                v.normal[1] += face_normal.y;
+                v.normal[2] += face_normal.z;
+            }
+        }
+        
+        // Normalize accumulated normals
+        for v in &mut all_vertices {
+            let n = glam::Vec3::from(v.normal);
+            let len = n.length();
+            if len > 0.0001 {
+                let normalized = n / len;
+                v.normal = normalized.to_array();
+            } else {
+                // Fallback for degenerate cases
+                v.normal = [0.0, 0.0, 1.0];
+            }
+        }
+    }
+
+    // Normalize mesh bounds: Base-Origin (bottom at Y=0, centered on X/Z)
+    if !all_vertices.is_empty() {
+        let mut min = glam::Vec3::splat(f32::MAX);
+        let mut max = glam::Vec3::splat(f32::MIN);
+        
+        for v in &all_vertices {
+            let p = glam::Vec3::from(v.position);
+            min = min.min(p);
+            max = max.max(p);
+        }
+        
+        let center = (min + max) * 0.5;
+        let extent = max - min;
+        let max_extent = extent.x.max(extent.y).max(extent.z);
+        
+        if max_extent > 0.0001 {
+            let scale = 1.0 / max_extent; // Normalize to 1 unit
+            
+            info!("Normalizing mesh (Base-Origin): min_y={}, center_xz={:?}, scale={}", min.y, (center.x, center.z), scale);
+            
+            for v in &mut all_vertices {
+                let p = glam::Vec3::from(v.position);
+                // Center on X and Z, align bottom of Y to 0
+                let normalized = glam::Vec3::new(
+                    (p.x - center.x) * scale,
+                    (p.y - min.y) * scale,
+                    (p.z - center.z) * scale,
+                );
+                v.position = normalized.to_array();
+            }
+        }
+    }
+
+    // Generate UVs using planar projection if none were provided
+    // Use the normalized positions (now in roughly -0.5 to 0.5 range) mapped to 0-1
+    let needs_uvs = all_vertices.iter().all(|v| v.uv == [0.0, 0.0]);
+    if needs_uvs && !all_vertices.is_empty() {
+        info!("Generating planar UV coordinates for mesh without UVs");
+        
+        // Find bounds of normalized mesh for proper UV mapping
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        
+        for v in &all_vertices {
+            min_x = min_x.min(v.position[0]);
+            max_x = max_x.max(v.position[0]);
+            min_y = min_y.min(v.position[1]);
+            max_y = max_y.max(v.position[1]);
+        }
+        
+        let range_x = (max_x - min_x).max(0.0001);
+        let range_y = (max_y - min_y).max(0.0001);
+        
+        // Map normalized positions to UV [0, 1]
+        for v in &mut all_vertices {
+            // X position -> U coordinate
+            let u = (v.position[0] - min_x) / range_x;
+            // Y position -> V coordinate (flip for typical image orientation)
+            let v_coord = 1.0 - (v.position[1] - min_y) / range_y;
+            v.uv = [u, v_coord];
+        }
+        
+        info!("Generated UVs for {} vertices", all_vertices.len());
+    }
+
     info!("OBJ total: {} vertices, {} indices", all_vertices.len(), all_indices.len());
+
+    // Final bounds check for Mesh struct
+    let mut aabb_min = [0.0, 0.0, 0.0];
+    let mut aabb_max = [0.0, 0.0, 0.0];
+    if !all_vertices.is_empty() {
+        let mut min = glam::Vec3::splat(f32::MAX);
+        let mut max = glam::Vec3::splat(f32::MIN);
+        for v in &all_vertices {
+            let p = glam::Vec3::from(v.position);
+            min = min.min(p);
+            max = max.max(p);
+        }
+        aabb_min = min.to_array();
+        aabb_max = max.to_array();
+    }
 
     Ok(Mesh {
         vertices: all_vertices,
@@ -1414,6 +1626,9 @@ pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
         albedo: None,
         normal: None,
         metallic_roughness: None,
+        albedo_texture: None,
+        aabb_min,
+        aabb_max,
         decoded_albedo: None,
         decoded_normal: None,
         decoded_mr: None,
@@ -1612,6 +1827,20 @@ pub fn create_primitive(ptype: u8) -> Mesh {
         _ => {}
     }
 
+    let mut aabb_min = [0.0, 0.0, 0.0];
+    let mut aabb_max = [0.0, 0.0, 0.0];
+    if !vertices.is_empty() {
+        let mut min = glam::Vec3::splat(f32::MAX);
+        let mut max = glam::Vec3::splat(f32::MIN);
+        for v in &vertices {
+            let p = glam::Vec3::from(v.position);
+            min = min.min(p);
+            max = max.max(p);
+        }
+        aabb_min = min.to_array();
+        aabb_max = max.to_array();
+    }
+
     Mesh {
         vertices: vertices
             .iter()
@@ -1622,11 +1851,14 @@ pub fn create_primitive(ptype: u8) -> Mesh {
                 color: v.color,
                 tangent: v.tangent,
             })
-            .collect(), // Avoid direct clone if struct not clone, but here re-constructing is safer
+            .collect(),
         indices,
         albedo: None,
         normal: None,
         metallic_roughness: None,
+        albedo_texture: None,
+        aabb_min,
+        aabb_max,
         decoded_albedo: None,
         decoded_normal: None,
         decoded_mr: None,
