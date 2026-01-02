@@ -3,6 +3,7 @@ pub mod graphics;
 pub mod lighting;
 pub mod physics;
 pub mod resource_loader;
+pub mod ui;
 pub mod world;
 
 #[cfg(target_os = "android")]

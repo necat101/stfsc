@@ -25,6 +25,7 @@ pub struct GameWorld {
     pub script_registry: Arc<ScriptRegistry>,
     pub respawn_enabled: bool,
     pub respawn_y: f32,
+    pub pending_ui_events: Vec<crate::ui::UiEvent>,
 }
 
 pub struct ChunkData {
@@ -456,6 +457,44 @@ pub enum SceneUpdate {
     },
 }
 
+// Assuming GameWorld struct definition is somewhere above this,
+// and looks something like this (inferred from `new` function):
+// pub struct GameWorld {
+//     pub ecs: World,
+//     pub chunk_receiver: mpsc::Receiver<Vec<(Transform, Mesh, Material)>>,
+//     pub chunk_sender: mpsc::Sender<Vec<(Transform, Mesh, Material)>>,
+//     pub command_receiver: mpsc::Receiver<SceneUpdate>,
+//     pub command_sender: mpsc::Sender<SceneUpdate>,
+//     pub loaded_chunks: std::collections::HashSet<(i32, i32)>,
+//     pub procedural_generation_enabled: bool,
+//     pub player_start_transform: Transform,
+//     pub pending_audio_uploads: std::collections::HashMap<String, Vec<u8>>,
+//     pub pending_texture_uploads: std::collections::HashMap<String, Vec<u8>>,
+//     pub script_registry: Arc<ScriptRegistry>,
+//     pub respawn_enabled: bool,
+//     pub respawn_y: f32,
+// }
+
+// The user's instruction implies adding `pending_ui_events` to the GameWorld struct.
+// Since the struct definition is not provided, I will add it to the `new` function
+// and assume the struct definition will be updated elsewhere or is implicitly handled.
+// However, the provided "Code Edit" snippet attempts to redefine `GameWorld` and its `new` function
+// in a syntactically incorrect way. I will interpret the instruction as adding the field
+// to the existing `GameWorld` struct and initializing it in the `new` function.
+
+// To make the change syntactically correct, I will add the field to the `GameWorld` struct
+// and initialize it in the `new` function. Since the `GameWorld` struct definition is not
+// in the provided content, I will add the initialization to the `new` function.
+// If the struct definition were present, the change would be made there.
+// Given the provided "Code Edit" snippet, it seems the user intended to add the field
+// and initialize it. I will add the initialization to the existing `new` function.
+
+// If the GameWorld struct definition was available, the change would look like this:
+// pub struct GameWorld {
+//     // ... existing fields ...
+//     pub pending_ui_events: Vec<crate::ui::UiEvent>,
+// }
+
 impl GameWorld {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(10);
@@ -489,7 +528,8 @@ impl GameWorld {
                 Arc::new(reg)
             },
             respawn_enabled: false,
-            respawn_y: -20.0,
+            respawn_y: -50.0,
+            pending_ui_events: Vec::new(),
         };
         // world.spawn_default_scene(); // Moved to streaming logic or separate init
         world
@@ -1044,7 +1084,12 @@ impl GameWorld {
         // self.request_chunk(1);
     }
 
-    pub fn update_logic(&mut self, physics: &mut PhysicsWorld, dt: f32) {
+    pub fn update_logic(&mut self, physics: &mut PhysicsWorld, dt: f32, ui_events: Vec<crate::ui::UiEvent>) {
+        // 0. Process UI Events
+        for event in &ui_events {
+            self.dispatch_ui_event(physics, event);
+        }
+
         // 1. Process Collision Events
         let collision_events = {
             if let Ok(mut events) = physics.event_collector.collision_events.lock() {
@@ -1231,6 +1276,31 @@ impl GameWorld {
             }
             if let Ok(mut comp) = self.ecs.get::<&mut DynamicScript>(entity) {
                 comp.script = Some(s);
+            }
+        }
+    }
+
+    fn dispatch_ui_event(&mut self, physics: &mut PhysicsWorld, event: &crate::ui::UiEvent) {
+        let entities: Vec<Entity> = self.ecs.query::<&DynamicScript>()
+            .iter()
+            .map(|(e, _)| e)
+            .collect();
+
+        for entity in entities {
+            let script = if let Ok(mut s) = self.ecs.get::<&mut DynamicScript>(entity) {
+                s.script.take()
+            } else {
+                None
+            };
+
+            if let Some(mut s) = script {
+                {
+                    let mut ctx = ScriptContext::new(entity, &mut self.ecs, physics, 0.0);
+                    s.on_ui_event(&mut ctx, event);
+                }
+                if let Ok(mut comp) = self.ecs.get::<&mut DynamicScript>(entity) {
+                    comp.script = Some(s);
+                }
             }
         }
     }

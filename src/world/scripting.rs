@@ -31,6 +31,9 @@ pub trait FuckScript: Send + Sync {
 
     /// Called when the player respawns (for global scripts or player-attached scripts)
     fn on_player_respawn(&mut self, _ctx: &mut ScriptContext) {}
+
+    /// Called when a UI event occurs (e.g. button click)
+    fn on_ui_event(&mut self, _ctx: &mut ScriptContext, _event: &crate::ui::UiEvent) {}
 }
 
 /// Context passed to scripts to allow them to interact with the engine.

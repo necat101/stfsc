@@ -5,6 +5,9 @@ use stfsc_engine::physics::PhysicsWorld;
 use stfsc_engine::resource_loader::{ResourceLoader, ResourceLoadResult};
 use stfsc_engine::lighting::{self, LightUBO, GpuLightData};
 use stfsc_engine::graphics::occlusion::OcclusionCuller;
+use stfsc_engine::ui::{self, UiCanvas, UiState, draw_pause_menu_with_font, get_hovered_pause_button, BUTTON_RESUME, BUTTON_QUIT};
+use stfsc_engine::ui::renderer::UiRenderer;
+use stfsc_engine::ui::font::FontAtlas;
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{WindowBuilder, CursorGrabMode};
 use winit::event::{Event, WindowEvent, DeviceEvent, ElementState, MouseButton};
@@ -323,7 +326,12 @@ fn main() {
 
                     let GameState { world, physics, .. } = &mut *state;
                     world.update_streaming(pos, physics);
-                    world.update_logic(physics, 0.016);
+                    
+                    // Transfer UI events from global state if we had a shared queue, 
+                    // but since ui_state is in the event loop thread, we'll drain 
+                    // the world's internal queue which was populated by the event loop.
+                    let ui_events = std::mem::take(&mut world.pending_ui_events);
+                    world.update_logic(physics, 0.016, ui_events);
                     
                     // Sync physics to ECS - Parallelized gathering
                     use rayon::prelude::*;
@@ -400,6 +408,39 @@ fn main() {
     let mut keys_pressed: HashSet<PhysicalKey> = HashSet::new();
     let mut last_frame_time = std::time::Instant::now();
 
+    // Initialize UI System
+    let mut ui_renderer = match UiRenderer::new(graphics_context.clone()) {
+        Ok(r) => {
+            println!("UI: Renderer initialized successfully");
+            Some(r)
+        }
+        Err(e) => {
+            println!("UI ERROR: Failed to initialize renderer: {:?}", e);
+            None
+        }
+    };
+    let mut ui_state = UiState::new();
+    let mut ui_canvas = UiCanvas::new(1920.0, 1080.0);
+    let mut mouse_position = glam::Vec2::ZERO;
+
+    // Initialize font atlas for UI text rendering
+    let font_atlas = match FontAtlas::new(graphics_context.clone(), 32.0) {
+        Ok(font) => {
+            println!("UI: Font atlas created successfully");
+            // Set font atlas on renderer if available
+            if let Some(ref mut renderer) = ui_renderer {
+                if let Err(e) = renderer.set_font_atlas(&font) {
+                    println!("UI WARNING: Failed to set font atlas: {:?}", e);
+                }
+            }
+            Some(font)
+        }
+        Err(e) => {
+            println!("UI WARNING: Failed to create font atlas: {:?}", e);
+            None
+        }
+    };
+
     // Main Loop
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Poll);
@@ -414,14 +455,67 @@ fn main() {
                     }
                 }
             }
-            Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
-                println!("CLICK: Left mouse button pressed, cursor_captured={}", cursor_captured);
-                if !cursor_captured {
-                    cursor_captured = true;
-                    window.set_cursor_visible(false);
-                    let result = window.set_cursor_grab(CursorGrabMode::Locked)
-                        .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
-                    println!("CURSOR: Captured (result: {:?})", result);
+            Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
+                // Track mouse position for UI interaction
+                mouse_position = glam::Vec2::new(position.x as f32, position.y as f32);
+                ui_state.pointer_pos = mouse_position;
+                
+                // Update hovered button when paused
+                if ui_state.paused {
+                    let screen_size = glam::Vec2::new(ui_canvas.screen_size.x, ui_canvas.screen_size.y);
+                    if let Some((id, callback)) = get_hovered_pause_button(mouse_position, screen_size) {
+                        ui_state.hovered_button = Some(id);
+                        ui_state.hovered_callback = callback;
+                    } else {
+                        ui_state.hovered_button = None;
+                        ui_state.hovered_callback = None;
+                    }
+                }
+            }
+            Event::WindowEvent { event: WindowEvent::MouseInput { state, button: MouseButton::Left, .. }, .. } => {
+                let pressed = state == ElementState::Pressed;
+                ui_state.pointer_pressed = pressed;
+                
+                if !pressed {
+                    ui_state.pointer_released = true;
+                    
+                    // Handle pause menu button clicks on release
+                    if ui_state.paused {
+                        if let Some(button_id) = ui_state.hovered_button {
+                            // First handle engine-level actions
+                            match button_id {
+                                BUTTON_RESUME => {
+                                    println!("UI: Resume clicked");
+                                    ui_state.toggle_pause();
+                                    cursor_captured = true;
+                                    window.set_cursor_visible(false);
+                                    let _ = window.set_cursor_grab(CursorGrabMode::Locked)
+                                        .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
+                                }
+                                BUTTON_QUIT => {
+                                    println!("UI: Quit clicked");
+                                    elwt.exit();
+                                }
+                                _ => {}
+                            }
+
+                            // Then push callback event for scripts
+                            if let Some(callback) = ui_state.hovered_callback.take() {
+                                if let Ok(mut state) = game_state.write() {
+                                    state.world.pending_ui_events.push(ui::UiEvent::ButtonClicked {
+                                        id: button_id,
+                                        callback,
+                                    });
+                                }
+                            }
+                        }
+                    } else if !cursor_captured {
+                        cursor_captured = true;
+                        window.set_cursor_visible(false);
+                        let result = window.set_cursor_grab(CursorGrabMode::Locked)
+                            .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
+                        println!("CURSOR: Captured (result: {:?})", result);
+                    }
                 }
             }
             Event::WindowEvent { 
@@ -447,15 +541,26 @@ fn main() {
                             || key_event.logical_key == Key::Character("`".into());
 
                         if is_escape || is_grave {
-                            if cursor_captured {
-                                println!("CURSOR: Releasing mouse grab (key: {:?}, logical: {:?})", physical_key, key_event.logical_key);
-                                cursor_captured = false;
-                                window.set_cursor_visible(true);
-                                if let Err(e) = window.set_cursor_grab(CursorGrabMode::None) {
-                                    println!("CURSOR ERROR: Failed to release grab: {:?}", e);
-                                } else {
-                                    println!("CURSOR: Grab released successfully");
+                            // Toggle pause menu
+                            ui_state.toggle_pause();
+                            
+                            if ui_state.paused {
+                                // Pause: release cursor
+                                if cursor_captured {
+                                    println!("CURSOR: Releasing mouse grab for pause menu");
+                                    cursor_captured = false;
+                                    window.set_cursor_visible(true);
+                                    if let Err(e) = window.set_cursor_grab(CursorGrabMode::None) {
+                                        println!("CURSOR ERROR: Failed to release grab: {:?}", e);
+                                    }
                                 }
+                            } else {
+                                // Resume: recapture cursor
+                                println!("CURSOR: Recapturing mouse for gameplay");
+                                cursor_captured = true;
+                                window.set_cursor_visible(false);
+                                let _ = window.set_cursor_grab(CursorGrabMode::Locked)
+                                    .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
                             }
                         }
                     }
@@ -480,15 +585,7 @@ fn main() {
                     }
                 }
                 
-                // Escape handling
-                if physical_key == PhysicalKey::Code(KeyCode::Escape) && key.state == ElementState::Pressed {
-                    if cursor_captured {
-                        println!("CURSOR: Releasing mouse grab (DeviceEvent Escape)");
-                        cursor_captured = false;
-                        window.set_cursor_visible(true);
-                        let _ = window.set_cursor_grab(CursorGrabMode::None);
-                    }
-                }
+                // Escape handling removed - now handled in WindowEvent with pause toggle
             }
             Event::WindowEvent { event: WindowEvent::Focused(focused), .. } => {
                 println!("FOCUS: Window focused={}", focused);
@@ -1023,6 +1120,30 @@ fn main() {
                         graphics_context.device.cmd_bind_index_buffer(cmd, m.index_buffer, 0, vk::IndexType::UINT32);
                         graphics_context.device.cmd_draw_indexed(cmd, m.index_count, *count, 0, 0, *first);
                     }
+
+                    // ============================================================
+                    // UI RENDERING PASS
+                    // ============================================================
+                    if let Some(ref mut ui_rend) = ui_renderer {
+                        // Update canvas screen size
+                        let extent = graphics_context.swapchain_extent.unwrap();
+                        ui_canvas.resize(extent.width as f32, extent.height as f32);
+                        ui_canvas.clear();
+                        
+                        // Draw pause menu if paused
+                        if ui_state.paused {
+                            if let Some(ref font) = font_atlas {
+                                draw_pause_menu_with_font(&mut ui_canvas, &ui_state, font);
+                            }
+                        }
+                        
+                        // Upload and render UI if there's anything to draw
+                        if !ui_canvas.vertices.is_empty() {
+                            ui_rend.upload(&ui_canvas);
+                            ui_rend.record_commands_with_font(cmd, &graphics_context.device, &ui_canvas);
+                        }
+                    }
+                    // ============================================================
 
                     graphics_context.device.cmd_end_render_pass(cmd);
                     graphics_context.device.end_command_buffer(cmd).unwrap();
