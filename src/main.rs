@@ -261,15 +261,15 @@ fn main() {
                             if let Ok(update) = bincode::deserialize::<stfsc_engine::world::SceneUpdate>(&data) {
                                 match &update {
                                     stfsc_engine::world::SceneUpdate::UploadTexture { id, .. } => {
-                                        println!("NETWORK: Received UploadTexture (ID: {}, Size: {} bytes)", id, len);
+                                        // Texture upload received
                                         info!("Received UploadTexture (ID: {}, Size: {} bytes)", id, len);
                                     }
                                     stfsc_engine::world::SceneUpdate::UploadSound { id, .. } => {
-                                        println!("NETWORK: Received UploadSound (ID: {}, Size: {} bytes)", id, len);
+                                        // Sound upload received
                                         info!("Received UploadSound (ID: {}, Size: {} bytes)", id, len);
                                     }
                                     _ => {
-                                        println!("NETWORK: Received SceneUpdate: {:?}", update);
+                                        // Scene update received
                                         info!("Received client update: {:?}", update);
                                     }
                                 }
@@ -308,7 +308,7 @@ fn main() {
                             body.set_translation(rapier3d::na::Vector3::new(spawn_pos.x, spawn_pos.y, spawn_pos.z), true);
                             body.set_linvel(rapier3d::na::Vector3::zeros(), true);
                             phys_pos = body.translation().clone();
-                            println!("PLAYER: Respawned! (y < {})", state.world.respawn_y);
+                            // Player respawned
                         }
                     }
 
@@ -470,6 +470,25 @@ fn main() {
                         ui_state.hovered_button = None;
                         ui_state.hovered_callback = None;
                     }
+                } else {
+                    // Check for dynamic buttons from GameWorld
+                    if let Ok(state) = game_state.read() {
+                        let layout = &state.world.active_ui_layout;
+                        let screen_size = glam::Vec2::new(ui_canvas.screen_size.x, ui_canvas.screen_size.y);
+                        let mut found = false;
+                        for button in &layout.buttons {
+                            if button.contains(mouse_position, screen_size) {
+                                ui_state.hovered_button = Some(button.id);
+                                ui_state.hovered_callback = button.on_click.clone();
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            ui_state.hovered_button = None;
+                            ui_state.hovered_callback = None;
+                        }
+                    }
                 }
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state, button: MouseButton::Left, .. }, .. } => {
@@ -485,7 +504,7 @@ fn main() {
                             // First handle engine-level actions
                             match button_id {
                                 BUTTON_RESUME => {
-                                    println!("UI: Resume clicked");
+                                    // Resume game
                                     ui_state.toggle_pause();
                                     cursor_captured = true;
                                     window.set_cursor_visible(false);
@@ -493,7 +512,7 @@ fn main() {
                                         .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
                                 }
                                 BUTTON_QUIT => {
-                                    println!("UI: Quit clicked");
+                                    // Quit game
                                     elwt.exit();
                                 }
                                 _ => {}
@@ -510,11 +529,34 @@ fn main() {
                             }
                         }
                     } else if !cursor_captured {
-                        cursor_captured = true;
-                        window.set_cursor_visible(false);
-                        let result = window.set_cursor_grab(CursorGrabMode::Locked)
-                            .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
-                        println!("CURSOR: Captured (result: {:?})", result);
+                        // Check if we clicked a dynamic button while NOT paused and NOT captured
+                        if ui_state.hovered_button.is_some() {
+                            if let Some(callback) = ui_state.hovered_callback.take() {
+                                if let Ok(mut state) = game_state.write() {
+                                    state.world.pending_ui_events.push(ui::UiEvent::ButtonClicked {
+                                        id: ui_state.hovered_button.unwrap(),
+                                        callback,
+                                    });
+                                }
+                            }
+                        } else {
+                            // Only capture cursor if we didn't click a button
+                            cursor_captured = true;
+                            window.set_cursor_visible(false);
+                            let result = window.set_cursor_grab(CursorGrabMode::Locked)
+                                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
+                            // Cursor captured
+                        }
+                    } else {
+                        // In-game click (captured) - could also check for buttons if they are visible in-game
+                        if let Some(callback) = ui_state.hovered_callback.take() {
+                            if let Ok(mut state) = game_state.write() {
+                                state.world.pending_ui_events.push(ui::UiEvent::ButtonClicked {
+                                    id: ui_state.hovered_button.unwrap_or(0),
+                                    callback,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -530,9 +572,6 @@ fn main() {
                 match state {
                     ElementState::Pressed => {
                         keys_pressed.insert(physical_key);
-                        
-                        // Debug print for all keys in dev
-                        println!("KEY: {:?} (Logical: {:?})", physical_key, key_event.logical_key);
 
                         // Escape OR Grave (backtick/tilde key) to release cursor
                         let is_escape = physical_key == PhysicalKey::Code(KeyCode::Escape) 
@@ -541,26 +580,38 @@ fn main() {
                             || key_event.logical_key == Key::Character("`".into());
 
                         if is_escape || is_grave {
-                            // Toggle pause menu
                             ui_state.toggle_pause();
                             
                             if ui_state.paused {
-                                // Pause: release cursor
                                 if cursor_captured {
-                                    println!("CURSOR: Releasing mouse grab for pause menu");
                                     cursor_captured = false;
                                     window.set_cursor_visible(true);
-                                    if let Err(e) = window.set_cursor_grab(CursorGrabMode::None) {
-                                        println!("CURSOR ERROR: Failed to release grab: {:?}", e);
-                                    }
+                                    let _ = window.set_cursor_grab(CursorGrabMode::None);
                                 }
                             } else {
-                                // Resume: recapture cursor
-                                println!("CURSOR: Recapturing mouse for gameplay");
                                 cursor_captured = true;
                                 window.set_cursor_visible(false);
                                 let _ = window.set_cursor_grab(CursorGrabMode::Locked)
                                     .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
+                            }
+                        }
+
+                        // Handle dynamic keybinds (only when NOT paused and NOT escape/grave)
+                        if !ui_state.paused && !is_escape && !is_grave {
+                            if let Ok(mut state) = game_state.write() {
+                                let key_str = format!("{:?}", physical_key);
+                                // Collect matching callbacks first to avoid borrow conflict
+                                let callbacks: Vec<String> = state.world.active_ui_layout.keybinds
+                                    .iter()
+                                    .filter(|bind| key_str.contains(&bind.key))
+                                    .map(|bind| bind.callback.clone())
+                                    .collect();
+                                for callback in callbacks {
+                                    state.world.pending_ui_events.push(ui::UiEvent::ButtonClicked {
+                                        id: 0,
+                                        callback,
+                                    });
+                                }
                             }
                         }
                     }
@@ -570,27 +621,42 @@ fn main() {
                 }
             }
             Event::DeviceEvent { event: DeviceEvent::Key(key), .. } => {
-                // Handle keyboard via DeviceEvent - more reliable when cursor is captured
                 let physical_key = key.physical_key;
                 match key.state {
                     ElementState::Pressed => {
-                        keys_pressed.insert(physical_key);
-                        // Debug for DeviceEvent keys
-                        if matches!(physical_key, PhysicalKey::Code(KeyCode::KeyW) | PhysicalKey::Code(KeyCode::KeyA) | PhysicalKey::Code(KeyCode::KeyS) | PhysicalKey::Code(KeyCode::KeyD) | PhysicalKey::Code(KeyCode::Space)) {
-                            println!("KEY (DeviceEvent): {:?}", physical_key);
+                        // Only process if this key wasn't already pressed (debounce for key repeat)
+                        if !keys_pressed.contains(&physical_key) {
+                            keys_pressed.insert(physical_key);
+                            
+                            // Escape handling for pause - MUST be here since WindowEvent doesn't fire when captured
+                            let is_escape = physical_key == PhysicalKey::Code(KeyCode::Escape);
+                            let is_grave = physical_key == PhysicalKey::Code(KeyCode::Backquote);
+                            
+                            if is_escape || is_grave {
+                                ui_state.toggle_pause();
+                                
+                                if ui_state.paused {
+                                    if cursor_captured {
+                                        cursor_captured = false;
+                                        window.set_cursor_visible(true);
+                                        let _ = window.set_cursor_grab(CursorGrabMode::None);
+                                    }
+                                } else {
+                                    cursor_captured = true;
+                                    window.set_cursor_visible(false);
+                                    let _ = window.set_cursor_grab(CursorGrabMode::Locked)
+                                        .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
+                                }
+                            }
                         }
                     }
                     ElementState::Released => {
                         keys_pressed.remove(&physical_key);
                     }
                 }
-                
-                // Escape handling removed - now handled in WindowEvent with pause toggle
             }
             Event::WindowEvent { event: WindowEvent::Focused(focused), .. } => {
-                println!("FOCUS: Window focused={}", focused);
                 if !focused && cursor_captured {
-                    println!("CURSOR: Releasing mouse grab (focus lost)");
                     cursor_captured = false;
                     window.set_cursor_visible(true);
                     let _ = window.set_cursor_grab(CursorGrabMode::None);
@@ -641,7 +707,7 @@ fn main() {
                                  // Ideally we use a shape cast. For now, allow jump if Vy is small.
                                  if current_vel.y.abs() < 0.1 {
                                      new_linvel.y = 5.0; // Jump force
-                                     println!("PLAYER: Jump!");
+                                     // Player jumped
                                  }
                             }
                             body.set_linvel(new_linvel, true);
@@ -655,13 +721,13 @@ fn main() {
                         // Process pending audio uploads
                         let pending: Vec<_> = state.world.pending_audio_uploads.drain().collect();
                         if !pending.is_empty() {
-                            println!("AUDIO: Processing {} pending uploads", pending.len());
+                            // Audio uploads processing
                         }
                         for (sound_id, data) in pending {
-                            println!("AUDIO: Uploading buffer '{}' ({} bytes)", sound_id, data.len());
+                            // Audio buffer upload
                             match audio.load_buffer_from_bytes(data) {
                                 Ok(handle) => {
-                                    println!("AUDIO: Loaded buffer for '{}'", sound_id);
+                                    // Audio loaded
                                     audio_buffers.insert(sound_id, handle);
                                 }
                                 Err(e) => {
@@ -684,17 +750,17 @@ fn main() {
                             _audio_source_count += 1;
                             if source.playing && source.runtime_handle.is_none() {
                                 if let Some(&buffer_handle) = audio_buffers.get(&source.sound_id) {
-                                    println!("AUDIO: Queuing sound '{}' for playback", source.sound_id);
+                                    // Sound queued
                                     sources_to_start.push((id, transform.position, buffer_handle, source.volume, source.looping, source.max_distance));
                                 } else if source.sound_id == "__test_tone__" || source.sound_id == "test_sound" {
                                     // Generate a test tone for debugging
-                                    println!("AUDIO: Generating test tone for '{}'", source.sound_id);
+                                    // Test tone fallback
                                     let buffer = AudioBuffer::test_tone(440.0, 2.0, 44100);
                                     let handle = audio.load_buffer(buffer);
                                     sources_to_start.push((id, transform.position, handle, source.volume, source.looping, source.max_distance));
                                 } else {
                                     // Log missing buffer (will spam but helps debug)
-                                    println!("AUDIO: Waiting for buffer '{}' (have {} buffers loaded)", source.sound_id, audio_buffers.len());
+                                    // Waiting for buffer (not an error, just a timing issue)
                                 }
                             }
                         }
@@ -713,7 +779,7 @@ fn main() {
                                 ..Default::default()
                             };
                             if let Some(audio_handle) = audio.play_3d(buffer_handle, props) {
-                                println!("AUDIO: Started playing sound at {:?}", position);
+                                // Audio playback started
                                 if let Ok(mut src) = state.world.ecs.get::<&mut AudioSource>(entity_id) {
                                     src.runtime_handle = Some(audio_handle.0);
                                 }
@@ -728,7 +794,7 @@ fn main() {
                     let pending: Vec<_> = state.world.pending_texture_uploads.drain().collect();
                     for (texture_id, data) in pending {
                         if !texture_cache.contains_key(&texture_id) {
-                            println!("TEXTURE: Queuing background load for '{}' ({} bytes)", texture_id, data.len());
+                            // Texture queued for load
                             resource_loader.queue_texture(texture_id, data);
                         }
                     }
@@ -779,7 +845,7 @@ fn main() {
                             // Create descriptor set with custom albedo + default normal/mr
                             match graphics_context.create_material_descriptor_set(&texture, &normal_tex, &mr_tex) {
                                 Ok(descriptor_set) => {
-                                    println!("TEXTURE: Background load complete for '{}' with descriptor set", texture_id);
+                                    // Texture loaded
                                     texture_cache.insert(texture_id, TextureEntry {
                                         texture,
                                         material_descriptor_set: descriptor_set,
@@ -958,8 +1024,7 @@ fn main() {
                 }
                 
                 if !draw_calls.is_empty() || !custom_draw_calls.is_empty() || !textured_draw_calls.is_empty() {
-                    println!("RENDER: Drawing {} batches, {} custom meshes, {} textured (Total instances: {})", 
-                        draw_calls.len(), custom_draw_calls.len(), textured_draw_calls.len(), instance_offset);
+                    // Render batches processed
                 }
 
                 // Dynamic shadow frustum based on GroundPlane component
@@ -1134,6 +1199,25 @@ fn main() {
                         if ui_state.paused {
                             if let Some(ref font) = font_atlas {
                                 draw_pause_menu_with_font(&mut ui_canvas, &ui_state, font);
+                            }
+                        } else {
+                            // Draw dynamic UI layout from GameWorld
+                            if let Ok(state) = game_state.read() {
+                                let layout = &state.world.active_ui_layout;
+                                if let Some(ref font) = font_atlas {
+                                    for panel in &layout.panels {
+                                        ui_canvas.draw_panel(panel);
+                                    }
+                                    for text in &layout.texts {
+                                        ui_canvas.draw_text_with_font(text, font);
+                                    }
+                                    for button in &layout.buttons {
+                                        // Update hover state for dynamic buttons
+                                        let mut btn = button.clone();
+                                        btn.hovered = ui_state.hovered_button == Some(btn.id);
+                                        ui_canvas.draw_button_with_font(&btn, font);
+                                    }
+                                }
                             }
                         }
                         

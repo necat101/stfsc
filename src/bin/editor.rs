@@ -294,6 +294,7 @@ struct Scene {
     entities: Vec<SceneEntity>,
     respawn_enabled: bool,
     respawn_y: f32,
+    pub ui_layout: stfsc_engine::ui::UiLayout,
 }
 
 impl Scene {
@@ -304,6 +305,7 @@ impl Scene {
             entities: Vec::new(),
             respawn_enabled: false,
             respawn_y: -20.0,
+            ui_layout: stfsc_engine::ui::UiLayout::default(),
         }
     }
 
@@ -522,6 +524,11 @@ struct EditorApp {
     // Model import
     show_import_model_dialog: bool,         // Show import model file browser
     import_model_files: Vec<String>,        // Cached list of model files for browser
+
+    // UI Editor
+    show_ui_editor: bool,
+    selected_ui_element_type: Option<String>, // "Button", "Panel", "Text"
+    selected_ui_id: Option<u32>,
 }
 
 impl EditorApp {
@@ -615,6 +622,9 @@ impl EditorApp {
             // Model import
             show_import_model_dialog: false,
             import_model_files: Vec::new(),
+            show_ui_editor: false,
+            selected_ui_element_type: None,
+            selected_ui_id: None,
         }
     }
 
@@ -1867,6 +1877,10 @@ impl eframe::App for EditorApp {
                         self.show_import_model_dialog = true;
                         ui.close_menu();
                     }
+                    if ui.button("🖼 UI Editor").clicked() {
+                        self.show_ui_editor = !self.show_ui_editor;
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Scene", |ui| {
                     if ui.button("🚀 Deploy All to Quest").clicked() {
@@ -2658,6 +2672,382 @@ impl eframe::App for EditorApp {
                         }
                     });
                 });
+        }
+
+        // UI Editor Window
+        if self.show_ui_editor {
+            let mut ui_dirty = false;
+            let mut open = true;
+            
+            egui::Window::new("🖼 UI Editor")
+                .default_size([800.0, 500.0])
+                .min_width(600.0)
+                .min_height(350.0)
+                .max_width(1200.0)
+                .max_height(800.0)
+                .resizable(true)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    // Auto-load default template if layout is empty
+                    if let Some(scene) = &mut self.current_scene {
+                        if scene.ui_layout.buttons.is_empty() && scene.ui_layout.panels.is_empty() && scene.ui_layout.texts.is_empty() {
+                            // Add default template automatically
+                            let mut header = stfsc_engine::ui::Panel::new(0.0, 0.0, 1920.0, 80.0);
+                            header.color = [0.1, 0.1, 0.15, 0.9];
+                            scene.ui_layout.panels.push(header);
+                            
+                            let mut title = stfsc_engine::ui::Text::new("556 DOWNTOWN", 960.0, 40.0);
+                            title.font_size = 48.0;
+                            title.color = [1.0, 1.0, 1.0, 1.0];
+                            scene.ui_layout.texts.push(title);
+                            
+                            scene.ui_layout.buttons.push(stfsc_engine::ui::Button {
+                                panel: stfsc_engine::ui::Panel::new(810.0, 400.0, 300.0, 60.0),
+                                label: stfsc_engine::ui::Text::new("PLAY", 0.0, 0.0),
+                                hovered: false, pressed: false, id: 1,
+                                on_click: Some("on_play".into()),
+                            });
+                            scene.ui_layout.buttons.push(stfsc_engine::ui::Button {
+                                panel: stfsc_engine::ui::Panel::new(810.0, 480.0, 300.0, 60.0),
+                                label: stfsc_engine::ui::Text::new("SETTINGS", 0.0, 0.0),
+                                hovered: false, pressed: false, id: 2,
+                                on_click: Some("on_settings".into()),
+                            });
+                            scene.ui_layout.buttons.push(stfsc_engine::ui::Button {
+                                panel: stfsc_engine::ui::Panel::new(810.0, 560.0, 300.0, 60.0),
+                                label: stfsc_engine::ui::Text::new("QUIT", 0.0, 0.0),
+                                hovered: false, pressed: false, id: 3,
+                                on_click: Some("on_quit".into()),
+                            });
+                            ui_dirty = true;
+                        }
+                    }
+
+                    // Toolbar
+                    ui.horizontal(|ui| {
+                        if ui.button("➕ Button").clicked() {
+                           if let Some(scene) = &mut self.current_scene {
+                               let id = (scene.ui_layout.buttons.len() + scene.ui_layout.panels.len() + scene.ui_layout.texts.len()) as u32 + 1;
+                               scene.ui_layout.buttons.push(stfsc_engine::ui::Button {
+                                   panel: stfsc_engine::ui::Panel::new(100.0, 100.0, 200.0, 50.0),
+                                   label: stfsc_engine::ui::Text::new("New Button", 0.0, 0.0),
+                                   hovered: false, pressed: false, id, on_click: None,
+                               });
+                               ui_dirty = true;
+                           }
+                        }
+                        if ui.button("➕ Panel").clicked() {
+                            if let Some(scene) = &mut self.current_scene {
+                                scene.ui_layout.panels.push(stfsc_engine::ui::Panel::new(100.0, 100.0, 200.0, 200.0));
+                                ui_dirty = true;
+                            }
+                        }
+                        if ui.button("➕ Text").clicked() {
+                            if let Some(scene) = &mut self.current_scene {
+                                scene.ui_layout.texts.push(stfsc_engine::ui::Text::new("New Text", 100.0, 100.0));
+                                ui_dirty = true;
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("🗑 Clear All").clicked() {
+                            if let Some(scene) = &mut self.current_scene {
+                                scene.ui_layout = stfsc_engine::ui::UiLayout::default();
+                                self.selected_ui_id = None;
+                                ui_dirty = true;
+                            }
+                        }
+                        if ui.button("📋 Load Template").clicked() {
+                            if let Some(scene) = &mut self.current_scene {
+                                scene.ui_layout = stfsc_engine::ui::UiLayout::default();
+                                let mut header = stfsc_engine::ui::Panel::new(0.0, 0.0, 1920.0, 80.0);
+                                header.color = [0.1, 0.1, 0.15, 0.9];
+                                scene.ui_layout.panels.push(header);
+                                let mut title = stfsc_engine::ui::Text::new("556 DOWNTOWN", 960.0, 40.0);
+                                title.font_size = 48.0;
+                                scene.ui_layout.texts.push(title);
+                                for (i, (label, cb)) in [("PLAY", "on_play"), ("SETTINGS", "on_settings"), ("QUIT", "on_quit")].into_iter().enumerate() {
+                                    scene.ui_layout.buttons.push(stfsc_engine::ui::Button {
+                                        panel: stfsc_engine::ui::Panel::new(810.0, 400.0 + i as f32 * 80.0, 300.0, 60.0),
+                                        label: stfsc_engine::ui::Text::new(label, 0.0, 0.0),
+                                        hovered: false, pressed: false, id: i as u32 + 1,
+                                        on_click: Some(cb.to_string()),
+                                    });
+                                }
+                                ui_dirty = true;
+                            }
+                        }
+                        ui.separator();
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("🚀 Push to Engine").clicked() {
+                                if let Some(scene) = &self.current_scene {
+                                    let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetUiLayout {
+                                        layout: scene.ui_layout.clone(),
+                                    }));
+                                }
+                            }
+                        });
+                    });
+
+                    ui.separator();
+
+                    // Main content: fixed sizes to prevent window growth
+                    let available = ui.available_size();
+                    let canvas_width = (available.x * 0.68).min(700.0).max(300.0);
+                    let props_width = (available.x - canvas_width - 20.0).min(250.0).max(150.0);
+
+                    ui.horizontal(|ui| {
+                        // Canvas area with fixed max size
+                        ui.vertical(|ui| {
+                            ui.set_width(canvas_width);
+                            let aspect = 16.0 / 9.0;
+                            let canvas_height = (canvas_width / aspect).min(350.0);
+                            let canvas_size = egui::vec2(canvas_width, canvas_height);
+
+                            let (response, painter) = ui.allocate_painter(canvas_size, egui::Sense::click_and_drag());
+                            let rect = response.rect;
+                            
+                            // Dark background with grid
+                            painter.rect_filled(rect, 4.0, egui::Color32::from_gray(20));
+                            let scale = canvas_size.x / 1920.0;
+
+                            // Draw grid lines
+                            for i in 0..=4 {
+                                let x = rect.min.x + (i as f32 * canvas_size.x / 4.0);
+                                painter.line_segment([egui::pos2(x, rect.min.y), egui::pos2(x, rect.max.y)], egui::Stroke::new(1.0, egui::Color32::from_gray(40)));
+                            }
+                            for i in 0..=3 {
+                                let y = rect.min.y + (i as f32 * canvas_size.y / 3.0);
+                                painter.line_segment([egui::pos2(rect.min.x, y), egui::pos2(rect.max.x, y)], egui::Stroke::new(1.0, egui::Color32::from_gray(40)));
+                            }
+
+                            // Track what element is under cursor for direct drag
+                            let pointer = response.interact_pointer_pos().unwrap_or(egui::pos2(-1000.0, -1000.0));
+                            let mut clicked_element: Option<(String, u32)> = None;
+                            let mut drag_target: Option<(String, u32)> = None;
+
+                            if let Some(scene) = &self.current_scene {
+                                // Check buttons first (on top)
+                                for (i, button) in scene.ui_layout.buttons.iter().enumerate().rev() {
+                                    let pos = egui::pos2(rect.min.x + button.panel.position[0] * scale, rect.min.y + button.panel.position[1] * scale);
+                                    let size = egui::vec2(button.panel.size[0] * scale, button.panel.size[1] * scale);
+                                    let elem_rect = egui::Rect::from_min_size(pos, size);
+                                    if elem_rect.contains(pointer) {
+                                        if response.drag_started() { drag_target = Some(("Button".into(), i as u32)); }
+                                        if response.clicked() { clicked_element = Some(("Button".into(), i as u32)); }
+                                        break;
+                                    }
+                                }
+                                // Check panels
+                                if clicked_element.is_none() && drag_target.is_none() {
+                                    for (i, panel) in scene.ui_layout.panels.iter().enumerate().rev() {
+                                        let pos = egui::pos2(rect.min.x + panel.position[0] * scale, rect.min.y + panel.position[1] * scale);
+                                        let size = egui::vec2(panel.size[0] * scale, panel.size[1] * scale);
+                                        let elem_rect = egui::Rect::from_min_size(pos, size);
+                                        if elem_rect.contains(pointer) {
+                                            if response.drag_started() { drag_target = Some(("Panel".into(), i as u32)); }
+                                            if response.clicked() { clicked_element = Some(("Panel".into(), i as u32)); }
+                                            break;
+                                        }
+                                    }
+                                }
+                                // Check texts
+                                if clicked_element.is_none() && drag_target.is_none() {
+                                    for (i, text) in scene.ui_layout.texts.iter().enumerate().rev() {
+                                        let pos = egui::pos2(rect.min.x + text.position[0] * scale, rect.min.y + text.position[1] * scale);
+                                        let galley = painter.layout_no_wrap(text.content.clone(), egui::FontId::proportional(text.font_size * scale), egui::Color32::WHITE);
+                                        let elem_rect = egui::Rect::from_min_size(pos, galley.size());
+                                        if elem_rect.contains(pointer) {
+                                            if response.drag_started() { drag_target = Some(("Text".into(), i as u32)); }
+                                            if response.clicked() { clicked_element = Some(("Text".into(), i as u32)); }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Handle selection on click
+                            if let Some((etype, id)) = clicked_element {
+                                self.selected_ui_element_type = Some(etype);
+                                self.selected_ui_id = Some(id);
+                            }
+
+                            // Handle drag - select and move simultaneously
+                            if let Some((etype, id)) = drag_target {
+                                self.selected_ui_element_type = Some(etype);
+                                self.selected_ui_id = Some(id);
+                            }
+
+                            // Apply drag delta to selected element
+                            if response.dragged() {
+                                if let (Some(etype), Some(id), Some(scene)) = (&self.selected_ui_element_type, self.selected_ui_id, &mut self.current_scene) {
+                                    let delta = response.drag_delta() / scale;
+                                    match etype.as_str() {
+                                        "Button" => if let Some(btn) = scene.ui_layout.buttons.get_mut(id as usize) {
+                                            btn.panel.position[0] += delta.x;
+                                            btn.panel.position[1] += delta.y;
+                                            ui_dirty = true;
+                                        }
+                                        "Panel" => if let Some(p) = scene.ui_layout.panels.get_mut(id as usize) {
+                                            p.position[0] += delta.x;
+                                            p.position[1] += delta.y;
+                                            ui_dirty = true;
+                                        }
+                                        "Text" => if let Some(t) = scene.ui_layout.texts.get_mut(id as usize) {
+                                            t.position[0] += delta.x;
+                                            t.position[1] += delta.y;
+                                            ui_dirty = true;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+
+                            // Now draw all elements
+                            if let Some(scene) = &self.current_scene {
+                                // Draw panels
+                                for (i, panel) in scene.ui_layout.panels.iter().enumerate() {
+                                    let pos = egui::pos2(rect.min.x + panel.position[0] * scale, rect.min.y + panel.position[1] * scale);
+                                    let size = egui::vec2(panel.size[0] * scale, panel.size[1] * scale);
+                                    let panel_rect = egui::Rect::from_min_size(pos, size);
+                                    let color = egui::Color32::from_rgba_unmultiplied(
+                                        (panel.color[0] * 255.0) as u8, (panel.color[1] * 255.0) as u8,
+                                        (panel.color[2] * 255.0) as u8, (panel.color[3] * 255.0) as u8,
+                                    );
+                                    painter.rect_filled(panel_rect, 0.0, color);
+                                    if self.selected_ui_id == Some(i as u32) && self.selected_ui_element_type.as_deref() == Some("Panel") {
+                                        painter.rect_stroke(panel_rect, 0.0, egui::Stroke::new(2.0, egui::Color32::YELLOW));
+                                    }
+                                }
+                                // Draw buttons
+                                for (i, button) in scene.ui_layout.buttons.iter().enumerate() {
+                                    let pos = egui::pos2(rect.min.x + button.panel.position[0] * scale, rect.min.y + button.panel.position[1] * scale);
+                                    let size = egui::vec2(button.panel.size[0] * scale, button.panel.size[1] * scale);
+                                    let btn_rect = egui::Rect::from_min_size(pos, size);
+                                    painter.rect_filled(btn_rect, 4.0, egui::Color32::from_rgb(60, 60, 80));
+                                    painter.text(btn_rect.center(), egui::Align2::CENTER_CENTER, &button.label.content, egui::FontId::proportional(14.0 * scale), egui::Color32::WHITE);
+                                    if self.selected_ui_id == Some(i as u32) && self.selected_ui_element_type.as_deref() == Some("Button") {
+                                        painter.rect_stroke(btn_rect, 4.0, egui::Stroke::new(2.0, egui::Color32::YELLOW));
+                                    }
+                                }
+                                // Draw texts
+                                for (i, text) in scene.ui_layout.texts.iter().enumerate() {
+                                    let pos = egui::pos2(rect.min.x + text.position[0] * scale, rect.min.y + text.position[1] * scale);
+                                    let color = egui::Color32::from_rgba_unmultiplied(
+                                        (text.color[0] * 255.0) as u8, (text.color[1] * 255.0) as u8,
+                                        (text.color[2] * 255.0) as u8, (text.color[3] * 255.0) as u8,
+                                    );
+                                    let galley = painter.layout_no_wrap(text.content.clone(), egui::FontId::proportional(text.font_size * scale), color);
+                                    let text_rect = egui::Rect::from_min_size(pos, galley.size());
+                                    painter.galley(pos, galley);
+                                    if self.selected_ui_id == Some(i as u32) && self.selected_ui_element_type.as_deref() == Some("Text") {
+                                        painter.rect_stroke(text_rect, 0.0, egui::Stroke::new(1.0, egui::Color32::YELLOW));
+                                    }
+                                }
+                            }
+                        });
+
+                        ui.separator();
+
+                        // Properties panel
+                        ui.vertical(|ui| {
+                            ui.set_width(props_width);
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                ui.heading("Properties");
+                                if let (Some(id), Some(etype)) = (self.selected_ui_id, &self.selected_ui_element_type.clone()) {
+                                    if let Some(scene) = &mut self.current_scene {
+                                        match etype.as_str() {
+                                            "Button" => if let Some(button) = scene.ui_layout.buttons.get_mut(id as usize) {
+                                                ui.label(format!("Button #{}", button.id));
+                                                ui.horizontal(|ui| { ui.label("Label:"); if ui.text_edit_singleline(&mut button.label.content).changed() { ui_dirty = true; } });
+                                                ui.horizontal(|ui| { ui.label("On Click:"); 
+                                                    let mut cb = button.on_click.clone().unwrap_or_default();
+                                                    if ui.text_edit_singleline(&mut cb).changed() {
+                                                        button.on_click = if cb.is_empty() { None } else { Some(cb) };
+                                                        ui_dirty = true;
+                                                    }
+                                                });
+                                                ui.label("Position:");
+                                                ui.horizontal(|ui| {
+                                                    ui.add(egui::DragValue::new(&mut button.panel.position[0]).prefix("X: ").speed(1.0));
+                                                    ui.add(egui::DragValue::new(&mut button.panel.position[1]).prefix("Y: ").speed(1.0));
+                                                });
+                                                ui.label("Size:");
+                                                ui.horizontal(|ui| {
+                                                    ui.add(egui::DragValue::new(&mut button.panel.size[0]).prefix("W: ").speed(1.0));
+                                                    ui.add(egui::DragValue::new(&mut button.panel.size[1]).prefix("H: ").speed(1.0));
+                                                });
+                                                ui.separator();
+                                                if ui.button("🗑 Delete").clicked() {
+                                                    scene.ui_layout.buttons.remove(id as usize);
+                                                    self.selected_ui_id = None;
+                                                    ui_dirty = true;
+                                                }
+                                            }
+                                            "Panel" => if let Some(panel) = scene.ui_layout.panels.get_mut(id as usize) {
+                                                ui.label("Panel");
+                                                ui.label("Position:");
+                                                ui.horizontal(|ui| {
+                                                    ui.add(egui::DragValue::new(&mut panel.position[0]).prefix("X: ").speed(1.0));
+                                                    ui.add(egui::DragValue::new(&mut panel.position[1]).prefix("Y: ").speed(1.0));
+                                                });
+                                                ui.label("Size:");
+                                                ui.horizontal(|ui| {
+                                                    ui.add(egui::DragValue::new(&mut panel.size[0]).prefix("W: ").speed(1.0));
+                                                    ui.add(egui::DragValue::new(&mut panel.size[1]).prefix("H: ").speed(1.0));
+                                                });
+                                                ui.separator();
+                                                if ui.button("🗑 Delete").clicked() {
+                                                    scene.ui_layout.panels.remove(id as usize);
+                                                    self.selected_ui_id = None;
+                                                    ui_dirty = true;
+                                                }
+                                            }
+                                            "Text" => if let Some(text) = scene.ui_layout.texts.get_mut(id as usize) {
+                                                ui.label("Text");
+                                                ui.horizontal(|ui| { ui.label("Content:"); if ui.text_edit_singleline(&mut text.content).changed() { ui_dirty = true; } });
+                                                ui.add(egui::Slider::new(&mut text.font_size, 8.0..=128.0).text("Size"));
+                                                ui.label("Position:");
+                                                ui.horizontal(|ui| {
+                                                    ui.add(egui::DragValue::new(&mut text.position[0]).prefix("X: ").speed(1.0));
+                                                    ui.add(egui::DragValue::new(&mut text.position[1]).prefix("Y: ").speed(1.0));
+                                                });
+                                                ui.separator();
+                                                if ui.button("🗑 Delete").clicked() {
+                                                    scene.ui_layout.texts.remove(id as usize);
+                                                    self.selected_ui_id = None;
+                                                    ui_dirty = true;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                } else {
+                                    ui.label("Click an element to edit");
+                                    ui.separator();
+                                    ui.heading("⌨ Keybinds");
+                                    if let Some(scene) = &mut self.current_scene {
+                                        let mut to_remove = None;
+                                        for (i, bind) in scene.ui_layout.keybinds.iter_mut().enumerate() {
+                                            ui.horizontal(|ui| {
+                                                ui.text_edit_singleline(&mut bind.key);
+                                                ui.label("→");
+                                                ui.text_edit_singleline(&mut bind.callback);
+                                                if ui.button("❌").clicked() { to_remove = Some(i); }
+                                            });
+                                        }
+                                        if let Some(idx) = to_remove { scene.ui_layout.keybinds.remove(idx); ui_dirty = true; }
+                                        if ui.button("➕ Add Keybind").clicked() {
+                                            scene.ui_layout.keybinds.push(stfsc_engine::ui::Keybind { key: "Space".into(), callback: "on_space".into() });
+                                            ui_dirty = true;
+                                        }
+                            }
+                                }
+                        });
+                    });
+                });
+            });
+            if ui_dirty { self.scene_dirty = true; }
+            if !open { self.show_ui_editor = false; }
         }
 
         // Unsaved Changes Warning Dialog

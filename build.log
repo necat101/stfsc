@@ -1,0 +1,35 @@
+   Compiling stfsc_engine v0.1.0 (/home/netcat/Downloads/stfsc-main)
+warning: unused import: `vector`
+  --> src/main.rs:20:37
+   |
+20 | use rapier3d::prelude::{LockedAxes, vector};
+   |                                     ^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: value captured by `mouse_position` is never read
+   --> src/main.rs:460:17
+    |
+460 |                 mouse_position = glam::Vec2::new(position.x as f32, position.y as f32);
+    |                 ^^^^^^^^^^^^^^
+    |
+    = help: did you mean to capture by reference instead?
+    = note: `#[warn(unused_assignments)]` on by default
+
+warning: `stfsc_engine` (bin "stfsc_engine") generated 2 warnings (run `cargo fix --bin "stfsc_engine"` to apply 1 suggestion)
+warning: unused variable: `screen_size`
+    --> src/bin/editor.rs:2680:17
+     |
+2680 |             let screen_size = egui::vec2(1920.0, 1080.0); // Virtual screen size
+     |                 ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_screen_size`
+     |
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `i`
+    --> src/bin/editor.rs:2910:42
+     |
+2910 | ...                   for (i, bind) in scene.ui_layout.keybinds.iter_mut().enumerate() {
+     |                            ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: `stfsc_engine` (bin "editor") generated 2 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.74s

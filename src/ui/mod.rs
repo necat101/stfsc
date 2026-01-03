@@ -71,10 +71,10 @@ impl Anchor {
 }
 
 /// A rectangular panel (solid color or textured)
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Panel {
-    pub position: Vec2,
-    pub size: Vec2,
+    pub position: [f32; 2],
+    pub size: [f32; 2],
     pub anchor: Anchor,
     pub color: [f32; 4],
     pub corner_radius: f32,
@@ -84,8 +84,8 @@ pub struct Panel {
 impl Panel {
     pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
         Self {
-            position: Vec2::new(x, y),
-            size: Vec2::new(width, height),
+            position: [x, y],
+            size: [width, height],
             anchor: Anchor::TopLeft,
             color: [1.0, 1.0, 1.0, 1.0],
             corner_radius: 0.0,
@@ -95,8 +95,8 @@ impl Panel {
 
     pub fn centered(width: f32, height: f32) -> Self {
         Self {
-            position: Vec2::ZERO,
-            size: Vec2::new(width, height),
+            position: [0.0, 0.0],
+            size: [width, height],
             anchor: Anchor::Center,
             color: [1.0, 1.0, 1.0, 1.0],
             corner_radius: 0.0,
@@ -121,10 +121,10 @@ impl Panel {
 }
 
 /// Text element
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Text {
     pub content: String,
-    pub position: Vec2,
+    pub position: [f32; 2],
     pub anchor: Anchor,
     pub font_size: f32,
     pub color: [f32; 4],
@@ -134,7 +134,7 @@ impl Text {
     pub fn new(content: impl Into<String>, x: f32, y: f32) -> Self {
         Self {
             content: content.into(),
-            position: Vec2::new(x, y),
+            position: [x, y],
             anchor: Anchor::TopLeft,
             font_size: 24.0,
             color: [1.0, 1.0, 1.0, 1.0],
@@ -144,7 +144,7 @@ impl Text {
     pub fn centered(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
-            position: Vec2::ZERO,
+            position: [0.0, 0.0],
             anchor: Anchor::Center,
             font_size: 24.0,
             color: [1.0, 1.0, 1.0, 1.0],
@@ -169,7 +169,7 @@ impl Text {
     pub fn new_with_font_size(content: impl Into<String>, x: f32, y: f32, size: f32) -> Self {
         Self {
             content: content.into(),
-            position: Vec2::new(x, y),
+            position: [x, y],
             anchor: Anchor::TopLeft,
             font_size: size,
             color: [1.0, 1.0, 1.0, 1.0],
@@ -178,11 +178,13 @@ impl Text {
 }
 
 /// Interactive button
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Button {
     pub panel: Panel,
     pub label: Text,
+    #[serde(skip)]
     pub hovered: bool,
+    #[serde(skip)]
     pub pressed: bool,
     pub id: u32,
     /// Script callback function name
@@ -219,14 +221,35 @@ impl Button {
     pub fn contains(&self, point: Vec2, screen_size: Vec2) -> bool {
         let anchor_offset = self.panel.anchor.offset();
         let top_left = Vec2::new(
-            self.panel.position.x + screen_size.x * anchor_offset.x - self.panel.size.x * anchor_offset.x,
-            self.panel.position.y + screen_size.y * anchor_offset.y - self.panel.size.y * anchor_offset.y,
+            self.panel.position[0] + screen_size.x * anchor_offset.x - self.panel.size[0] * anchor_offset.x,
+            self.panel.position[1] + screen_size.y * anchor_offset.y - self.panel.size[1] * anchor_offset.y,
         );
         point.x >= top_left.x
-            && point.x <= top_left.x + self.panel.size.x
+            && point.x <= top_left.x + self.panel.size[0]
             && point.y >= top_left.y
-            && point.y <= top_left.y + self.panel.size.y
+            && point.y <= top_left.y + self.panel.size[1]
     }
+}
+
+// ============================================================================
+// UI LAYOUT
+// ============================================================================
+
+/// A serializable UI keybind
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Keybind {
+    pub key: String,
+    pub callback: String,
+}
+
+/// A complete UI layout that can be sent from the editor
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct UiLayout {
+    pub buttons: Vec<Button>,
+    pub panels: Vec<Panel>,
+    pub texts: Vec<Text>,
+    pub keybinds: Vec<Keybind>,
+    pub mouse_tracking: bool,
 }
 
 // ============================================================================
@@ -287,15 +310,15 @@ impl UiCanvas {
     pub fn draw_panel(&mut self, panel: &Panel) {
         let anchor_offset = panel.anchor.offset();
         let top_left = Vec2::new(
-            panel.position.x + self.screen_size.x * anchor_offset.x - panel.size.x * anchor_offset.x,
-            panel.position.y + self.screen_size.y * anchor_offset.y - panel.size.y * anchor_offset.y,
+            panel.position[0] + self.screen_size.x * anchor_offset.x - panel.size[0] * anchor_offset.x,
+            panel.position[1] + self.screen_size.y * anchor_offset.y - panel.size[1] * anchor_offset.y,
         );
         
         // For now, ignore corner_radius (would need more complex geometry or SDF)
         // Use the white pixel in the font atlas for solid color panels
         // The pixel is at (1,1) in our 2x2 white block
         let uv_white = Vec2::new(1.0 / 512.0, 1.0 / 512.0);
-        self.add_quad(top_left, panel.size, uv_white, uv_white, panel.color);
+        self.add_quad(top_left, Vec2::from(panel.size), uv_white, uv_white, panel.color);
     }
 
     /// Draw text (placeholder - uses simple box for now until font system is ready)
@@ -307,8 +330,8 @@ impl UiCanvas {
 
         let anchor_offset = text.anchor.offset();
         let top_left = Vec2::new(
-            text.position.x + self.screen_size.x * anchor_offset.x - text_width * anchor_offset.x,
-            text.position.y + self.screen_size.y * anchor_offset.y - text_height * anchor_offset.y,
+            text.position[0] + self.screen_size.x * anchor_offset.x - text_width * anchor_offset.x,
+            text.position[1] + self.screen_size.y * anchor_offset.y - text_height * anchor_offset.y,
         );
 
         // Draw placeholder rectangle (will be replaced with actual glyph rendering)
@@ -335,8 +358,8 @@ impl UiCanvas {
 
         // Calculate anchor-adjusted starting position
         let anchor_offset = text.anchor.offset();
-        let start_x = text.position.x + self.screen_size.x * anchor_offset.x - text_width * anchor_offset.x;
-        let start_y = text.position.y + self.screen_size.y * anchor_offset.y - text_height * anchor_offset.y;
+        let start_x = text.position[0] + self.screen_size.x * anchor_offset.x - text_width * anchor_offset.x;
+        let start_y = text.position[1] + self.screen_size.y * anchor_offset.y - text_height * anchor_offset.y;
 
         let mut cursor_x = start_x;
         
@@ -507,8 +530,8 @@ pub fn draw_pause_menu(canvas: &mut UiCanvas, ui_state: &UiState) {
     let title = Text::centered("PAUSED")
         .with_font_size(48.0)
         .with_color(1.0, 1.0, 1.0, 1.0);
-    let mut title_positioned = title;
-    title_positioned.position.y = -80.0;  // Offset from center, not absolute
+    let mut title_positioned = title.clone();
+    title_positioned.position[1] = -80.0;  // Offset from center, not absolute
     title_positioned.anchor = Anchor::Center;
     canvas.draw_text(&title_positioned);
 
@@ -558,8 +581,8 @@ pub fn draw_pause_menu_with_font(canvas: &mut UiCanvas, ui_state: &UiState, font
     let title = Text::centered("PAUSED")
         .with_font_size(48.0)
         .with_color(1.0, 1.0, 1.0, 1.0);
-    let mut title_positioned = title;
-    title_positioned.position.y = -80.0;
+    let mut title_positioned = title.clone();
+    title_positioned.position[1] = -80.0;
     title_positioned.anchor = Anchor::Center;
     canvas.draw_text_with_font(&title_positioned, font);
 

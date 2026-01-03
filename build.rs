@@ -50,8 +50,9 @@ fn main() {
     let options = shaderc::CompileOptions::new().unwrap();
 
     let src_dir = Path::new("src/graphics");
-    // Output SPIR-V to src/graphics/ so shaders can be included with include_bytes!
-    let out_path = src_dir;
+    // Output SPIR-V to OUT_DIR so shaders can be included with include_bytes!
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let out_path = Path::new(&out_dir);
 
     if src_dir.exists() {
         println!("cargo:rerun-if-changed=src/graphics");
@@ -78,10 +79,9 @@ fn main() {
                     )
                     .unwrap();
 
-                // Use underscore naming: ui.vert -> ui_vert.spv
-                let stem = path.file_stem().unwrap().to_str().unwrap();
-                let ext_str = ext.to_str().unwrap();
-                let out_name = format!("{}_{}.spv", stem, ext_str);
+                // Use dot naming: vert.vert -> vert.vert.spv (to match include_bytes! paths)
+                let filename = path.file_name().unwrap().to_str().unwrap();
+                let out_name = format!("{}.spv", filename);
                 std::fs::write(out_path.join(&out_name), binary_result.as_binary_u8()).unwrap();
             }
         }

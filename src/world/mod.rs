@@ -26,6 +26,7 @@ pub struct GameWorld {
     pub respawn_enabled: bool,
     pub respawn_y: f32,
     pub pending_ui_events: Vec<crate::ui::UiEvent>,
+    pub active_ui_layout: crate::ui::UiLayout,
 }
 
 pub struct ChunkData {
@@ -455,6 +456,9 @@ pub enum SceneUpdate {
         enabled: bool,
         y_threshold: f32,
     },
+    SetUiLayout {
+        layout: crate::ui::UiLayout,
+    },
 }
 
 // Assuming GameWorld struct definition is somewhere above this,
@@ -530,6 +534,7 @@ impl GameWorld {
             respawn_enabled: false,
             respawn_y: -50.0,
             pending_ui_events: Vec::new(),
+            active_ui_layout: crate::ui::UiLayout::default(),
         };
         // world.spawn_default_scene(); // Moved to streaming logic or separate init
         world
@@ -1076,6 +1081,14 @@ impl GameWorld {
                             warn!("Failed to load FBX for entity {}: {}", id, e);
                         }
                     }
+                }
+                SceneUpdate::SetUiLayout { layout } => {
+                    self.active_ui_layout = layout;
+                    info!("UI Layout updated: {} buttons, {} panels, {} texts", 
+                        self.active_ui_layout.buttons.len(),
+                        self.active_ui_layout.panels.len(),
+                        self.active_ui_layout.texts.len()
+                    );
                 }
             }
         }
