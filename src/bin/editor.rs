@@ -287,6 +287,27 @@ enum LightTypeEditor {
     Directional,
 }
 
+/// A named UI layout with a FuckScript alias for menu_load()
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct NamedUiLayout {
+    /// Display name shown in tab
+    pub name: String,
+    /// Alias for menu_load("alias") in FuckScript
+    pub alias: String,
+    /// The actual UI layout
+    pub layout: stfsc_engine::ui::UiLayout,
+}
+
+impl Default for NamedUiLayout {
+    fn default() -> Self {
+        Self {
+            name: "Main".to_string(),
+            alias: "main".to_string(),
+            layout: stfsc_engine::ui::UiLayout::default(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct Scene {
     name: String,
@@ -294,6 +315,11 @@ struct Scene {
     entities: Vec<SceneEntity>,
     respawn_enabled: bool,
     respawn_y: f32,
+    /// Multiple named UI layouts with tabs
+    #[serde(default)]
+    pub ui_layouts: Vec<NamedUiLayout>,
+    /// Legacy single layout (for backwards compatibility on load)
+    #[serde(default, skip_serializing)]
     pub ui_layout: stfsc_engine::ui::UiLayout,
 }
 
@@ -305,8 +331,27 @@ impl Scene {
             entities: Vec::new(),
             respawn_enabled: false,
             respawn_y: -20.0,
+            ui_layouts: vec![NamedUiLayout::default()],
             ui_layout: stfsc_engine::ui::UiLayout::default(),
         }
+    }
+    
+    /// Get current layout for editing (ensures at least one exists)
+    fn get_or_create_layout(&mut self, idx: usize) -> &mut NamedUiLayout {
+        if self.ui_layouts.is_empty() {
+            // Migrate legacy ui_layout if present
+            if !self.ui_layout.buttons.is_empty() || !self.ui_layout.panels.is_empty() || !self.ui_layout.texts.is_empty() {
+                self.ui_layouts.push(NamedUiLayout {
+                    name: "Main".to_string(),
+                    alias: "main".to_string(),
+                    layout: std::mem::take(&mut self.ui_layout),
+                });
+            } else {
+                self.ui_layouts.push(NamedUiLayout::default());
+            }
+        }
+        let idx = idx.min(self.ui_layouts.len() - 1);
+        &mut self.ui_layouts[idx]
     }
 
     fn create_test_scene() -> Self {
@@ -529,6 +574,8 @@ struct EditorApp {
     show_ui_editor: bool,
     selected_ui_element_type: Option<String>, // "Button", "Panel", "Text"
     selected_ui_id: Option<u32>,
+    selected_child_idx: Option<usize>, // For child elements within a panel
+    selected_layout_idx: usize, // Currently selected UI layout tab
 }
 
 impl EditorApp {
@@ -625,6 +672,8 @@ impl EditorApp {
             show_ui_editor: false,
             selected_ui_element_type: None,
             selected_ui_id: None,
+            selected_child_idx: None,
+            selected_layout_idx: 0,
         }
     }
 
@@ -2688,101 +2737,200 @@ impl eframe::App for EditorApp {
                 .resizable(true)
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    // Auto-load default template if layout is empty
+                    // Ensure at least one layout exists before any UI code
                     if let Some(scene) = &mut self.current_scene {
-                        if scene.ui_layout.buttons.is_empty() && scene.ui_layout.panels.is_empty() && scene.ui_layout.texts.is_empty() {
-                            // Add default template automatically
-                            let mut header = stfsc_engine::ui::Panel::new(0.0, 0.0, 1920.0, 80.0);
-                            header.color = [0.1, 0.1, 0.15, 0.9];
-                            scene.ui_layout.panels.push(header);
-                            
-                            let mut title = stfsc_engine::ui::Text::new("556 DOWNTOWN", 960.0, 40.0);
-                            title.font_size = 48.0;
-                            title.color = [1.0, 1.0, 1.0, 1.0];
-                            scene.ui_layout.texts.push(title);
-                            
-                            scene.ui_layout.buttons.push(stfsc_engine::ui::Button {
-                                panel: stfsc_engine::ui::Panel::new(810.0, 400.0, 300.0, 60.0),
-                                label: stfsc_engine::ui::Text::new("PLAY", 0.0, 0.0),
-                                hovered: false, pressed: false, id: 1,
-                                on_click: Some("on_play".into()),
-                            });
-                            scene.ui_layout.buttons.push(stfsc_engine::ui::Button {
-                                panel: stfsc_engine::ui::Panel::new(810.0, 480.0, 300.0, 60.0),
-                                label: stfsc_engine::ui::Text::new("SETTINGS", 0.0, 0.0),
-                                hovered: false, pressed: false, id: 2,
-                                on_click: Some("on_settings".into()),
-                            });
-                            scene.ui_layout.buttons.push(stfsc_engine::ui::Button {
-                                panel: stfsc_engine::ui::Panel::new(810.0, 560.0, 300.0, 60.0),
-                                label: stfsc_engine::ui::Text::new("QUIT", 0.0, 0.0),
-                                hovered: false, pressed: false, id: 3,
-                                on_click: Some("on_quit".into()),
-                            });
-                            ui_dirty = true;
+                        if scene.ui_layouts.is_empty() {
+                            scene.ui_layouts.push(NamedUiLayout::default());
+                        }
+                        // Ensure selected_layout_idx is valid
+                        if self.selected_layout_idx >= scene.ui_layouts.len() {
+                            self.selected_layout_idx = 0;
                         }
                     }
+                    
+                    // Tab bar for layout tabs
+                    ui.horizontal(|ui| {
+                        if let Some(scene) = &mut self.current_scene {
+                            let mut tab_to_remove = None;
+                            for (idx, layout) in scene.ui_layouts.iter().enumerate() {
+                                let selected = self.selected_layout_idx == idx;
+                                let tab_text = format!("{}", layout.name);
+                                if ui.selectable_label(selected, &tab_text).clicked() {
+                                    self.selected_layout_idx = idx;
+                                    self.selected_ui_id = None;
+                                    self.selected_ui_element_type = None;
+                                }
+                                // Right-click to delete tab (if more than one)
+                                if scene.ui_layouts.len() > 1 {
+                                    if ui.small_button("✕").clicked() {
+                                        tab_to_remove = Some(idx);
+                                    }
+                                }
+                            }
+                            // Add new tab button
+                            if ui.button("➕").on_hover_text("Add new layout").clicked() {
+                                let new_idx = scene.ui_layouts.len();
+                                scene.ui_layouts.push(NamedUiLayout {
+                                    name: format!("Layout {}", new_idx + 1),
+                                    alias: format!("layout_{}", new_idx + 1),
+                                    layout: stfsc_engine::ui::UiLayout::default(),
+                                });
+                                self.selected_layout_idx = new_idx;
+                            }
+                            
+                            if let Some(idx) = tab_to_remove {
+                                scene.ui_layouts.remove(idx);
+                                if self.selected_layout_idx >= scene.ui_layouts.len() && self.selected_layout_idx > 0 {
+                                    self.selected_layout_idx -= 1;
+                                }
+                                ui_dirty = true;
+                            }
+                        }
+                    });
+                    
+                    ui.separator();
+                    
+                    // Layout name and alias editor
+                    ui.horizontal(|ui| {
+                        if let Some(scene) = &mut self.current_scene {
+                            if let Some(layout) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                ui.label("Name:");
+                                if ui.text_edit_singleline(&mut layout.name).changed() {
+                                    ui_dirty = true;
+                                }
+                                ui.separator();
+                                ui.label("Alias:");
+                                if ui.text_edit_singleline(&mut layout.alias).changed() {
+                                    ui_dirty = true;
+                                }
+                                ui.label(egui::RichText::new("→ menu_load(\"").monospace());
+                                ui.label(egui::RichText::new(&layout.alias).strong());
+                                ui.label(egui::RichText::new("\")").monospace());
+                            }
+                        }
+                    });
+                    
+                    ui.separator();
 
                     // Toolbar
                     ui.horizontal(|ui| {
                         if ui.button("➕ Button").clicked() {
                            if let Some(scene) = &mut self.current_scene {
-                               let id = (scene.ui_layout.buttons.len() + scene.ui_layout.panels.len() + scene.ui_layout.texts.len()) as u32 + 1;
-                               scene.ui_layout.buttons.push(stfsc_engine::ui::Button {
-                                   panel: stfsc_engine::ui::Panel::new(100.0, 100.0, 200.0, 50.0),
-                                   label: stfsc_engine::ui::Text::new("New Button", 0.0, 0.0),
-                                   hovered: false, pressed: false, id, on_click: None,
-                               });
-                               ui_dirty = true;
+                               if let Some(named_layout) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                   let id = (named_layout.layout.buttons.len() + named_layout.layout.panels.len() + named_layout.layout.texts.len()) as u32 + 1;
+                                   named_layout.layout.buttons.push(stfsc_engine::ui::Button {
+                                       panel: stfsc_engine::ui::Panel::new(100.0, 100.0, 200.0, 50.0),
+                                       label: stfsc_engine::ui::Text::new("New Button", 0.0, 0.0),
+                                       hovered: false, pressed: false, id, on_click: None,
+                                   });
+                                   ui_dirty = true;
+                               }
                            }
                         }
                         if ui.button("➕ Panel").clicked() {
                             if let Some(scene) = &mut self.current_scene {
-                                scene.ui_layout.panels.push(stfsc_engine::ui::Panel::new(100.0, 100.0, 200.0, 200.0));
-                                ui_dirty = true;
+                                if let Some(named_layout) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                    named_layout.layout.panels.push(stfsc_engine::ui::Panel::new(100.0, 100.0, 200.0, 200.0));
+                                    ui_dirty = true;
+                                }
                             }
                         }
                         if ui.button("➕ Text").clicked() {
                             if let Some(scene) = &mut self.current_scene {
-                                scene.ui_layout.texts.push(stfsc_engine::ui::Text::new("New Text", 100.0, 100.0));
-                                ui_dirty = true;
+                                if let Some(named_layout) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                    named_layout.layout.texts.push(stfsc_engine::ui::Text::new("New Text", 100.0, 100.0));
+                                    ui_dirty = true;
+                                }
                             }
                         }
                         ui.separator();
                         if ui.button("🗑 Clear All").clicked() {
                             if let Some(scene) = &mut self.current_scene {
-                                scene.ui_layout = stfsc_engine::ui::UiLayout::default();
-                                self.selected_ui_id = None;
-                                ui_dirty = true;
-                            }
-                        }
-                        if ui.button("📋 Load Template").clicked() {
-                            if let Some(scene) = &mut self.current_scene {
-                                scene.ui_layout = stfsc_engine::ui::UiLayout::default();
-                                let mut header = stfsc_engine::ui::Panel::new(0.0, 0.0, 1920.0, 80.0);
-                                header.color = [0.1, 0.1, 0.15, 0.9];
-                                scene.ui_layout.panels.push(header);
-                                let mut title = stfsc_engine::ui::Text::new("556 DOWNTOWN", 960.0, 40.0);
-                                title.font_size = 48.0;
-                                scene.ui_layout.texts.push(title);
-                                for (i, (label, cb)) in [("PLAY", "on_play"), ("SETTINGS", "on_settings"), ("QUIT", "on_quit")].into_iter().enumerate() {
-                                    scene.ui_layout.buttons.push(stfsc_engine::ui::Button {
-                                        panel: stfsc_engine::ui::Panel::new(810.0, 400.0 + i as f32 * 80.0, 300.0, 60.0),
-                                        label: stfsc_engine::ui::Text::new(label, 0.0, 0.0),
-                                        hovered: false, pressed: false, id: i as u32 + 1,
-                                        on_click: Some(cb.to_string()),
-                                    });
+                                if let Some(named_layout) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                    named_layout.layout = stfsc_engine::ui::UiLayout::default();
+                                    self.selected_ui_id = None;
+                                    ui_dirty = true;
                                 }
-                                ui_dirty = true;
                             }
                         }
+                        egui::menu::menu_button(ui, "📋 Templates", |ui| {
+                            if ui.button("🎮 HUD (Health/Ammo)").clicked() {
+                                if let Some(scene) = &mut self.current_scene {
+                                    if let Some(nl) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                        nl.layout = stfsc_engine::ui::UiLayout::default();
+                                        let mut health_panel = stfsc_engine::ui::Panel::new(20.0, 20.0, 200.0, 30.0);
+                                        health_panel.color = [0.8, 0.2, 0.2, 0.8];
+                                        nl.layout.panels.push(health_panel);
+                                        let mut health_text = stfsc_engine::ui::Text::new("HEALTH: 100", 30.0, 27.0);
+                                        health_text.font_size = 20.0;
+                                        nl.layout.texts.push(health_text);
+                                        let mut ammo_panel = stfsc_engine::ui::Panel::new(1700.0, 980.0, 180.0, 60.0);
+                                        ammo_panel.color = [0.15, 0.15, 0.2, 0.8];
+                                        nl.layout.panels.push(ammo_panel);
+                                        let mut ammo_text = stfsc_engine::ui::Text::new("30 / 120", 1720.0, 1000.0);
+                                        ammo_text.font_size = 28.0;
+                                        nl.layout.texts.push(ammo_text);
+                                        ui_dirty = true;
+                                    }
+                                }
+                                ui.close_menu();
+                            }
+                            if ui.button("⏸ Pause Menu").clicked() {
+                                if let Some(scene) = &mut self.current_scene {
+                                    if let Some(nl) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                        nl.layout = stfsc_engine::ui::UiLayout::default();
+                                        let mut overlay = stfsc_engine::ui::Panel::new(0.0, 0.0, 1920.0, 1080.0);
+                                        overlay.color = [0.0, 0.0, 0.0, 0.7];
+                                        nl.layout.panels.push(overlay);
+                                        let mut title = stfsc_engine::ui::Text::new("PAUSED", 960.0, 200.0);
+                                        title.font_size = 64.0;
+                                        nl.layout.texts.push(title);
+                                        for (i, (label, cb)) in [("RESUME", "on_resume"), ("SETTINGS", "on_settings"), ("QUIT", "on_quit")].into_iter().enumerate() {
+                                            nl.layout.buttons.push(stfsc_engine::ui::Button {
+                                                panel: stfsc_engine::ui::Panel::new(810.0, 350.0 + i as f32 * 100.0, 300.0, 70.0),
+                                                label: stfsc_engine::ui::Text::new(label, 0.0, 0.0),
+                                                hovered: false, pressed: false, id: i as u32 + 1,
+                                                on_click: Some(cb.to_string()),
+                                            });
+                                        }
+                                        ui_dirty = true;
+                                    }
+                                }
+                                ui.close_menu();
+                            }
+                            if ui.button("🏠 Main Menu").clicked() {
+                                if let Some(scene) = &mut self.current_scene {
+                                    if let Some(nl) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                        nl.layout = stfsc_engine::ui::UiLayout::default();
+                                        let mut header = stfsc_engine::ui::Panel::new(0.0, 0.0, 1920.0, 80.0);
+                                        header.color = [0.1, 0.1, 0.15, 0.9];
+                                        nl.layout.panels.push(header);
+                                        let mut title = stfsc_engine::ui::Text::new("556 DOWNTOWN", 960.0, 40.0);
+                                        title.font_size = 48.0;
+                                        nl.layout.texts.push(title);
+                                        for (i, (label, cb)) in [("PLAY", "on_play"), ("SETTINGS", "on_settings"), ("QUIT", "on_quit")].into_iter().enumerate() {
+                                            nl.layout.buttons.push(stfsc_engine::ui::Button {
+                                                panel: stfsc_engine::ui::Panel::new(810.0, 400.0 + i as f32 * 80.0, 300.0, 60.0),
+                                                label: stfsc_engine::ui::Text::new(label, 0.0, 0.0),
+                                                hovered: false, pressed: false, id: i as u32 + 1,
+                                                on_click: Some(cb.to_string()),
+                                            });
+                                        }
+                                        ui_dirty = true;
+                                    }
+                                }
+                                ui.close_menu();
+                            }
+                        });
                         ui.separator();
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("🚀 Push to Engine").clicked() {
                                 if let Some(scene) = &self.current_scene {
-                                    let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetUiLayout {
-                                        layout: scene.ui_layout.clone(),
-                                    }));
+                                    if let Some(nl) = scene.ui_layouts.get(self.selected_layout_idx) {
+                                        let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetUiLayout {
+                                            layout: nl.layout.clone(),
+                                        }));
+                                    }
                                 }
                             }
                         });
@@ -2826,8 +2974,9 @@ impl eframe::App for EditorApp {
                             let mut drag_target: Option<(String, u32)> = None;
 
                             if let Some(scene) = &self.current_scene {
+                              if let Some(nl) = scene.ui_layouts.get(self.selected_layout_idx) {
                                 // Check buttons first (on top)
-                                for (i, button) in scene.ui_layout.buttons.iter().enumerate().rev() {
+                                for (i, button) in nl.layout.buttons.iter().enumerate().rev() {
                                     let pos = egui::pos2(rect.min.x + button.panel.position[0] * scale, rect.min.y + button.panel.position[1] * scale);
                                     let size = egui::vec2(button.panel.size[0] * scale, button.panel.size[1] * scale);
                                     let elem_rect = egui::Rect::from_min_size(pos, size);
@@ -2839,7 +2988,7 @@ impl eframe::App for EditorApp {
                                 }
                                 // Check panels
                                 if clicked_element.is_none() && drag_target.is_none() {
-                                    for (i, panel) in scene.ui_layout.panels.iter().enumerate().rev() {
+                                    for (i, panel) in nl.layout.panels.iter().enumerate().rev() {
                                         let pos = egui::pos2(rect.min.x + panel.position[0] * scale, rect.min.y + panel.position[1] * scale);
                                         let size = egui::vec2(panel.size[0] * scale, panel.size[1] * scale);
                                         let elem_rect = egui::Rect::from_min_size(pos, size);
@@ -2852,7 +3001,7 @@ impl eframe::App for EditorApp {
                                 }
                                 // Check texts
                                 if clicked_element.is_none() && drag_target.is_none() {
-                                    for (i, text) in scene.ui_layout.texts.iter().enumerate().rev() {
+                                    for (i, text) in nl.layout.texts.iter().enumerate().rev() {
                                         let pos = egui::pos2(rect.min.x + text.position[0] * scale, rect.min.y + text.position[1] * scale);
                                         let galley = painter.layout_no_wrap(text.content.clone(), egui::FontId::proportional(text.font_size * scale), egui::Color32::WHITE);
                                         let elem_rect = egui::Rect::from_min_size(pos, galley.size());
@@ -2863,6 +3012,7 @@ impl eframe::App for EditorApp {
                                         }
                                     }
                                 }
+                              }
                             }
 
                             // Handle selection on click
@@ -2880,32 +3030,35 @@ impl eframe::App for EditorApp {
                             // Apply drag delta to selected element
                             if response.dragged() {
                                 if let (Some(etype), Some(id), Some(scene)) = (&self.selected_ui_element_type, self.selected_ui_id, &mut self.current_scene) {
-                                    let delta = response.drag_delta() / scale;
-                                    match etype.as_str() {
-                                        "Button" => if let Some(btn) = scene.ui_layout.buttons.get_mut(id as usize) {
-                                            btn.panel.position[0] += delta.x;
-                                            btn.panel.position[1] += delta.y;
-                                            ui_dirty = true;
+                                    if let Some(nl) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                        let delta = response.drag_delta() / scale;
+                                        match etype.as_str() {
+                                            "Button" => if let Some(btn) = nl.layout.buttons.get_mut(id as usize) {
+                                                btn.panel.position[0] += delta.x;
+                                                btn.panel.position[1] += delta.y;
+                                                ui_dirty = true;
+                                            }
+                                            "Panel" => if let Some(p) = nl.layout.panels.get_mut(id as usize) {
+                                                p.position[0] += delta.x;
+                                                p.position[1] += delta.y;
+                                                ui_dirty = true;
+                                            }
+                                            "Text" => if let Some(t) = nl.layout.texts.get_mut(id as usize) {
+                                                t.position[0] += delta.x;
+                                                t.position[1] += delta.y;
+                                                ui_dirty = true;
+                                            }
+                                            _ => {}
                                         }
-                                        "Panel" => if let Some(p) = scene.ui_layout.panels.get_mut(id as usize) {
-                                            p.position[0] += delta.x;
-                                            p.position[1] += delta.y;
-                                            ui_dirty = true;
-                                        }
-                                        "Text" => if let Some(t) = scene.ui_layout.texts.get_mut(id as usize) {
-                                            t.position[0] += delta.x;
-                                            t.position[1] += delta.y;
-                                            ui_dirty = true;
-                                        }
-                                        _ => {}
                                     }
                                 }
                             }
 
                             // Now draw all elements
                             if let Some(scene) = &self.current_scene {
+                              if let Some(nl) = scene.ui_layouts.get(self.selected_layout_idx) {
                                 // Draw panels
-                                for (i, panel) in scene.ui_layout.panels.iter().enumerate() {
+                                for (i, panel) in nl.layout.panels.iter().enumerate() {
                                     let pos = egui::pos2(rect.min.x + panel.position[0] * scale, rect.min.y + panel.position[1] * scale);
                                     let size = egui::vec2(panel.size[0] * scale, panel.size[1] * scale);
                                     let panel_rect = egui::Rect::from_min_size(pos, size);
@@ -2917,9 +3070,41 @@ impl eframe::App for EditorApp {
                                     if self.selected_ui_id == Some(i as u32) && self.selected_ui_element_type.as_deref() == Some("Panel") {
                                         painter.rect_stroke(panel_rect, 0.0, egui::Stroke::new(2.0, egui::Color32::YELLOW));
                                     }
+                                    
+                                    // Draw child elements inside panel
+                                    for (ci, child) in panel.children.iter().enumerate() {
+                                        match child {
+                                            stfsc_engine::ui::PanelChild::Button(btn) => {
+                                                let child_pos = egui::pos2(
+                                                    pos.x + btn.panel.position[0] * scale,
+                                                    pos.y + btn.panel.position[1] * scale
+                                                );
+                                                let child_size = egui::vec2(btn.panel.size[0] * scale, btn.panel.size[1] * scale);
+                                                let child_rect = egui::Rect::from_min_size(child_pos, child_size);
+                                                painter.rect_filled(child_rect, 4.0, egui::Color32::from_rgb(60, 60, 80));
+                                                painter.text(child_rect.center(), egui::Align2::CENTER_CENTER, &btn.label.content, egui::FontId::proportional(12.0 * scale), egui::Color32::WHITE);
+                                                // Highlight if this child is selected
+                                                if self.selected_ui_id == Some(i as u32) && self.selected_ui_element_type.as_deref() == Some("PanelChild") && self.selected_child_idx == Some(ci) {
+                                                    painter.rect_stroke(child_rect, 4.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 200, 255)));
+                                                }
+                                            }
+                                            stfsc_engine::ui::PanelChild::Text(txt) => {
+                                                let child_pos = egui::pos2(
+                                                    pos.x + txt.position[0] * scale,
+                                                    pos.y + txt.position[1] * scale
+                                                );
+                                                let txt_color = egui::Color32::from_rgba_unmultiplied(
+                                                    (txt.color[0] * 255.0) as u8, (txt.color[1] * 255.0) as u8,
+                                                    (txt.color[2] * 255.0) as u8, (txt.color[3] * 255.0) as u8,
+                                                );
+                                                let galley = painter.layout_no_wrap(txt.content.clone(), egui::FontId::proportional(txt.font_size * scale), txt_color);
+                                                painter.galley(child_pos, galley);
+                                            }
+                                        }
+                                    }
                                 }
                                 // Draw buttons
-                                for (i, button) in scene.ui_layout.buttons.iter().enumerate() {
+                                for (i, button) in nl.layout.buttons.iter().enumerate() {
                                     let pos = egui::pos2(rect.min.x + button.panel.position[0] * scale, rect.min.y + button.panel.position[1] * scale);
                                     let size = egui::vec2(button.panel.size[0] * scale, button.panel.size[1] * scale);
                                     let btn_rect = egui::Rect::from_min_size(pos, size);
@@ -2930,7 +3115,7 @@ impl eframe::App for EditorApp {
                                     }
                                 }
                                 // Draw texts
-                                for (i, text) in scene.ui_layout.texts.iter().enumerate() {
+                                for (i, text) in nl.layout.texts.iter().enumerate() {
                                     let pos = egui::pos2(rect.min.x + text.position[0] * scale, rect.min.y + text.position[1] * scale);
                                     let color = egui::Color32::from_rgba_unmultiplied(
                                         (text.color[0] * 255.0) as u8, (text.color[1] * 255.0) as u8,
@@ -2943,6 +3128,7 @@ impl eframe::App for EditorApp {
                                         painter.rect_stroke(text_rect, 0.0, egui::Stroke::new(1.0, egui::Color32::YELLOW));
                                     }
                                 }
+                              }
                             }
                         });
 
@@ -2955,8 +3141,9 @@ impl eframe::App for EditorApp {
                                 ui.heading("Properties");
                                 if let (Some(id), Some(etype)) = (self.selected_ui_id, &self.selected_ui_element_type.clone()) {
                                     if let Some(scene) = &mut self.current_scene {
+                                      if let Some(nl) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
                                         match etype.as_str() {
-                                            "Button" => if let Some(button) = scene.ui_layout.buttons.get_mut(id as usize) {
+                                            "Button" => if let Some(button) = nl.layout.buttons.get_mut(id as usize) {
                                                 ui.label(format!("Button #{}", button.id));
                                                 ui.horizontal(|ui| { ui.label("Label:"); if ui.text_edit_singleline(&mut button.label.content).changed() { ui_dirty = true; } });
                                                 ui.horizontal(|ui| { ui.label("On Click:"); 
@@ -2978,13 +3165,62 @@ impl eframe::App for EditorApp {
                                                 });
                                                 ui.separator();
                                                 if ui.button("🗑 Delete").clicked() {
-                                                    scene.ui_layout.buttons.remove(id as usize);
+                                                    nl.layout.buttons.remove(id as usize);
                                                     self.selected_ui_id = None;
                                                     ui_dirty = true;
                                                 }
                                             }
-                                            "Panel" => if let Some(panel) = scene.ui_layout.panels.get_mut(id as usize) {
+                                            "Panel" => if let Some(panel) = nl.layout.panels.get_mut(id as usize) {
                                                 ui.label("Panel");
+                                                
+                                                // Color picker
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Color:");
+                                                    let mut c = egui::Color32::from_rgba_unmultiplied(
+                                                        (panel.color[0] * 255.0) as u8,
+                                                        (panel.color[1] * 255.0) as u8,
+                                                        (panel.color[2] * 255.0) as u8,
+                                                        (panel.color[3] * 255.0) as u8,
+                                                    );
+                                                    if ui.color_edit_button_srgba(&mut c).changed() {
+                                                        panel.color = [
+                                                            c.r() as f32 / 255.0,
+                                                            c.g() as f32 / 255.0,
+                                                            c.b() as f32 / 255.0,
+                                                            c.a() as f32 / 255.0,
+                                                        ];
+                                                        ui_dirty = true;
+                                                    }
+                                                });
+                                                
+                                                // Background texture
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Background:");
+                                                    let mut tex_id = panel.texture_id.clone().unwrap_or_default();
+                                                    let response = ui.text_edit_singleline(&mut tex_id);
+                                                    if response.changed() {
+                                                        panel.texture_id = if tex_id.is_empty() { None } else { Some(tex_id) };
+                                                        ui_dirty = true;
+                                                    }
+                                                    // Drag-and-drop for image files
+                                                    if response.hovered() {
+                                                        ui.ctx().input(|i| {
+                                                            if !i.raw.dropped_files.is_empty() {
+                                                                if let Some(file) = i.raw.dropped_files.first() {
+                                                                    if let Some(path) = &file.path {
+                                                                        if let Some(name) = path.file_name() {
+                                                                            let name_str = name.to_string_lossy().to_string();
+                                                                            panel.texture_id = Some(name_str);
+                                                                            ui_dirty = true;
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        });
+                                                        response.on_hover_text("Drag image file here").on_hover_cursor(egui::CursorIcon::PointingHand);
+                                                    }
+                                                });
+                                                
                                                 ui.label("Position:");
                                                 ui.horizontal(|ui| {
                                                     ui.add(egui::DragValue::new(&mut panel.position[0]).prefix("X: ").speed(1.0));
@@ -2995,14 +3231,113 @@ impl eframe::App for EditorApp {
                                                     ui.add(egui::DragValue::new(&mut panel.size[0]).prefix("W: ").speed(1.0));
                                                     ui.add(egui::DragValue::new(&mut panel.size[1]).prefix("H: ").speed(1.0));
                                                 });
+                                                
+                                                // Child elements section
+                                                ui.separator();
+                                                let children_count = panel.children.len();
+                                                ui.label(format!("Children: {}", children_count));
+                                                
+                                                // Compute next child ID before the closure to avoid borrow conflicts
+                                                let next_child_id = children_count as u32 + 100;
+                                                
+                                                let mut add_button = false;
+                                                let mut add_text = false;
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("➕ Button").clicked() {
+                                                        add_button = true;
+                                                    }
+                                                    if ui.button("➕ Text").clicked() {
+                                                        add_text = true;
+                                                    }
+                                                });
+                                                if add_button {
+                                                    panel.children.push(stfsc_engine::ui::PanelChild::Button(
+                                                        stfsc_engine::ui::Button::new(next_child_id, "Button", 10.0, 10.0, 100.0, 30.0)
+                                                    ));
+                                                    ui_dirty = true;
+                                                }
+                                                if add_text {
+                                                    panel.children.push(stfsc_engine::ui::PanelChild::Text(
+                                                        stfsc_engine::ui::Text::new("Text", 10.0, 10.0)
+                                                    ));
+                                                    ui_dirty = true;
+                                                }
+
+
+                                                // List existing children with editing controls
+                                                let mut child_to_remove = None;
+                                                for ci in 0..panel.children.len() {
+                                                    ui.push_id(ci, |ui| {
+                                                        let child = &mut panel.children[ci];
+                                                        match child {
+                                                            stfsc_engine::ui::PanelChild::Button(btn) => {
+                                                                ui.collapsing(format!("Button: {}", &btn.label.content), |ui| {
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label("Label:");
+                                                                        if ui.text_edit_singleline(&mut btn.label.content).changed() {
+                                                                            ui_dirty = true;
+                                                                        }
+                                                                    });
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label("On Click:");
+                                                                        let mut cb = btn.on_click.clone().unwrap_or_default();
+                                                                        if ui.text_edit_singleline(&mut cb).changed() {
+                                                                            btn.on_click = if cb.is_empty() { None } else { Some(cb) };
+                                                                            ui_dirty = true;
+                                                                        }
+                                                                    });
+                                                                    ui.label("Position (relative):");
+                                                                    ui.horizontal(|ui| {
+                                                                        if ui.add(egui::DragValue::new(&mut btn.panel.position[0]).prefix("X: ").speed(1.0)).changed() { ui_dirty = true; }
+                                                                        if ui.add(egui::DragValue::new(&mut btn.panel.position[1]).prefix("Y: ").speed(1.0)).changed() { ui_dirty = true; }
+                                                                    });
+                                                                    ui.label("Size:");
+                                                                    ui.horizontal(|ui| {
+                                                                        if ui.add(egui::DragValue::new(&mut btn.panel.size[0]).prefix("W: ").speed(1.0)).changed() { ui_dirty = true; }
+                                                                        if ui.add(egui::DragValue::new(&mut btn.panel.size[1]).prefix("H: ").speed(1.0)).changed() { ui_dirty = true; }
+                                                                    });
+                                                                    if ui.small_button("❌ Remove").clicked() {
+                                                                        child_to_remove = Some(ci);
+                                                                    }
+                                                                });
+                                                            }
+                                                            stfsc_engine::ui::PanelChild::Text(txt) => {
+                                                                ui.collapsing(format!("Text: {}", &txt.content), |ui| {
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label("Content:");
+                                                                        if ui.text_edit_singleline(&mut txt.content).changed() {
+                                                                            ui_dirty = true;
+                                                                        }
+                                                                    });
+                                                                    ui.label("Position (relative):");
+                                                                    ui.horizontal(|ui| {
+                                                                        if ui.add(egui::DragValue::new(&mut txt.position[0]).prefix("X: ").speed(1.0)).changed() { ui_dirty = true; }
+                                                                        if ui.add(egui::DragValue::new(&mut txt.position[1]).prefix("Y: ").speed(1.0)).changed() { ui_dirty = true; }
+                                                                    });
+                                                                    if ui.add(egui::Slider::new(&mut txt.font_size, 8.0..=72.0).text("Size")).changed() {
+                                                                        ui_dirty = true;
+                                                                    }
+                                                                    if ui.small_button("❌ Remove").clicked() {
+                                                                        child_to_remove = Some(ci);
+                                                                    }
+                                                                });
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                                if let Some(idx) = child_to_remove {
+                                                    panel.children.remove(idx);
+                                                    ui_dirty = true;
+                                                }
+                                                
                                                 ui.separator();
                                                 if ui.button("🗑 Delete").clicked() {
-                                                    scene.ui_layout.panels.remove(id as usize);
+                                                    nl.layout.panels.remove(id as usize);
                                                     self.selected_ui_id = None;
                                                     ui_dirty = true;
                                                 }
                                             }
-                                            "Text" => if let Some(text) = scene.ui_layout.texts.get_mut(id as usize) {
+                                            "Text" => if let Some(text) = nl.layout.texts.get_mut(id as usize) {
                                                 ui.label("Text");
                                                 ui.horizontal(|ui| { ui.label("Content:"); if ui.text_edit_singleline(&mut text.content).changed() { ui_dirty = true; } });
                                                 ui.add(egui::Slider::new(&mut text.font_size, 8.0..=128.0).text("Size"));
@@ -3013,21 +3348,23 @@ impl eframe::App for EditorApp {
                                                 });
                                                 ui.separator();
                                                 if ui.button("🗑 Delete").clicked() {
-                                                    scene.ui_layout.texts.remove(id as usize);
+                                                    nl.layout.texts.remove(id as usize);
                                                     self.selected_ui_id = None;
                                                     ui_dirty = true;
                                                 }
                                             }
                                             _ => {}
                                         }
+                                      }
                                     }
                                 } else {
                                     ui.label("Click an element to edit");
                                     ui.separator();
                                     ui.heading("⌨ Keybinds");
                                     if let Some(scene) = &mut self.current_scene {
+                                      if let Some(nl) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
                                         let mut to_remove = None;
-                                        for (i, bind) in scene.ui_layout.keybinds.iter_mut().enumerate() {
+                                        for (i, bind) in nl.layout.keybinds.iter_mut().enumerate() {
                                             ui.horizontal(|ui| {
                                                 ui.text_edit_singleline(&mut bind.key);
                                                 ui.label("→");
@@ -3035,11 +3372,12 @@ impl eframe::App for EditorApp {
                                                 if ui.button("❌").clicked() { to_remove = Some(i); }
                                             });
                                         }
-                                        if let Some(idx) = to_remove { scene.ui_layout.keybinds.remove(idx); ui_dirty = true; }
+                                        if let Some(idx) = to_remove { nl.layout.keybinds.remove(idx); ui_dirty = true; }
                                         if ui.button("➕ Add Keybind").clicked() {
-                                            scene.ui_layout.keybinds.push(stfsc_engine::ui::Keybind { key: "Space".into(), callback: "on_space".into() });
+                                            nl.layout.keybinds.push(stfsc_engine::ui::Keybind { key: "Space".into(), callback: "on_space".into() });
                                             ui_dirty = true;
                                         }
+                                      }
                             }
                                 }
                         });
