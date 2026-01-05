@@ -294,6 +294,9 @@ struct NamedUiLayout {
     pub name: String,
     /// Alias for menu_load("alias") in FuckScript
     pub alias: String,
+    /// Layer type determines behavior (pause, input blocking, etc.)
+    #[serde(default)]
+    pub layer_type: stfsc_engine::ui::UiLayerType,
     /// The actual UI layout
     pub layout: stfsc_engine::ui::UiLayout,
 }
@@ -303,6 +306,7 @@ impl Default for NamedUiLayout {
         Self {
             name: "Main".to_string(),
             alias: "main".to_string(),
+            layer_type: stfsc_engine::ui::UiLayerType::InGameOverlay,
             layout: stfsc_engine::ui::UiLayout::default(),
         }
     }
@@ -344,6 +348,7 @@ impl Scene {
                 self.ui_layouts.push(NamedUiLayout {
                     name: "Main".to_string(),
                     alias: "main".to_string(),
+                    layer_type: stfsc_engine::ui::UiLayerType::InGameOverlay,
                     layout: std::mem::take(&mut self.ui_layout),
                 });
             } else {
@@ -2773,6 +2778,7 @@ impl eframe::App for EditorApp {
                                 scene.ui_layouts.push(NamedUiLayout {
                                     name: format!("Layout {}", new_idx + 1),
                                     alias: format!("layout_{}", new_idx + 1),
+                                    layer_type: stfsc_engine::ui::UiLayerType::InGameOverlay,
                                     layout: stfsc_engine::ui::UiLayout::default(),
                                 });
                                 self.selected_layout_idx = new_idx;
@@ -2810,6 +2816,55 @@ impl eframe::App for EditorApp {
                         }
                     });
                     
+                    // Layer type selector
+                    ui.horizontal(|ui| {
+                        if let Some(scene) = &mut self.current_scene {
+                            if let Some(layout) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                ui.label("Layer Type:");
+                                let current_type_name = match layout.layer_type {
+                                    stfsc_engine::ui::UiLayerType::MainMenu => "Main Menu",
+                                    stfsc_engine::ui::UiLayerType::PauseOverlay => "Pause Overlay",
+                                    stfsc_engine::ui::UiLayerType::IntermediateMenu => "Intermediate Menu",
+                                    stfsc_engine::ui::UiLayerType::InGameOverlay => "In-Game Overlay",
+                                    stfsc_engine::ui::UiLayerType::Popup => "Popup",
+                                };
+                                egui::ComboBox::from_id_source("layer_type_combo")
+                                    .selected_text(current_type_name)
+                                    .show_ui(ui, |ui| {
+                                        if ui.selectable_label(layout.layer_type == stfsc_engine::ui::UiLayerType::InGameOverlay, "In-Game Overlay").clicked() {
+                                            layout.layer_type = stfsc_engine::ui::UiLayerType::InGameOverlay;
+                                            ui_dirty = true;
+                                        }
+                                        if ui.selectable_label(layout.layer_type == stfsc_engine::ui::UiLayerType::PauseOverlay, "Pause Overlay").clicked() {
+                                            layout.layer_type = stfsc_engine::ui::UiLayerType::PauseOverlay;
+                                            ui_dirty = true;
+                                        }
+                                        if ui.selectable_label(layout.layer_type == stfsc_engine::ui::UiLayerType::IntermediateMenu, "Intermediate Menu").clicked() {
+                                            layout.layer_type = stfsc_engine::ui::UiLayerType::IntermediateMenu;
+                                            ui_dirty = true;
+                                        }
+                                        if ui.selectable_label(layout.layer_type == stfsc_engine::ui::UiLayerType::MainMenu, "Main Menu").clicked() {
+                                            layout.layer_type = stfsc_engine::ui::UiLayerType::MainMenu;
+                                            ui_dirty = true;
+                                        }
+                                        if ui.selectable_label(layout.layer_type == stfsc_engine::ui::UiLayerType::Popup, "Popup").clicked() {
+                                            layout.layer_type = stfsc_engine::ui::UiLayerType::Popup;
+                                            ui_dirty = true;
+                                        }
+                                    });
+                                // Show behavior hints
+                                let hint = match layout.layer_type {
+                                    stfsc_engine::ui::UiLayerType::MainMenu => "⚡ Blocks input, loads before scene",
+                                    stfsc_engine::ui::UiLayerType::PauseOverlay => "⏸ Pauses game, blocks input",
+                                    stfsc_engine::ui::UiLayerType::IntermediateMenu => "📑 For nested menus (settings)",
+                                    stfsc_engine::ui::UiLayerType::InGameOverlay => "🎮 Always visible during gameplay",
+                                    stfsc_engine::ui::UiLayerType::Popup => "💬 Keybind-triggered, transient",
+                                };
+                                ui.label(egui::RichText::new(hint).weak().italics());
+                            }
+                        }
+                    });
+                    
                     ui.separator();
 
                     // Toolbar
@@ -2818,11 +2873,8 @@ impl eframe::App for EditorApp {
                            if let Some(scene) = &mut self.current_scene {
                                if let Some(named_layout) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
                                    let id = (named_layout.layout.buttons.len() + named_layout.layout.panels.len() + named_layout.layout.texts.len()) as u32 + 1;
-                                   named_layout.layout.buttons.push(stfsc_engine::ui::Button {
-                                       panel: stfsc_engine::ui::Panel::new(100.0, 100.0, 200.0, 50.0),
-                                       label: stfsc_engine::ui::Text::new("New Button", 0.0, 0.0),
-                                       hovered: false, pressed: false, id, on_click: None,
-                                   });
+                                   // Use Button::new to get proper default colors (dark panel, white text)
+                                   named_layout.layout.buttons.push(stfsc_engine::ui::Button::new(id, "New Button", 100.0, 100.0, 200.0, 50.0));
                                    ui_dirty = true;
                                }
                            }
@@ -2886,12 +2938,9 @@ impl eframe::App for EditorApp {
                                         title.font_size = 64.0;
                                         nl.layout.texts.push(title);
                                         for (i, (label, cb)) in [("RESUME", "on_resume"), ("SETTINGS", "on_settings"), ("QUIT", "on_quit")].into_iter().enumerate() {
-                                            nl.layout.buttons.push(stfsc_engine::ui::Button {
-                                                panel: stfsc_engine::ui::Panel::new(810.0, 350.0 + i as f32 * 100.0, 300.0, 70.0),
-                                                label: stfsc_engine::ui::Text::new(label, 0.0, 0.0),
-                                                hovered: false, pressed: false, id: i as u32 + 1,
-                                                on_click: Some(cb.to_string()),
-                                            });
+                                            let mut btn = stfsc_engine::ui::Button::new(i as u32 + 1, label, 810.0, 350.0 + i as f32 * 100.0, 300.0, 70.0);
+                                            btn.on_click = Some(cb.to_string());
+                                            nl.layout.buttons.push(btn);
                                         }
                                         ui_dirty = true;
                                     }
@@ -2909,12 +2958,9 @@ impl eframe::App for EditorApp {
                                         title.font_size = 48.0;
                                         nl.layout.texts.push(title);
                                         for (i, (label, cb)) in [("PLAY", "on_play"), ("SETTINGS", "on_settings"), ("QUIT", "on_quit")].into_iter().enumerate() {
-                                            nl.layout.buttons.push(stfsc_engine::ui::Button {
-                                                panel: stfsc_engine::ui::Panel::new(810.0, 400.0 + i as f32 * 80.0, 300.0, 60.0),
-                                                label: stfsc_engine::ui::Text::new(label, 0.0, 0.0),
-                                                hovered: false, pressed: false, id: i as u32 + 1,
-                                                on_click: Some(cb.to_string()),
-                                            });
+                                            let mut btn = stfsc_engine::ui::Button::new(i as u32 + 1, label, 810.0, 400.0 + i as f32 * 80.0, 300.0, 60.0);
+                                            btn.on_click = Some(cb.to_string());
+                                            nl.layout.buttons.push(btn);
                                         }
                                         ui_dirty = true;
                                     }
@@ -2927,7 +2973,15 @@ impl eframe::App for EditorApp {
                             if ui.button("🚀 Push to Engine").clicked() {
                                 if let Some(scene) = &self.current_scene {
                                     if let Some(nl) = scene.ui_layouts.get(self.selected_layout_idx) {
-                                        let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetUiLayout {
+                                        // Determine the correct UiLayer based on layer_type
+                                        let layer = match nl.layer_type {
+                                            stfsc_engine::ui::UiLayerType::PauseOverlay => stfsc_engine::ui::UiLayer::PauseMenu,
+                                            stfsc_engine::ui::UiLayerType::MainMenu => stfsc_engine::ui::UiLayer::MainMenu,
+                                            stfsc_engine::ui::UiLayerType::InGameOverlay => stfsc_engine::ui::UiLayer::Hud,
+                                            _ => stfsc_engine::ui::UiLayer::Custom(nl.alias.clone()),
+                                        };
+                                        let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetUiLayer {
+                                            layer,
                                             layout: nl.layout.clone(),
                                         }));
                                     }

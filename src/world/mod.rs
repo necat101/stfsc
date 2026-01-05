@@ -26,7 +26,10 @@ pub struct GameWorld {
     pub respawn_enabled: bool,
     pub respawn_y: f32,
     pub pending_ui_events: Vec<crate::ui::UiEvent>,
-    pub active_ui_layout: crate::ui::UiLayout,
+    /// Multi-layer UI system
+    pub ui_layers: crate::ui::UiLayerSet,
+    /// Menu navigation stack for intermediate menus
+    pub menu_stack: crate::ui::MenuStack,
 }
 
 pub struct ChunkData {
@@ -456,9 +459,44 @@ pub enum SceneUpdate {
         enabled: bool,
         y_threshold: f32,
     },
+    /// Set the UI layout for the default Hud layer (backwards compatible)
     SetUiLayout {
         layout: crate::ui::UiLayout,
     },
+    /// Set a layout for a specific UI layer
+    SetUiLayer {
+        layer: crate::ui::UiLayer,
+        layout: crate::ui::UiLayout,
+    },
+    /// Show a UI layer (make it visible)
+    ShowUiLayer {
+        layer: crate::ui::UiLayer,
+    },
+    /// Hide a UI layer
+    HideUiLayer {
+        layer: crate::ui::UiLayer,
+    },
+    /// Load a UI scene from file and set it as a layer
+    LoadUiScene {
+        layer: crate::ui::UiLayer,
+        scene_path: String,
+    },
+    /// Push a menu onto the stack (menu_load in FuckScript)
+    MenuLoad {
+        alias: String,
+    },
+    /// Pop the current menu (go back)
+    MenuBack,
+    /// Show a popup by alias (for keybind-triggered overlays)
+    ShowPopup {
+        alias: String,
+    },
+    /// Hide a popup by alias
+    HidePopup {
+        alias: String,
+    },
+    /// Reset the pause menu to the default layout
+    ResetPauseMenu,
 }
 
 // Assuming GameWorld struct definition is somewhere above this,
@@ -534,7 +572,8 @@ impl GameWorld {
             respawn_enabled: false,
             respawn_y: -50.0,
             pending_ui_events: Vec::new(),
-            active_ui_layout: crate::ui::UiLayout::default(),
+            ui_layers: crate::ui::UiLayerSet::new(),
+            menu_stack: crate::ui::MenuStack::new(),
         };
         // world.spawn_default_scene(); // Moved to streaming logic or separate init
         world
@@ -1083,12 +1122,72 @@ impl GameWorld {
                     }
                 }
                 SceneUpdate::SetUiLayout { layout } => {
-                    self.active_ui_layout = layout;
-                    info!("UI Layout updated: {} buttons, {} panels, {} texts", 
-                        self.active_ui_layout.buttons.len(),
-                        self.active_ui_layout.panels.len(),
-                        self.active_ui_layout.texts.len()
+                    // Backwards compatible: SetUiLayout sets the Hud layer and makes it visible
+                    self.ui_layers.set_layer(crate::ui::UiLayer::Hud, layout);
+                    self.ui_layers.show(crate::ui::UiLayer::Hud);
+                    info!("UI Layout updated (Hud layer): {} buttons, {} panels, {} texts", 
+                        self.ui_layers.get_layer(&crate::ui::UiLayer::Hud).map(|l| l.buttons.len()).unwrap_or(0),
+                        self.ui_layers.get_layer(&crate::ui::UiLayer::Hud).map(|l| l.panels.len()).unwrap_or(0),
+                        self.ui_layers.get_layer(&crate::ui::UiLayer::Hud).map(|l| l.texts.len()).unwrap_or(0)
                     );
+                }
+                SceneUpdate::SetUiLayer { layer, layout } => {
+                    info!("Setting UI layer {:?}", layer);
+                    self.ui_layers.set_layer(layer, layout);
+                }
+                SceneUpdate::ShowUiLayer { layer } => {
+                    info!("Showing UI layer {:?}", layer);
+                    self.ui_layers.show(layer);
+                }
+                SceneUpdate::HideUiLayer { layer } => {
+                    info!("Hiding UI layer {:?}", layer);
+                    self.ui_layers.hide(&layer);
+                }
+                SceneUpdate::LoadUiScene { layer, scene_path } => {
+                    // Load UI scene from assets/ui/{scene_path}.json
+                    let path = format!("assets/ui/{}.json", scene_path);
+                    match std::fs::read_to_string(&path) {
+                        Ok(data) => {
+                            match serde_json::from_str::<crate::ui::UiLayout>(&data) {
+                                Ok(layout) => {
+                                    self.ui_layers.set_layer(layer.clone(), layout);
+                                    self.ui_layers.show(layer);
+                                    info!("Loaded UI scene from {}", path);
+                                }
+                                Err(e) => warn!("Failed to parse UI scene {}: {}", path, e),
+                            }
+                        }
+                        Err(e) => warn!("Failed to load UI scene {}: {}", path, e),
+                    }
+                }
+                SceneUpdate::MenuLoad { alias } => {
+                    // Push the current menu (if any) and show the new one
+                    info!("MenuLoad: Loading menu '{}'", alias);
+                    self.menu_stack.push(&alias);
+                    // Show the menu as a Custom layer
+                    self.ui_layers.show(crate::ui::UiLayer::Custom(alias));
+                }
+                SceneUpdate::MenuBack => {
+                    // Pop the current menu and go back to the previous one
+                    if let Some(current) = self.menu_stack.pop() {
+                        info!("MenuBack: Closing menu '{}'", current);
+                        self.ui_layers.hide(&crate::ui::UiLayer::Custom(current));
+                    } else {
+                        info!("MenuBack: No menu to go back from");
+                    }
+                }
+                SceneUpdate::ShowPopup { alias } => {
+                    info!("ShowPopup: Showing popup '{}'", alias);
+                    self.ui_layers.show(crate::ui::UiLayer::Custom(alias));
+                }
+                SceneUpdate::HidePopup { alias } => {
+                    info!("HidePopup: Hiding popup '{}'", alias);
+                    self.ui_layers.hide(&crate::ui::UiLayer::Custom(alias));
+                }
+                SceneUpdate::ResetPauseMenu => {
+                    info!("ResetPauseMenu: Resetting pause menu to default");
+                    let default_layout = crate::ui::create_default_pause_menu_layout();
+                    self.ui_layers.set_layer(crate::ui::UiLayer::PauseMenu, default_layout);
                 }
             }
         }

@@ -463,26 +463,77 @@ fn main() {
                 // Update hovered button when paused
                 if ui_state.paused {
                     let screen_size = glam::Vec2::new(ui_canvas.screen_size.x, ui_canvas.screen_size.y);
-                    if let Some((id, callback)) = get_hovered_pause_button(mouse_position, screen_size) {
-                        ui_state.hovered_button = Some(id);
-                        ui_state.hovered_callback = callback;
-                    } else {
-                        ui_state.hovered_button = None;
-                        ui_state.hovered_callback = None;
+                    let mut found = false;
+                    
+                    // Try custom PauseMenu layer first
+                    if let Ok(state) = game_state.read() {
+                        if let Some(pause_layout) = state.world.ui_layers.get_layer(&ui::UiLayer::PauseMenu) {
+                            // Check buttons in custom pause menu
+                            for button in &pause_layout.buttons {
+                                if button.contains(mouse_position, screen_size) {
+                                    ui_state.hovered_button = Some(button.id);
+                                    ui_state.hovered_callback = button.on_click.clone();
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            // Also check buttons inside panels
+                            if !found {
+                                for panel in &pause_layout.panels {
+                                    for child in &panel.children {
+                                        if let ui::PanelChild::Button(btn) = child {
+                                            if btn.contains(mouse_position, screen_size) {
+                                                ui_state.hovered_button = Some(btn.id);
+                                                ui_state.hovered_callback = btn.on_click.clone();
+                                                found = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if found { break; }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Fall back to default pause menu buttons if no custom layer
+                    if !found {
+                        if let Some((id, callback)) = get_hovered_pause_button(mouse_position, screen_size) {
+                            ui_state.hovered_button = Some(id);
+                            ui_state.hovered_callback = callback;
+                        } else {
+                            ui_state.hovered_button = None;
+                            ui_state.hovered_callback = None;
+                        }
                     }
                 } else {
-                    // Check for dynamic buttons from GameWorld
+                    // Check for dynamic buttons from all visible UI layers
                     if let Ok(state) = game_state.read() {
-                        let layout = &state.world.active_ui_layout;
                         let screen_size = glam::Vec2::new(ui_canvas.screen_size.x, ui_canvas.screen_size.y);
                         let mut found = false;
-                        for button in &layout.buttons {
-                            if button.contains(mouse_position, screen_size) {
-                                ui_state.hovered_button = Some(button.id);
-                                ui_state.hovered_callback = button.on_click.clone();
-                                found = true;
-                                break;
+                        for layout in state.world.ui_layers.visible_layers() {
+                            for button in &layout.buttons {
+                                if button.contains(mouse_position, screen_size) {
+                                    ui_state.hovered_button = Some(button.id);
+                                    ui_state.hovered_callback = button.on_click.clone();
+                                    found = true;
+                                    break;
+                                }
                             }
+                            // Also check buttons inside panels
+                            for panel in &layout.panels {
+                                for child in &panel.children {
+                                    if let ui::PanelChild::Button(btn) = child {
+                                        if btn.contains(mouse_position, screen_size) {
+                                            ui_state.hovered_button = Some(btn.id);
+                                            ui_state.hovered_callback = btn.on_click.clone();
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if found { break; }
                         }
                         if !found {
                             ui_state.hovered_button = None;
@@ -600,12 +651,15 @@ fn main() {
                         if !ui_state.paused && !is_escape && !is_grave {
                             if let Ok(mut state) = game_state.write() {
                                 let key_str = format!("{:?}", physical_key);
-                                // Collect matching callbacks first to avoid borrow conflict
-                                let callbacks: Vec<String> = state.world.active_ui_layout.keybinds
-                                    .iter()
-                                    .filter(|bind| key_str.contains(&bind.key))
-                                    .map(|bind| bind.callback.clone())
-                                    .collect();
+                                // Collect matching callbacks from all visible UI layers' keybinds
+                                let mut callbacks: Vec<String> = Vec::new();
+                                for layout in state.world.ui_layers.visible_layers() {
+                                    for bind in &layout.keybinds {
+                                        if key_str.contains(&bind.key) {
+                                            callbacks.push(bind.callback.clone());
+                                        }
+                                    }
+                                }
                                 for callback in callbacks {
                                     state.world.pending_ui_events.push(ui::UiEvent::ButtonClicked {
                                         id: 0,
@@ -1198,24 +1252,58 @@ fn main() {
                         // Draw pause menu if paused
                         if ui_state.paused {
                             if let Some(ref font) = font_atlas {
-                                draw_pause_menu_with_font(&mut ui_canvas, &ui_state, font);
+                                // Draw semi-transparent overlay
+                                let screen = ui_canvas.screen_size;
+                                let uv_white = glam::Vec2::new(1.0 / 512.0, 1.0 / 512.0);
+                                ui_canvas.add_quad(
+                                    glam::Vec2::ZERO,
+                                    screen,
+                                    uv_white,
+                                    uv_white,
+                                    [0.0, 0.0, 0.0, 0.6],
+                                );
+                                
+                                // Try to use custom PauseMenu layer, fall back to default
+                                if let Ok(state) = game_state.read() {
+                                    if let Some(pause_layout) = state.world.ui_layers.get_layer(&ui::UiLayer::PauseMenu) {
+                                        // Use custom pause menu from editor
+                                        for panel in &pause_layout.panels {
+                                            ui_canvas.draw_panel_with_font(panel, font);
+                                        }
+                                        for text in &pause_layout.texts {
+                                            ui_canvas.draw_text_with_font(text, font);
+                                        }
+                                        for button in &pause_layout.buttons {
+                                            let mut btn = button.clone();
+                                            btn.hovered = ui_state.hovered_button == Some(btn.id);
+                                            ui_canvas.draw_button_with_font(&btn, font);
+                                        }
+                                    } else {
+                                        // Fall back to default pause menu
+                                        draw_pause_menu_with_font(&mut ui_canvas, &ui_state, font);
+                                    }
+                                } else {
+                                    // Game state locked, use default
+                                    draw_pause_menu_with_font(&mut ui_canvas, &ui_state, font);
+                                }
                             }
                         } else {
-                            // Draw dynamic UI layout from GameWorld
+                            // Draw all visible UI layers from GameWorld
                             if let Ok(state) = game_state.read() {
-                                let layout = &state.world.active_ui_layout;
                                 if let Some(ref font) = font_atlas {
-                                    for panel in &layout.panels {
-                                        ui_canvas.draw_panel(panel);
-                                    }
-                                    for text in &layout.texts {
-                                        ui_canvas.draw_text_with_font(text, font);
-                                    }
-                                    for button in &layout.buttons {
-                                        // Update hover state for dynamic buttons
-                                        let mut btn = button.clone();
-                                        btn.hovered = ui_state.hovered_button == Some(btn.id);
-                                        ui_canvas.draw_button_with_font(&btn, font);
+                                    for layout in state.world.ui_layers.visible_layers() {
+                                        for panel in &layout.panels {
+                                            ui_canvas.draw_panel_with_font(panel, font);
+                                        }
+                                        for text in &layout.texts {
+                                            ui_canvas.draw_text_with_font(text, font);
+                                        }
+                                        for button in &layout.buttons {
+                                            // Update hover state for dynamic buttons
+                                            let mut btn = button.clone();
+                                            btn.hovered = ui_state.hovered_button == Some(btn.id);
+                                            ui_canvas.draw_button_with_font(&btn, font);
+                                        }
                                     }
                                 }
                             }
