@@ -288,7 +288,7 @@ enum LightTypeEditor {
 }
 
 /// A named UI layout with a FuckScript alias for menu_load()
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 struct NamedUiLayout {
     /// Display name shown in tab
     pub name: String,
@@ -514,6 +514,13 @@ enum PendingAction {
 // ============================================================================
 // UNDO/REDO ACTION HISTORY
 // ============================================================================
+#[derive(Clone, PartialEq)]
+enum UiElementHistory {
+    Button(stfsc_engine::ui::Button),
+    Panel(stfsc_engine::ui::Panel),
+    Text(stfsc_engine::ui::Text),
+}
+
 #[derive(Clone)]
 enum EditorAction {
     /// Entity was added - undo by removing, redo by adding back
@@ -525,6 +532,33 @@ enum EditorAction {
         id: u32,
         before: SceneEntity,
         after: SceneEntity,
+    },
+    /// UI layout was modified (e.g. template applied)
+    ModifyUiLayout {
+        layout_idx: usize,
+        before: NamedUiLayout,
+        after: NamedUiLayout,
+    },
+    /// UI element was added
+    AddUiElement {
+        layout_idx: usize,
+        element_type: String, // "Button", "Panel", "Text"
+        element: UiElementHistory,
+    },
+    /// UI element was deleted
+    DeleteUiElement {
+        layout_idx: usize,
+        element_type: String,
+        element_idx: usize,
+        element: UiElementHistory,
+    },
+    /// UI element was modified (e.g. moved)
+    ModifyUiElement {
+        layout_idx: usize,
+        element_type: String,
+        element_idx: usize,
+        before: UiElementHistory,
+        after: UiElementHistory,
     },
 }
 
@@ -581,6 +615,12 @@ struct EditorApp {
     selected_ui_id: Option<u32>,
     selected_child_idx: Option<usize>, // For child elements within a panel
     selected_layout_idx: usize, // Currently selected UI layout tab
+    
+    // UI Dragging History
+    ui_drag_start_element: Option<UiElementHistory>, // State before drag started
+    ui_inspector_start_element: Option<UiElementHistory>, // State before inspector edit
+    last_selected_ui_type: Option<String>,
+    last_selected_ui_id: Option<u32>,
 }
 
 impl EditorApp {
@@ -679,6 +719,10 @@ impl EditorApp {
             selected_ui_id: None,
             selected_child_idx: None,
             selected_layout_idx: 0,
+            ui_drag_start_element: None,
+            ui_inspector_start_element: None,
+            last_selected_ui_type: None,
+            last_selected_ui_id: None,
         }
     }
 
@@ -835,8 +879,26 @@ impl EditorApp {
                 y_threshold: scene.respawn_y,
             }));
             
+            // Deploy all entities
             for entity in &scene.entities {
                 self.deploy_entity_to_quest(entity);
+            }
+            
+            // Deploy all UI layouts
+            for nl in &scene.ui_layouts {
+                let layer = match nl.layer_type {
+                    stfsc_engine::ui::UiLayerType::PauseOverlay => stfsc_engine::ui::UiLayer::PauseMenu,
+                    stfsc_engine::ui::UiLayerType::MainMenu => stfsc_engine::ui::UiLayer::MainMenu,
+                    stfsc_engine::ui::UiLayerType::InGameOverlay => stfsc_engine::ui::UiLayer::Hud,
+                    _ => stfsc_engine::ui::UiLayer::Custom(nl.alias.clone()),
+                };
+                // Sync layer_type to inner layout
+                let mut layout_to_send = nl.layout.clone();
+                layout_to_send.layer_type = nl.layer_type;
+                let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetUiLayer {
+                    layer,
+                    layout: layout_to_send,
+                }));
             }
         }
     }
@@ -1219,6 +1281,53 @@ impl EditorApp {
                     }
                     self.status = format!("Undo: Restored entity #{}", id);
                 }
+                EditorAction::ModifyUiLayout { layout_idx, before, .. } => {
+                    if let Some(scene) = &mut self.current_scene {
+                        if let Some(layout) = scene.ui_layouts.get_mut(*layout_idx) {
+                            *layout = before.clone();
+                        }
+                    }
+                    self.status = format!("Undo: Restored UI Layout #{}", layout_idx);
+                }
+                EditorAction::AddUiElement { layout_idx, element_type, element: _ } => {
+                    // Undo add = remove
+                    if let Some(scene) = &mut self.current_scene {
+                        if let Some(nl) = scene.ui_layouts.get_mut(*layout_idx) {
+                            match element_type.as_str() {
+                                "Button" => { nl.layout.buttons.pop(); }
+                                "Panel" => { nl.layout.panels.pop(); }
+                                "Text" => { nl.layout.texts.pop(); }
+                                _ => {}
+                            }
+                        }
+                    }
+                    self.status = format!("Undo: Removed UI {}", element_type);
+                }
+                EditorAction::DeleteUiElement { layout_idx, element_type, element_idx, element } => {
+                    // Undo delete = insert back
+                    if let Some(scene) = &mut self.current_scene {
+                        if let Some(nl) = scene.ui_layouts.get_mut(*layout_idx) {
+                            match element {
+                                UiElementHistory::Button(b) => nl.layout.buttons.insert(*element_idx, b.clone()),
+                                UiElementHistory::Panel(p) => nl.layout.panels.insert(*element_idx, p.clone()),
+                                UiElementHistory::Text(t) => nl.layout.texts.insert(*element_idx, t.clone()),
+                            }
+                        }
+                    }
+                    self.status = format!("Undo: Restored UI {}", element_type);
+                }
+                EditorAction::ModifyUiElement { layout_idx, element_type, element_idx, before, .. } => {
+                    if let Some(scene) = &mut self.current_scene {
+                        if let Some(nl) = scene.ui_layouts.get_mut(*layout_idx) {
+                            match before {
+                                UiElementHistory::Button(b) => { if let Some(target) = nl.layout.buttons.get_mut(*element_idx) { *target = b.clone(); } }
+                                UiElementHistory::Panel(p) => { if let Some(target) = nl.layout.panels.get_mut(*element_idx) { *target = p.clone(); } }
+                                UiElementHistory::Text(t) => { if let Some(target) = nl.layout.texts.get_mut(*element_idx) { *target = t.clone(); } }
+                            }
+                        }
+                    }
+                    self.status = format!("Undo: Restored UI {}", element_type);
+                }
             }
             self.redo_stack.push(action);
             self.scene_dirty = true;
@@ -1255,6 +1364,51 @@ impl EditorApp {
                         }
                     }
                     self.status = format!("Redo: Modified entity #{}", id);
+                }
+                EditorAction::ModifyUiLayout { layout_idx, after, .. } => {
+                    if let Some(scene) = &mut self.current_scene {
+                        if let Some(layout) = scene.ui_layouts.get_mut(*layout_idx) {
+                            *layout = after.clone();
+                        }
+                    }
+                    self.status = format!("Redo: Modified UI Layout #{}", layout_idx);
+                }
+                EditorAction::AddUiElement { layout_idx, element_type, element } => {
+                    if let Some(scene) = &mut self.current_scene {
+                        if let Some(nl) = scene.ui_layouts.get_mut(*layout_idx) {
+                            match element {
+                                UiElementHistory::Button(b) => nl.layout.buttons.push(b.clone()),
+                                UiElementHistory::Panel(p) => nl.layout.panels.push(p.clone()),
+                                UiElementHistory::Text(t) => nl.layout.texts.push(t.clone()),
+                            }
+                        }
+                    }
+                    self.status = format!("Redo: Added UI {}", element_type);
+                }
+                EditorAction::DeleteUiElement { layout_idx, element_type, element_idx, .. } => {
+                    if let Some(scene) = &mut self.current_scene {
+                        if let Some(nl) = scene.ui_layouts.get_mut(*layout_idx) {
+                            match element_type.as_str() {
+                                "Button" => { nl.layout.buttons.remove(*element_idx); }
+                                "Panel" | "PanelChild" => { nl.layout.panels.remove(*element_idx); }
+                                "Text" => { nl.layout.texts.remove(*element_idx); }
+                                _ => {}
+                            }
+                        }
+                    }
+                    self.status = format!("Redo: Deleted UI {}", element_type);
+                }
+                EditorAction::ModifyUiElement { layout_idx, element_type, element_idx, after, .. } => {
+                    if let Some(scene) = &mut self.current_scene {
+                        if let Some(nl) = scene.ui_layouts.get_mut(*layout_idx) {
+                            match after {
+                                UiElementHistory::Button(b) => { if let Some(target) = nl.layout.buttons.get_mut(*element_idx) { *target = b.clone(); } }
+                                UiElementHistory::Panel(p) => { if let Some(target) = nl.layout.panels.get_mut(*element_idx) { *target = p.clone(); } }
+                                UiElementHistory::Text(t) => { if let Some(target) = nl.layout.texts.get_mut(*element_idx) { *target = t.clone(); } }
+                            }
+                        }
+                    }
+                    self.status = format!("Redo: Modified UI {}", element_type);
                 }
             }
             self.undo_stack.push(action);
@@ -2869,46 +3023,80 @@ impl eframe::App for EditorApp {
 
                     // Toolbar
                     ui.horizontal(|ui| {
+                        let mut pending_action = None;
                         if ui.button("➕ Button").clicked() {
                            if let Some(scene) = &mut self.current_scene {
                                if let Some(named_layout) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
                                    let id = (named_layout.layout.buttons.len() + named_layout.layout.panels.len() + named_layout.layout.texts.len()) as u32 + 1;
-                                   // Use Button::new to get proper default colors (dark panel, white text)
-                                   named_layout.layout.buttons.push(stfsc_engine::ui::Button::new(id, "New Button", 100.0, 100.0, 200.0, 50.0));
+                                   let btn = stfsc_engine::ui::Button::new(id, "New Button", 100.0, 100.0, 200.0, 50.0);
+                                   pending_action = Some(EditorAction::AddUiElement {
+                                       layout_idx: self.selected_layout_idx,
+                                       element_type: "Button".into(),
+                                       element: UiElementHistory::Button(btn.clone()),
+                                   });
+                                   named_layout.layout.buttons.push(btn);
                                    ui_dirty = true;
                                }
                            }
                         }
+                        if let Some(a) = pending_action.take() { self.push_undo_action(a); }
+
                         if ui.button("➕ Panel").clicked() {
                             if let Some(scene) = &mut self.current_scene {
                                 if let Some(named_layout) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
-                                    named_layout.layout.panels.push(stfsc_engine::ui::Panel::new(100.0, 100.0, 200.0, 200.0));
+                                    let panel = stfsc_engine::ui::Panel::new(100.0, 100.0, 200.0, 200.0);
+                                    pending_action = Some(EditorAction::AddUiElement {
+                                        layout_idx: self.selected_layout_idx,
+                                        element_type: "Panel".into(),
+                                        element: UiElementHistory::Panel(panel.clone()),
+                                    });
+                                    named_layout.layout.panels.push(panel);
                                     ui_dirty = true;
                                 }
                             }
                         }
+                        if let Some(a) = pending_action.take() { self.push_undo_action(a); }
+
                         if ui.button("➕ Text").clicked() {
                             if let Some(scene) = &mut self.current_scene {
                                 if let Some(named_layout) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
-                                    named_layout.layout.texts.push(stfsc_engine::ui::Text::new("New Text", 100.0, 100.0));
+                                    let text = stfsc_engine::ui::Text::new("New Text", 100.0, 100.0);
+                                    pending_action = Some(EditorAction::AddUiElement {
+                                        layout_idx: self.selected_layout_idx,
+                                        element_type: "Text".into(),
+                                        element: UiElementHistory::Text(text.clone()),
+                                    });
+                                    named_layout.layout.texts.push(text);
                                     ui_dirty = true;
                                 }
                             }
                         }
+                        if let Some(a) = pending_action.take() { self.push_undo_action(a); }
+
                         ui.separator();
                         if ui.button("🗑 Clear All").clicked() {
                             if let Some(scene) = &mut self.current_scene {
                                 if let Some(named_layout) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                    let before = named_layout.clone();
                                     named_layout.layout = stfsc_engine::ui::UiLayout::default();
+                                    pending_action = Some(EditorAction::ModifyUiLayout {
+                                        layout_idx: self.selected_layout_idx,
+                                        before,
+                                        after: named_layout.clone(),
+                                    });
                                     self.selected_ui_id = None;
                                     ui_dirty = true;
                                 }
                             }
                         }
+                        if let Some(a) = pending_action.take() { self.push_undo_action(a); }
+
                         egui::menu::menu_button(ui, "📋 Templates", |ui| {
+                            let mut template_action = None;
                             if ui.button("🎮 HUD (Health/Ammo)").clicked() {
                                 if let Some(scene) = &mut self.current_scene {
                                     if let Some(nl) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                        let before = nl.clone();
                                         nl.layout = stfsc_engine::ui::UiLayout::default();
                                         let mut health_panel = stfsc_engine::ui::Panel::new(20.0, 20.0, 200.0, 30.0);
                                         health_panel.color = [0.8, 0.2, 0.2, 0.8];
@@ -2922,6 +3110,11 @@ impl eframe::App for EditorApp {
                                         let mut ammo_text = stfsc_engine::ui::Text::new("30 / 120", 1720.0, 1000.0);
                                         ammo_text.font_size = 28.0;
                                         nl.layout.texts.push(ammo_text);
+                                        template_action = Some(EditorAction::ModifyUiLayout {
+                                            layout_idx: self.selected_layout_idx,
+                                            before,
+                                            after: nl.clone(),
+                                        });
                                         ui_dirty = true;
                                     }
                                 }
@@ -2930,6 +3123,7 @@ impl eframe::App for EditorApp {
                             if ui.button("⏸ Pause Menu").clicked() {
                                 if let Some(scene) = &mut self.current_scene {
                                     if let Some(nl) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                        let before = nl.clone();
                                         nl.layout = stfsc_engine::ui::UiLayout::default();
                                         let mut overlay = stfsc_engine::ui::Panel::new(0.0, 0.0, 1920.0, 1080.0);
                                         overlay.color = [0.0, 0.0, 0.0, 0.7];
@@ -2942,6 +3136,11 @@ impl eframe::App for EditorApp {
                                             btn.on_click = Some(cb.to_string());
                                             nl.layout.buttons.push(btn);
                                         }
+                                        template_action = Some(EditorAction::ModifyUiLayout {
+                                            layout_idx: self.selected_layout_idx,
+                                            before,
+                                            after: nl.clone(),
+                                        });
                                         ui_dirty = true;
                                     }
                                 }
@@ -2950,6 +3149,7 @@ impl eframe::App for EditorApp {
                             if ui.button("🏠 Main Menu").clicked() {
                                 if let Some(scene) = &mut self.current_scene {
                                     if let Some(nl) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                        let before = nl.clone();
                                         nl.layout = stfsc_engine::ui::UiLayout::default();
                                         let mut header = stfsc_engine::ui::Panel::new(0.0, 0.0, 1920.0, 80.0);
                                         header.color = [0.1, 0.1, 0.15, 0.9];
@@ -2962,11 +3162,18 @@ impl eframe::App for EditorApp {
                                             btn.on_click = Some(cb.to_string());
                                             nl.layout.buttons.push(btn);
                                         }
+                                        template_action = Some(EditorAction::ModifyUiLayout {
+                                            layout_idx: self.selected_layout_idx,
+                                            before,
+                                            after: nl.clone(),
+                                        });
                                         ui_dirty = true;
                                     }
                                 }
                                 ui.close_menu();
                             }
+                            // Push template undo if any applied
+                            if let Some(a) = template_action { self.push_undo_action(a); }
                         });
                         ui.separator();
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2980,9 +3187,12 @@ impl eframe::App for EditorApp {
                                             stfsc_engine::ui::UiLayerType::InGameOverlay => stfsc_engine::ui::UiLayer::Hud,
                                             _ => stfsc_engine::ui::UiLayer::Custom(nl.alias.clone()),
                                         };
+                                        // IMPORTANT: Sync the layer_type to the inner UiLayout before sending
+                                        let mut layout_to_send = nl.layout.clone();
+                                        layout_to_send.layer_type = nl.layer_type;
                                         let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetUiLayer {
                                             layer,
-                                            layout: nl.layout.clone(),
+                                            layout: layout_to_send,
                                         }));
                                     }
                                 }
@@ -3029,39 +3239,98 @@ impl eframe::App for EditorApp {
 
                             if let Some(scene) = &self.current_scene {
                               if let Some(nl) = scene.ui_layouts.get(self.selected_layout_idx) {
-                                // Check buttons first (on top)
-                                for (i, button) in nl.layout.buttons.iter().enumerate().rev() {
-                                    let pos = egui::pos2(rect.min.x + button.panel.position[0] * scale, rect.min.y + button.panel.position[1] * scale);
-                                    let size = egui::vec2(button.panel.size[0] * scale, button.panel.size[1] * scale);
-                                    let elem_rect = egui::Rect::from_min_size(pos, size);
+                                // 1. Check Texts (usually on top)
+                                for (i, text) in nl.layout.texts.iter().enumerate().rev() {
+                                    let pos = egui::pos2(rect.min.x + text.position[0] * scale, rect.min.y + text.position[1] * scale);
+                                    let galley = painter.layout_no_wrap(text.content.clone(), egui::FontId::proportional(text.font_size * scale), egui::Color32::WHITE);
+                                    let elem_rect = egui::Rect::from_min_size(pos, galley.size());
                                     if elem_rect.contains(pointer) {
-                                        if response.drag_started() { drag_target = Some(("Button".into(), i as u32)); }
-                                        if response.clicked() { clicked_element = Some(("Button".into(), i as u32)); }
+                                        if response.drag_started() { 
+                                            drag_target = Some(("Text".into(), i as u32));
+                                            self.ui_drag_start_element = Some(UiElementHistory::Text(text.clone()));
+                                        }
+                                        if response.clicked() { clicked_element = Some(("Text".into(), i as u32)); }
                                         break;
                                     }
                                 }
-                                // Check panels
+
+                                // 2. Check Layout Buttons
                                 if clicked_element.is_none() && drag_target.is_none() {
-                                    for (i, panel) in nl.layout.panels.iter().enumerate().rev() {
-                                        let pos = egui::pos2(rect.min.x + panel.position[0] * scale, rect.min.y + panel.position[1] * scale);
-                                        let size = egui::vec2(panel.size[0] * scale, panel.size[1] * scale);
+                                    for (i, button) in nl.layout.buttons.iter().enumerate().rev() {
+                                        let pos = egui::pos2(rect.min.x + button.panel.position[0] * scale, rect.min.y + button.panel.position[1] * scale);
+                                        let size = egui::vec2(button.panel.size[0] * scale, button.panel.size[1] * scale);
                                         let elem_rect = egui::Rect::from_min_size(pos, size);
                                         if elem_rect.contains(pointer) {
-                                            if response.drag_started() { drag_target = Some(("Panel".into(), i as u32)); }
-                                            if response.clicked() { clicked_element = Some(("Panel".into(), i as u32)); }
+                                            if response.drag_started() { 
+                                                drag_target = Some(("Button".into(), i as u32));
+                                                self.ui_drag_start_element = Some(UiElementHistory::Button(button.clone()));
+                                            }
+                                            if response.clicked() { clicked_element = Some(("Button".into(), i as u32)); }
                                             break;
                                         }
                                     }
                                 }
-                                // Check texts
+
+                                // 3. Check Panels and their children
                                 if clicked_element.is_none() && drag_target.is_none() {
-                                    for (i, text) in nl.layout.texts.iter().enumerate().rev() {
-                                        let pos = egui::pos2(rect.min.x + text.position[0] * scale, rect.min.y + text.position[1] * scale);
-                                        let galley = painter.layout_no_wrap(text.content.clone(), egui::FontId::proportional(text.font_size * scale), egui::Color32::WHITE);
-                                        let elem_rect = egui::Rect::from_min_size(pos, galley.size());
-                                        if elem_rect.contains(pointer) {
-                                            if response.drag_started() { drag_target = Some(("Text".into(), i as u32)); }
-                                            if response.clicked() { clicked_element = Some(("Text".into(), i as u32)); }
+                                    for (i, panel) in nl.layout.panels.iter().enumerate().rev() {
+                                        let panel_pos = egui::pos2(rect.min.x + panel.position[0] * scale, rect.min.y + panel.position[1] * scale);
+                                        
+                                        // Check children first (they are on top of the panel)
+                                        let mut child_found = false;
+                                        for (ci, child) in panel.children.iter().enumerate().rev() {
+                                            match child {
+                                                stfsc_engine::ui::PanelChild::Button(btn) => {
+                                                    let pos = egui::pos2(panel_pos.x + btn.panel.position[0] * scale, panel_pos.y + btn.panel.position[1] * scale);
+                                                    let size = egui::vec2(btn.panel.size[0] * scale, btn.panel.size[1] * scale);
+                                                    let elem_rect = egui::Rect::from_min_size(pos, size);
+                                                    if elem_rect.contains(pointer) {
+                                                        if response.drag_started() { 
+                                                            drag_target = Some(("PanelChild".into(), i as u32));
+                                                            self.selected_child_idx = Some(ci);
+                                                            // We store the whole panel for undo since children are part of it
+                                                            self.ui_drag_start_element = Some(UiElementHistory::Panel(panel.clone()));
+                                                        }
+                                                        if response.clicked() { 
+                                                            clicked_element = Some(("PanelChild".into(), i as u32));
+                                                            self.selected_child_idx = Some(ci);
+                                                        }
+                                                        child_found = true;
+                                                        break;
+                                                    }
+                                                }
+                                                stfsc_engine::ui::PanelChild::Text(txt) => {
+                                                    let pos = egui::pos2(panel_pos.x + txt.position[0] * scale, panel_pos.y + txt.position[1] * scale);
+                                                    let galley = painter.layout_no_wrap(txt.content.clone(), egui::FontId::proportional(txt.font_size * scale), egui::Color32::WHITE);
+                                                    let elem_rect = egui::Rect::from_min_size(pos, galley.size());
+                                                    if elem_rect.contains(pointer) {
+                                                        if response.drag_started() { 
+                                                            drag_target = Some(("PanelChild".into(), i as u32));
+                                                            self.selected_child_idx = Some(ci);
+                                                            self.ui_drag_start_element = Some(UiElementHistory::Panel(panel.clone()));
+                                                        }
+                                                        if response.clicked() { 
+                                                            clicked_element = Some(("PanelChild".into(), i as u32));
+                                                            self.selected_child_idx = Some(ci);
+                                                        }
+                                                        child_found = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if child_found { break; }
+
+                                        // Finally check the panel itself
+                                        let size = egui::vec2(panel.size[0] * scale, panel.size[1] * scale);
+                                        let panel_rect = egui::Rect::from_min_size(panel_pos, size);
+                                        if panel_rect.contains(pointer) {
+                                            if response.drag_started() { 
+                                                drag_target = Some(("Panel".into(), i as u32));
+                                                self.ui_drag_start_element = Some(UiElementHistory::Panel(panel.clone()));
+                                            }
+                                            if response.clicked() { clicked_element = Some(("Panel".into(), i as u32)); }
                                             break;
                                         }
                                     }
@@ -3102,7 +3371,48 @@ impl eframe::App for EditorApp {
                                                 t.position[1] += delta.y;
                                                 ui_dirty = true;
                                             }
+                                            "PanelChild" => if let (Some(p), Some(ci)) = (nl.layout.panels.get_mut(id as usize), self.selected_child_idx) {
+                                                if let Some(child) = p.children.get_mut(ci) {
+                                                    match child {
+                                                        stfsc_engine::ui::PanelChild::Button(btn) => {
+                                                            btn.panel.position[0] += delta.x;
+                                                            btn.panel.position[1] += delta.y;
+                                                        }
+                                                        stfsc_engine::ui::PanelChild::Text(txt) => {
+                                                            txt.position[0] += delta.x;
+                                                            txt.position[1] += delta.y;
+                                                        }
+                                                    }
+                                                    ui_dirty = true;
+                                                }
+                                            }
                                             _ => {}
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Push undo on drag release
+                            if response.drag_released() {
+                                if let (Some(before), Some(etype), Some(id), Some(scene)) = (self.ui_drag_start_element.take(), &self.selected_ui_element_type, self.selected_ui_id, &mut self.current_scene) {
+                                    if let Some(nl) = scene.ui_layouts.get(self.selected_layout_idx) {
+                                        let after = match etype.as_str() {
+                                            "Button" => nl.layout.buttons.get(id as usize).map(|b| UiElementHistory::Button(b.clone())),
+                                            "Panel" | "PanelChild" => nl.layout.panels.get(id as usize).map(|p| UiElementHistory::Panel(p.clone())),
+                                            "Text" => nl.layout.texts.get(id as usize).map(|t| UiElementHistory::Text(t.clone())),
+                                            _ => None,
+                                        };
+
+                                        if let Some(after_state) = after {
+                                            // Only push if something changed (rough check via serialization/clonability is hard, 
+                                            // we just push for now like with 3D objects)
+                                            self.push_undo_action(EditorAction::ModifyUiElement {
+                                                layout_idx: self.selected_layout_idx,
+                                                element_type: etype.clone(),
+                                                element_idx: id as usize,
+                                                before,
+                                                after: after_state,
+                                            });
                                         }
                                     }
                                 }
@@ -3188,15 +3498,60 @@ impl eframe::App for EditorApp {
 
                         ui.separator();
 
-                        // Properties panel
-                        ui.vertical(|ui| {
-                            ui.set_width(props_width);
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                ui.heading("Properties");
-                                if let (Some(id), Some(etype)) = (self.selected_ui_id, &self.selected_ui_element_type.clone()) {
-                                    if let Some(scene) = &mut self.current_scene {
-                                      if let Some(nl) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
-                                        match etype.as_str() {
+                                // Properties panel
+                                ui.vertical(|ui| {
+                                    ui.set_width(props_width);
+                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                        ui.heading("Properties");
+                                        
+                                        let mut pending_undo = None;
+                                        if let Some(scene) = &mut self.current_scene {
+                                            // Capture UI state when selection changes (for undo tracking)
+                                            if (self.selected_ui_id, self.selected_ui_element_type.clone()) != (self.last_selected_ui_id, self.last_selected_ui_type.clone()) {
+                                                // Push undo for previous element if it was modified
+                                                if let (Some(start), Some(prev_type), Some(prev_id)) = (self.ui_inspector_start_element.take(), self.last_selected_ui_type.take(), self.last_selected_ui_id.take()) {
+                                                    if let Some(nl) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                                        let current = match prev_type.as_str() {
+                                                            "Button" => nl.layout.buttons.get(prev_id as usize).map(|b| UiElementHistory::Button(b.clone())),
+                                                            "Panel" => nl.layout.panels.get(prev_id as usize).map(|p| UiElementHistory::Panel(p.clone())),
+                                                            "Text" => nl.layout.texts.get(prev_id as usize).map(|t| UiElementHistory::Text(t.clone())),
+                                                            _ => None,
+                                                        };
+                                                        if let Some(after) = current {
+                                                            if start != after {
+                                                                pending_undo = Some(EditorAction::ModifyUiElement {
+                                                                    layout_idx: self.selected_layout_idx,
+                                                                    element_type: prev_type,
+                                                                    element_idx: prev_id as usize,
+                                                                    before: start,
+                                                                    after,
+                                                                });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                // Capture new element's state
+                                                if let (Some(id), Some(etype)) = (self.selected_ui_id, &self.selected_ui_element_type) {
+                                                    if let Some(nl) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                                        let state = match etype.as_str() {
+                                                            "Button" => nl.layout.buttons.get(id as usize).map(|b| UiElementHistory::Button(b.clone())),
+                                                            "Panel" | "PanelChild" => nl.layout.panels.get(id as usize).map(|p| UiElementHistory::Panel(p.clone())),
+                                                            "Text" => nl.layout.texts.get(id as usize).map(|t| UiElementHistory::Text(t.clone())),
+                                                            _ => None,
+                                                        };
+                                                        self.ui_inspector_start_element = state;
+                                                        self.last_selected_ui_type = Some(etype.clone());
+                                                        self.last_selected_ui_id = Some(id);
+                                                    }
+                                                } else {
+                                                    self.last_selected_ui_type = None;
+                                                    self.last_selected_ui_id = None;
+                                                }
+                                            }
+
+                                            if let (Some(id), Some(etype)) = (self.selected_ui_id, &self.selected_ui_element_type.clone()) {
+                                                if let Some(nl) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
+                                                    match etype.as_str() {
                                             "Button" => if let Some(button) = nl.layout.buttons.get_mut(id as usize) {
                                                 ui.label(format!("Button #{}", button.id));
                                                 ui.horizontal(|ui| { ui.label("Label:"); if ui.text_edit_singleline(&mut button.label.content).changed() { ui_dirty = true; } });
@@ -3219,9 +3574,18 @@ impl eframe::App for EditorApp {
                                                 });
                                                 ui.separator();
                                                 if ui.button("🗑 Delete").clicked() {
-                                                    nl.layout.buttons.remove(id as usize);
-                                                    self.selected_ui_id = None;
-                                                    ui_dirty = true;
+                                                    let button = nl.layout.buttons.get(id as usize).cloned();
+                                                    if let Some(b) = button {
+                                                        pending_undo = Some(EditorAction::DeleteUiElement {
+                                                            layout_idx: self.selected_layout_idx,
+                                                            element_type: "Button".into(),
+                                                            element_idx: id as usize,
+                                                            element: UiElementHistory::Button(b),
+                                                        });
+                                                        nl.layout.buttons.remove(id as usize);
+                                                        self.selected_ui_id = None;
+                                                        ui_dirty = true;
+                                                    }
                                                 }
                                             }
                                             "Panel" => if let Some(panel) = nl.layout.panels.get_mut(id as usize) {
@@ -3386,9 +3750,18 @@ impl eframe::App for EditorApp {
                                                 
                                                 ui.separator();
                                                 if ui.button("🗑 Delete").clicked() {
-                                                    nl.layout.panels.remove(id as usize);
-                                                    self.selected_ui_id = None;
-                                                    ui_dirty = true;
+                                                    let panel = nl.layout.panels.get(id as usize).cloned();
+                                                    if let Some(p) = panel {
+                                                        pending_undo = Some(EditorAction::DeleteUiElement {
+                                                            layout_idx: self.selected_layout_idx,
+                                                            element_type: "Panel".into(),
+                                                            element_idx: id as usize,
+                                                            element: UiElementHistory::Panel(p),
+                                                        });
+                                                        nl.layout.panels.remove(id as usize);
+                                                        self.selected_ui_id = None;
+                                                        ui_dirty = true;
+                                                    }
                                                 }
                                             }
                                             "Text" => if let Some(text) = nl.layout.texts.get_mut(id as usize) {
@@ -3402,15 +3775,25 @@ impl eframe::App for EditorApp {
                                                 });
                                                 ui.separator();
                                                 if ui.button("🗑 Delete").clicked() {
-                                                    nl.layout.texts.remove(id as usize);
-                                                    self.selected_ui_id = None;
-                                                    ui_dirty = true;
+                                                    let text = nl.layout.texts.get(id as usize).cloned();
+                                                    if let Some(t) = text {
+                                                        pending_undo = Some(EditorAction::DeleteUiElement {
+                                                            layout_idx: self.selected_layout_idx,
+                                                            element_type: "Text".into(),
+                                                            element_idx: id as usize,
+                                                            element: UiElementHistory::Text(t),
+                                                        });
+                                                        nl.layout.texts.remove(id as usize);
+                                                        self.selected_ui_id = None;
+                                                        ui_dirty = true;
+                                                    }
                                                 }
                                             }
                                             _ => {}
                                         }
                                       }
                                     }
+                                    if let Some(a) = pending_undo { self.push_undo_action(a); }
                                 } else {
                                     ui.label("Click an element to edit");
                                     ui.separator();

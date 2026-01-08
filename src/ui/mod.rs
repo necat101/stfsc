@@ -71,14 +71,14 @@ impl Anchor {
 }
 
 /// Child element that can be nested inside a Panel
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum PanelChild {
     Button(Button),
     Text(Text),
 }
 
 /// A rectangular panel (solid color or textured)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Panel {
     pub position: [f32; 2],
     pub size: [f32; 2],
@@ -133,7 +133,7 @@ impl Panel {
 }
 
 /// Text element
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Text {
     pub content: String,
     pub position: [f32; 2],
@@ -190,7 +190,7 @@ impl Text {
 }
 
 /// Interactive button
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Button {
     pub panel: Panel,
     pub label: Text,
@@ -230,19 +230,24 @@ impl Button {
 
     /// Check if point (in screen coords) is inside this button
     /// Uses reference resolution scaling (1920x1080 default) for hit testing
-    pub fn contains(&self, point: Vec2, screen_size: Vec2) -> bool {
-        self.contains_scaled(point, screen_size, DEFAULT_REFERENCE_RESOLUTION.0, DEFAULT_REFERENCE_RESOLUTION.1)
+    pub fn contains(&self, point: Vec2, screen_size: Vec2, parent_offset: Option<Vec2>) -> bool {
+        self.contains_scaled(point, screen_size, DEFAULT_REFERENCE_RESOLUTION.0, DEFAULT_REFERENCE_RESOLUTION.1, parent_offset)
     }
     
     /// Check if point is inside this button with explicit reference resolution
-    pub fn contains_scaled(&self, point: Vec2, screen_size: Vec2, ref_width: f32, ref_height: f32) -> bool {
+    pub fn contains_scaled(&self, point: Vec2, screen_size: Vec2, ref_width: f32, ref_height: f32, parent_offset: Option<Vec2>) -> bool {
         // Calculate scale factor (same as UiCanvas::scale_factor)
         let scale_x = screen_size.x / ref_width;
         let scale_y = screen_size.y / ref_height;
         let scale = scale_x.min(scale_y);
         
         // Scale position and size from reference resolution
-        let scaled_pos = Vec2::new(self.panel.position[0] * scale, self.panel.position[1] * scale);
+        let mut pos = Vec2::from(self.panel.position);
+        if let Some(offset) = parent_offset {
+            pos += offset;
+        }
+        
+        let scaled_pos = Vec2::new(pos.x * scale, pos.y * scale);
         let scaled_size = Vec2::new(self.panel.size[0] * scale, self.panel.size[1] * scale);
         
         let anchor_offset = self.panel.anchor.offset();
@@ -291,14 +296,14 @@ pub enum UiLayerType {
 }
 
 /// A serializable UI keybind for callbacks
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Keybind {
     pub key: String,
     pub callback: String,
 }
 
 /// Keybind that triggers a popup overlay
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PopupKeybind {
     /// Key code (e.g., "G", "Tab", "Q")
     pub key: String,
@@ -309,7 +314,7 @@ pub struct PopupKeybind {
 }
 
 /// A complete UI layout that can be sent from the editor
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 pub struct UiLayout {
     pub buttons: Vec<Button>,
     pub panels: Vec<Panel>,
@@ -618,7 +623,7 @@ impl UiCanvas {
                     offset_btn.panel.position[1] += panel.position[1];
                     offset_btn.label.position[0] += panel.position[0];
                     offset_btn.label.position[1] += panel.position[1];
-                    self.draw_button(&offset_btn);
+                    self.draw_button(&offset_btn, None);
                 }
                 PanelChild::Text(text) => {
                     // Offset text by panel position
@@ -632,7 +637,11 @@ impl UiCanvas {
     }
 
     /// Draw a panel with font atlas for proper text rendering in children
-    pub fn draw_panel_with_font(&mut self, panel: &Panel, font: &crate::ui::font::FontAtlas) {
+    pub fn draw_panel_with_font(&mut self, panel: &Panel, font: &crate::ui::font::FontAtlas, hovered_id: Option<u32>) {
+        self.draw_panel_with_font_internal(panel, font, hovered_id)
+    }
+
+    fn draw_panel_with_font_internal(&mut self, panel: &Panel, font: &crate::ui::font::FontAtlas, hovered_id: Option<u32>) {
         let scale = self.scale_factor();
         let scaled_pos = self.scale_position(Vec2::from(panel.position));
         let scaled_size = self.scale_size(Vec2::from(panel.size));
@@ -658,7 +667,7 @@ impl UiCanvas {
                     btn.panel.position[1] += panel.position[1];
                     btn.label.position[0] += panel.position[0];
                     btn.label.position[1] += panel.position[1];
-                    self.draw_button_with_font(&btn, font);
+                    self.draw_button_with_font(&btn, font, hovered_id);
                 }
                 PanelChild::Text(text) => {
                     // Offset text by panel position
@@ -749,12 +758,13 @@ impl UiCanvas {
     }
 
     /// Draw a button
-    pub fn draw_button(&mut self, button: &Button) {
+    pub fn draw_button(&mut self, button: &Button, hovered_id: Option<u32>) {
         // Draw panel with hover/press state coloring
         let mut panel = button.panel.clone();
+        let is_hovered = button.hovered || (hovered_id.is_some() && hovered_id == Some(button.id));
         if button.pressed {
             panel.color = [0.1, 0.1, 0.2, 0.95];
-        } else if button.hovered {
+        } else if is_hovered {
             panel.color = [0.3, 0.3, 0.4, 0.95];
         }
         self.draw_panel(&panel);
@@ -775,15 +785,16 @@ impl UiCanvas {
     }
 
     /// Draw a button with font atlas for proper text rendering
-    pub fn draw_button_with_font(&mut self, button: &Button, font: &crate::ui::font::FontAtlas) {
+    pub fn draw_button_with_font(&mut self, button: &Button, font: &crate::ui::font::FontAtlas, hovered_id: Option<u32>) {
         // Draw panel with hover/press state coloring
         let mut panel = button.panel.clone();
+        let is_hovered = button.hovered || (hovered_id.is_some() && hovered_id == Some(button.id));
         if button.pressed {
             panel.color = [0.1, 0.1, 0.2, 0.95];
-        } else if button.hovered {
+        } else if is_hovered {
             panel.color = [0.3, 0.3, 0.4, 0.95];
         }
-        self.draw_panel_with_font(&panel, font);
+        self.draw_panel_with_font_internal(&panel, font, hovered_id);
 
         // Draw label centered in button
         let mut label = button.label.clone();
@@ -950,28 +961,25 @@ pub fn draw_pause_menu(canvas: &mut UiCanvas, ui_state: &UiState) {
     canvas.draw_text(&title_positioned);
 
     // Resume button - slightly above center
-    let mut resume_btn = Button::new(BUTTON_RESUME, "Resume", 0.0, -10.0, 200.0, 50.0)
+    let resume_btn = Button::new(BUTTON_RESUME, "Resume", 0.0, -10.0, 200.0, 50.0)
         .with_anchor(Anchor::Center);
-    resume_btn.hovered = ui_state.hovered_button == Some(BUTTON_RESUME);
-    canvas.draw_button(&resume_btn);
+    canvas.draw_button(&resume_btn, ui_state.hovered_button);
 
     // Settings button
-    let mut settings_btn = Button::new(BUTTON_SETTINGS, "Settings", 0.0, 50.0, 200.0, 50.0)
+    let settings_btn = Button::new(BUTTON_SETTINGS, "Settings", 0.0, 50.0, 200.0, 50.0)
         .with_anchor(Anchor::Center);
-    settings_btn.hovered = ui_state.hovered_button == Some(BUTTON_SETTINGS);
-    canvas.draw_button(&settings_btn);
+    canvas.draw_button(&settings_btn, ui_state.hovered_button);
 
     // Quit button
-    let mut quit_btn = Button::new(BUTTON_QUIT, "Quit", 0.0, 110.0, 200.0, 50.0)
+    let quit_btn = Button::new(BUTTON_QUIT, "Quit", 0.0, 110.0, 200.0, 50.0)
         .with_anchor(Anchor::Center);
-    quit_btn.hovered = ui_state.hovered_button == Some(BUTTON_QUIT);
-    canvas.draw_button(&quit_btn);
+    canvas.draw_button(&quit_btn, ui_state.hovered_button);
 }
 
-/// Draw pause menu with proper font rendering
+/// Draw the default pause menu using the provided font atlas
 pub fn draw_pause_menu_with_font(canvas: &mut UiCanvas, ui_state: &UiState, font: &crate::ui::font::FontAtlas) {
     let screen = canvas.screen_size;
-    
+
     // Semi-transparent background overlay
     // Use the white pixel in the font atlas (at 1,1 in our 2x2 white block)
     let uv_white = Vec2::new(1.0 / 512.0, 1.0 / 512.0);
@@ -983,13 +991,14 @@ pub fn draw_pause_menu_with_font(canvas: &mut UiCanvas, ui_state: &UiState, font
         [0.0, 0.0, 0.0, 0.6],
     );
 
-    // Centered panel
     let panel_width = 400.0;
     let panel_height = 300.0;
+    
+    // Background panel
     let panel = Panel::centered(panel_width, panel_height)
         .with_color(0.1, 0.12, 0.18, 0.95)
         .with_corner_radius(16.0);
-    canvas.draw_panel(&panel);
+    canvas.draw_panel_with_font(&panel, font, ui_state.hovered_button);
 
     // Title - offset upward from center
     let title = Text::centered("PAUSED")
@@ -1001,25 +1010,22 @@ pub fn draw_pause_menu_with_font(canvas: &mut UiCanvas, ui_state: &UiState, font
     canvas.draw_text_with_font(&title_positioned, font);
 
     // Resume button
-    let mut resume_btn = Button::new(BUTTON_RESUME, "Resume", 0.0, -10.0, 200.0, 50.0)
+    let resume_btn = Button::new(BUTTON_RESUME, "Resume", 0.0, -10.0, 200.0, 50.0)
         .with_anchor(Anchor::Center)
         .with_callback("on_resume_clicked");
-    resume_btn.hovered = ui_state.hovered_button == Some(BUTTON_RESUME);
-    canvas.draw_button_with_font(&resume_btn, font);
+    canvas.draw_button_with_font(&resume_btn, font, ui_state.hovered_button);
 
     // Settings button
-    let mut settings_btn = Button::new(BUTTON_SETTINGS, "Settings", 0.0, 50.0, 200.0, 50.0)
+    let settings_btn = Button::new(BUTTON_SETTINGS, "Settings", 0.0, 50.0, 200.0, 50.0)
         .with_anchor(Anchor::Center)
         .with_callback("on_settings_clicked");
-    settings_btn.hovered = ui_state.hovered_button == Some(BUTTON_SETTINGS);
-    canvas.draw_button_with_font(&settings_btn, font);
+    canvas.draw_button_with_font(&settings_btn, font, ui_state.hovered_button);
 
     // Quit button
-    let mut quit_btn = Button::new(BUTTON_QUIT, "Quit", 0.0, 110.0, 200.0, 50.0)
+    let quit_btn = Button::new(BUTTON_QUIT, "Quit", 0.0, 110.0, 200.0, 50.0)
         .with_anchor(Anchor::Center)
         .with_callback("on_quit_clicked");
-    quit_btn.hovered = ui_state.hovered_button == Some(BUTTON_QUIT);
-    canvas.draw_button_with_font(&quit_btn, font);
+    canvas.draw_button_with_font(&quit_btn, font, ui_state.hovered_button);
 }
 
 /// Check which pause menu button is under the pointer, returning (id, callback_name)
@@ -1041,7 +1047,7 @@ pub fn get_hovered_pause_button(pointer: Vec2, screen_size: Vec2) -> Option<(u32
     ];
 
     for btn in &buttons {
-        if btn.contains(processed_pointer, screen_size) {
+        if btn.contains(processed_pointer, screen_size, None) {
             return Some((btn.id, btn.on_click.clone()));
         }
     }

@@ -1163,15 +1163,29 @@ impl GameWorld {
                 SceneUpdate::MenuLoad { alias } => {
                     // Push the current menu (if any) and show the new one
                     info!("MenuLoad: Loading menu '{}'", alias);
+                    
+                    // Check if the target menu is an IntermediateMenu - if so, hide the pause menu
+                    let custom_layer = crate::ui::UiLayer::Custom(alias.clone());
+                    if let Some(layout) = self.ui_layers.get_layer(&custom_layer) {
+                        if layout.layer_type == crate::ui::UiLayerType::IntermediateMenu {
+                            self.ui_layers.hide(&crate::ui::UiLayer::PauseMenu);
+                        }
+                    }
+                    
                     self.menu_stack.push(&alias);
                     // Show the menu as a Custom layer
-                    self.ui_layers.show(crate::ui::UiLayer::Custom(alias));
+                    self.ui_layers.show(custom_layer);
                 }
                 SceneUpdate::MenuBack => {
                     // Pop the current menu and go back to the previous one
                     if let Some(current) = self.menu_stack.pop() {
                         info!("MenuBack: Closing menu '{}'", current);
                         self.ui_layers.hide(&crate::ui::UiLayer::Custom(current));
+                        
+                        // If menu stack is now empty, restore the pause menu
+                        if self.menu_stack.is_empty() {
+                            self.ui_layers.show(crate::ui::UiLayer::PauseMenu);
+                        }
                     } else {
                         info!("MenuBack: No menu to go back from");
                     }
@@ -1393,6 +1407,59 @@ impl GameWorld {
     }
 
     fn dispatch_ui_event(&mut self, physics: &mut PhysicsWorld, event: &crate::ui::UiEvent) {
+        // First, check if callback is a built-in engine command
+        if let crate::ui::UiEvent::ButtonClicked { callback, .. } = event {
+            // Parse menu_load("alias") pattern
+            if callback.starts_with("menu_load(") && callback.ends_with(")") {
+                let inner = &callback[10..callback.len()-1];
+                // Extract alias from quotes (single or double)
+                let alias = inner.trim().trim_matches(|c| c == '"' || c == '\'');
+                if !alias.is_empty() {
+                    info!("Built-in menu_load: Loading menu '{}'", alias);
+                    
+                    // Check if the target menu is an IntermediateMenu - if so, hide the pause menu
+                    // so the intermediate menu appears on its own (not overlayed)
+                    let custom_layer = crate::ui::UiLayer::Custom(alias.to_string());
+                    if let Some(layout) = self.ui_layers.get_layer(&custom_layer) {
+                        info!("menu_load: Found layer '{}' with type {:?}", alias, layout.layer_type);
+                        if layout.layer_type == crate::ui::UiLayerType::IntermediateMenu {
+                            // Hide the pause menu while the intermediate menu is shown
+                            info!("menu_load: Hiding PauseMenu for IntermediateMenu");
+                            self.ui_layers.hide(&crate::ui::UiLayer::PauseMenu);
+                        }
+                    } else {
+                        info!("menu_load: Layer '{}' NOT FOUND in ui_layers", alias);
+                    }
+                    
+                    self.menu_stack.push(alias);
+                    self.ui_layers.show(custom_layer);
+                    info!("menu_load: Showing layer '{}', menu_stack depth: {}", alias, self.menu_stack.depth());
+                    return; // Don't pass to scripts
+                }
+            }
+            // Parse menu_back() pattern
+            if callback == "menu_back()" || callback == "menu_back" {
+                if let Some(current) = self.menu_stack.pop() {
+                    info!("Built-in menu_back: Closing menu '{}'", current);
+                    self.ui_layers.hide(&crate::ui::UiLayer::Custom(current));
+                    
+                    // If menu stack is now empty and we're still paused, restore the pause menu
+                    if self.menu_stack.is_empty() {
+                        self.ui_layers.show(crate::ui::UiLayer::PauseMenu);
+                    }
+                }
+                return;
+            }
+            // Parse resume() pattern - unpause the game
+            if callback == "resume()" || callback == "resume" {
+                // This would require passing state back to main loop - for now just hide pause menu
+                info!("Built-in resume: Player wants to resume game");
+                // The pause state is managed in main.rs, but we can at least hide the menu
+                return;
+            }
+        }
+        
+        // Then pass to scripts for custom callbacks
         let entities: Vec<Entity> = self.ecs.query::<&DynamicScript>()
             .iter()
             .map(|(e, _)| e)
