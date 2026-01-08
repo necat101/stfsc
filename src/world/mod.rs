@@ -7,6 +7,8 @@ use crate::physics::PhysicsWorld;
 
 pub mod scripting;
 pub mod fbx_loader;
+pub mod animation;
+pub mod gltf_loader;
 use scripting::{FuckScript, ScriptContext, ScriptRegistry};
 
 pub struct GameWorld {
@@ -96,6 +98,53 @@ pub struct Vertex {
     pub uv: [f32; 2],
     pub color: [f32; 3],
     pub tangent: [f32; 4], // xyz + w (handedness)
+    /// Bone indices for skeletal animation (up to 4 influences per vertex)
+    #[serde(default)]
+    pub bone_indices: [u32; 4],
+    /// Bone weights for skeletal animation (normalized, sum to 1.0)
+    #[serde(default = "Vertex::default_bone_weights")]
+    pub bone_weights: [f32; 4],
+}
+
+impl Vertex {
+    /// Default bone weights (first bone gets full weight for static meshes)
+    fn default_bone_weights() -> [f32; 4] {
+        [1.0, 0.0, 0.0, 0.0]
+    }
+
+    /// Create a vertex with no bone influence (for static meshes)
+    pub fn new_static(position: [f32; 3], normal: [f32; 3], uv: [f32; 2], color: [f32; 3], tangent: [f32; 4]) -> Self {
+        Self {
+            position,
+            normal,
+            uv,
+            color,
+            tangent,
+            bone_indices: [0, 0, 0, 0],
+            bone_weights: [1.0, 0.0, 0.0, 0.0],
+        }
+    }
+
+    /// Create a skinned vertex with bone influences
+    pub fn new_skinned(
+        position: [f32; 3],
+        normal: [f32; 3],
+        uv: [f32; 2],
+        color: [f32; 3],
+        tangent: [f32; 4],
+        bone_indices: [u32; 4],
+        bone_weights: [f32; 4],
+    ) -> Self {
+        Self {
+            position,
+            normal,
+            uv,
+            color,
+            tangent,
+            bone_indices,
+            bone_weights,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1729,6 +1778,8 @@ pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
                 uv,
                 color: [1.0, 1.0, 1.0],
                 tangent,
+                bone_indices: [0, 0, 0, 0],
+                bone_weights: [1.0, 0.0, 0.0, 0.0],
             });
         }
 
@@ -1896,6 +1947,8 @@ pub fn create_primitive(ptype: u8) -> Mesh {
             uv,
             color: [1.0, 1.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            bone_indices: [0, 0, 0, 0],
+            bone_weights: [1.0, 0.0, 0.0, 0.0],
         }
     }
 
@@ -2099,6 +2152,8 @@ pub fn create_primitive(ptype: u8) -> Mesh {
                 uv: v.uv,
                 color: v.color,
                 tangent: v.tangent,
+                bone_indices: [0, 0, 0, 0],
+                bone_weights: [1.0, 0.0, 0.0, 0.0],
             })
             .collect(),
         indices,
