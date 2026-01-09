@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn test_light_ubo_capacity() {
         let mut ubo = LightUBO::new();
-        for i in 0..MAX_LIGHTS {
+        for _i in 0..MAX_LIGHTS {
             assert!(ubo.add_light(GpuLightData::default()));
         }
         assert!(!ubo.add_light(GpuLightData::default())); // Should fail

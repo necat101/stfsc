@@ -1,4 +1,5 @@
 use glam;
+use rapier3d;
 use hecs::{World, Entity};
 use log::{info, warn};
 use std::sync::Arc;
@@ -10,6 +11,7 @@ pub mod fbx_loader;
 pub mod animation;
 pub mod gltf_loader;
 use scripting::{FuckScript, ScriptContext, ScriptRegistry};
+use animation::{Animator, AnimationState, AnimatorController, AnimationEventQueue};
 
 pub struct GameWorld {
     pub ecs: World,
@@ -32,6 +34,8 @@ pub struct GameWorld {
     pub ui_layers: crate::ui::UiLayerSet,
     /// Menu navigation stack for intermediate menus
     pub menu_stack: crate::ui::MenuStack,
+    /// Flag for main.rs to check and release cursor when returning to pause menu
+    pub cursor_should_release: bool,
 }
 
 pub struct ChunkData {
@@ -623,6 +627,7 @@ impl GameWorld {
             pending_ui_events: Vec::new(),
             ui_layers: crate::ui::UiLayerSet::new(),
             menu_stack: crate::ui::MenuStack::new(),
+            cursor_should_release: false,
         };
         // world.spawn_default_scene(); // Moved to streaming logic or separate init
         world
@@ -1182,7 +1187,14 @@ impl GameWorld {
                 }
                 SceneUpdate::SetUiLayer { layer, layout } => {
                     info!("Setting UI layer {:?}", layer);
-                    self.ui_layers.set_layer(layer, layout);
+                    let should_show = matches!(layout.layer_type, 
+                        crate::ui::UiLayerType::InGameOverlay | crate::ui::UiLayerType::MainMenu);
+                    
+                    self.ui_layers.set_layer(layer.clone(), layout);
+                    
+                    if should_show {
+                        self.ui_layers.show(layer);
+                    }
                 }
                 SceneUpdate::ShowUiLayer { layer } => {
                     info!("Showing UI layer {:?}", layer);
@@ -1259,11 +1271,115 @@ impl GameWorld {
         // self.request_chunk(1);
     }
 
+    /// Update all animated entities - ticks Animator components and uploads bone matrices
+    /// Call this each frame to advance skeletal animations
+    pub fn update_animations(&mut self, physics: &mut PhysicsWorld, dt: f32) {
+        // Collect entities with Animator
+        let entities: Vec<hecs::Entity> = self.ecs
+            .query::<&Animator>()
+            .iter()
+            .map(|(e, _)| e)
+            .collect();
+
+        for entity in entities {
+            let mut params = std::collections::HashMap::new();
+
+            // 1. Process AnimatorController (if present) to drive state machine
+            if let Ok(mut controller) = self.ecs.get::<&mut AnimatorController>(entity) {
+                if controller.enabled {
+                    // Evaluate state machine for transitions
+                    if let Some((resource, blend_duration)) = controller.state_machine.evaluate() {
+                        // If entity also has an Animator, crossfade to new resource
+                        if let Ok(mut animator) = self.ecs.get::<&mut Animator>(entity) {
+                            animator.crossfade_to(resource, blend_duration);
+                        }
+                    }
+                    // Copy parameters for blend tree evaluation
+                    params = controller.state_machine.parameters.clone();
+                }
+            }
+
+            // 2. Update Animator (low-level playback and blending)
+            let matrices = if let Ok(mut animator) = self.ecs.get::<&mut Animator>(entity) {
+                let speed_mult = if let Ok(controller) = self.ecs.get::<&AnimatorController>(entity) {
+                    controller.speed
+                } else {
+                    1.0
+                };
+                
+                // Fetch event queue if present
+                let mut queue = self.ecs.get::<&mut AnimationEventQueue>(entity).ok();
+
+                // Use controller-global speed multiplier if present
+                let old_speed = animator.speed;
+                animator.speed *= speed_mult;
+                let m = animator.update_with_params(dt, &params, &mut queue);
+                animator.speed = old_speed;
+                Some(m)
+            } else {
+                None
+            };
+
+            // 3. Update AnimationState (GPU matrix buffer)
+            if let Some(matrices) = matrices {
+                if let Ok(mut anim_state) = self.ecs.get::<&mut AnimationState>(entity) {
+                    anim_state.update_from(matrices);
+                }
+            }
+
+            // 4. Apply Root Motion (if enabled)
+            let apply_rm = if let Ok(controller) = self.ecs.get::<&AnimatorController>(entity) {
+                controller.apply_root_motion
+            } else {
+                false
+            };
+
+            if apply_rm {
+                if let Ok(mut animator) = self.ecs.get::<&mut Animator>(entity) {
+                    if animator.root_motion.has_motion {
+                        let delta_pos = animator.root_motion.delta_position;
+                        let delta_rot = animator.root_motion.delta_rotation;
+
+                        // Apply to Transform
+                        if let Ok(mut transform) = self.ecs.get::<&mut Transform>(entity) {
+                            // Rotate position delta by current character rotation
+                            let rotated_delta = transform.rotation * delta_pos;
+                            transform.position += rotated_delta;
+                            transform.rotation = transform.rotation * delta_rot;
+
+                            // Apply to RigidBody (if present)
+                            if let Ok(rb_handle) = self.ecs.get::<&RigidBodyHandle>(entity) {
+                                if let Some(body) = physics.rigid_body_set.get_mut(rb_handle.0) {
+                                    // Teleport physics body to match transform (for kinematic-like RM)
+                                    // Alternatively, apply as velocity if preferred
+                                    let p = transform.position;
+                                    let r = transform.rotation;
+                                    body.set_next_kinematic_translation(rapier3d::na::Vector3::new(p.x, p.y, p.z));
+                                    body.set_next_kinematic_rotation(rapier3d::na::UnitQuaternion::from_quaternion(
+                                        rapier3d::na::Quaternion::new(r.w, r.x, r.y, r.z)
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clear animation event queues at end of frame
+        for (_, queue) in self.ecs.query::<&mut AnimationEventQueue>().iter() {
+            queue.clear();
+        }
+    }
+
     pub fn update_logic(&mut self, physics: &mut PhysicsWorld, dt: f32, ui_events: Vec<crate::ui::UiEvent>) {
         // 0. Process UI Events
         for event in &ui_events {
             self.dispatch_ui_event(physics, event);
         }
+
+        // 0.5 Update Animations - tick all skeletal animators
+        self.update_animations(physics, dt);
 
         // 1. Process Collision Events
         let collision_events = {
@@ -1304,7 +1420,20 @@ impl GameWorld {
 
             if let Some(mut s) = script {
                 if enabled {
+                    // Check for animation events to dispatch
+                    let anim_events: Vec<String> = if let Ok(queue) = self.ecs.get::<&AnimationEventQueue>(entity) {
+                        queue.events.iter().map(|e| e.name.clone()).collect()
+                    } else {
+                        Vec::new()
+                    };
+
                     let mut ctx = ScriptContext::new(entity, &mut self.ecs, physics, dt);
+
+                    // Dispatch animation events
+                    for event_name in anim_events {
+                        s.on_animation_event(&mut ctx, &event_name);
+                    }
+
                     if !started {
                         s.on_start(&mut ctx);
                         s.on_enable(&mut ctx);
@@ -1457,14 +1586,28 @@ impl GameWorld {
 
     fn dispatch_ui_event(&mut self, physics: &mut PhysicsWorld, event: &crate::ui::UiEvent) {
         // First, check if callback is a built-in engine command
-        if let crate::ui::UiEvent::ButtonClicked { callback, .. } = event {
-            // Parse menu_load("alias") pattern
+        let crate::ui::UiEvent::ButtonClicked { callback, .. } = event;
+        // Parse menu_load("alias") pattern
             if callback.starts_with("menu_load(") && callback.ends_with(")") {
                 let inner = &callback[10..callback.len()-1];
                 // Extract alias from quotes (single or double)
                 let alias = inner.trim().trim_matches(|c| c == '"' || c == '\'');
                 if !alias.is_empty() {
                     info!("Built-in menu_load: Loading menu '{}'", alias);
+                    
+                    // Special case: "main" or "pause" means go back to the pause menu
+                    if alias == "main" || alias == "pause" {
+                        info!("menu_load: '{}' -> showing PauseMenu", alias);
+                        // Hide all intermediate menus and clear the stack
+                        while let Some(current) = self.menu_stack.pop() {
+                            self.ui_layers.hide(&crate::ui::UiLayer::Custom(current));
+                        }
+                        // Show the pause menu
+                        self.ui_layers.show(crate::ui::UiLayer::PauseMenu);
+                        // Signal main.rs to release cursor (we're returning to pause menu)
+                        self.cursor_should_release = true;
+                        return;
+                    }
                     
                     // Check if the target menu is an IntermediateMenu - if so, hide the pause menu
                     // so the intermediate menu appears on its own (not overlayed)
@@ -1495,6 +1638,7 @@ impl GameWorld {
                     // If menu stack is now empty and we're still paused, restore the pause menu
                     if self.menu_stack.is_empty() {
                         self.ui_layers.show(crate::ui::UiLayer::PauseMenu);
+                        self.cursor_should_release = true;
                     }
                 }
                 return;
@@ -1506,7 +1650,12 @@ impl GameWorld {
                 // The pause state is managed in main.rs, but we can at least hide the menu
                 return;
             }
-        }
+            // Parse quit() pattern - exit the game
+            if callback == "quit()" || callback == "quit" {
+                info!("Built-in quit: Player wants to quit game");
+                // Quit is handled in main.rs via the callback check - just return here
+                return;
+            }
         
         // Then pass to scripts for custom callbacks
         let entities: Vec<Entity> = self.ecs.query::<&DynamicScript>()

@@ -82,12 +82,38 @@ pub struct BoneKeyframes {
     pub scale_keys: Vec<(f32, glam::Vec3)>,
 }
 
+/// Discrete event that occurs at a specific time during an animation
+#[derive(Clone, Debug)]
+pub struct AnimationEvent {
+    /// Time in seconds from clip start when event fires
+    pub time: f32,
+    /// Event name/identifier (e.g., "footstep", "attack_hit")
+    pub name: String,
+    /// Optional parameters
+    pub string_param: Option<String>,
+    pub float_param: Option<f32>,
+    pub int_param: Option<i32>,
+}
+
+impl AnimationEvent {
+    pub fn new(time: f32, name: &str) -> Self {
+        Self {
+            time,
+            name: name.to_string(),
+            string_param: None,
+            float_param: None,
+            int_param: None,
+        }
+    }
+}
+
 /// Animation clip with keyframes for all bones
 #[derive(Clone, Debug)]
 pub struct AnimationClip {
     pub name: String,
     pub duration: f32,
     pub channels: Vec<BoneKeyframes>,
+    pub events: Vec<AnimationEvent>,
 }
 
 impl AnimationClip {
@@ -97,10 +123,30 @@ impl AnimationClip {
             name: name.to_string(),
             duration,
             channels: Vec::new(),
+            events: Vec::new(),
         }
     }
     
-    /// Sample the animation at a given time, returning bone transforms
+    /// Sample a specific bone's transform at a given time
+    pub fn sample_bone(&self, bone_index: usize, time: f32) -> (glam::Vec3, glam::Quat, glam::Vec3) {
+        let t = if self.duration > 0.0 {
+            time % self.duration
+        } else {
+            0.0
+        };
+
+        for channel in &self.channels {
+            if channel.bone_index == bone_index {
+                let pos = self.sample_vec3(&channel.position_keys, t, glam::Vec3::ZERO);
+                let rot = self.sample_quat(&channel.rotation_keys, t);
+                let scale = self.sample_vec3(&channel.scale_keys, t, glam::Vec3::ONE);
+                return (pos, rot, scale);
+            }
+        }
+
+        (glam::Vec3::ZERO, glam::Quat::IDENTITY, glam::Vec3::ONE)
+    }
+
     pub fn sample(&self, time: f32, skeleton: &Skeleton) -> Vec<glam::Mat4> {
         let mut transforms = vec![glam::Mat4::IDENTITY; skeleton.bones.len()];
         let t = if self.duration > 0.0 {

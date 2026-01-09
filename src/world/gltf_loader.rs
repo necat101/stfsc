@@ -371,6 +371,7 @@ fn read_animation_clip(cursor: &mut Cursor<&[u8]>) -> Result<AnimationClip> {
         name,
         duration,
         channels,
+        events: Vec::new(),
     })
 }
 

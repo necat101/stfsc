@@ -1,0 +1,29 @@
+warning: method `sample_clip` is never used
+   --> src/world/animation.rs:256:8
+    |
+67  | impl Animator {
+    | ------------- method in this implementation
+...
+256 |     fn sample_clip(&s...
+    |        ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `stfsc_engine` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.39s
+     Running unittests src/lib.rs (target/debug/deps/stfsc_engine-8cc89b81b32cd47c)
+
+running 10 tests
+test world::animation::tests::test_animation_state_gpu_buffer ... ok
+test world::animation::tests::test_animator_controller_params ... ok
+test world::animation::tests::test_animation_events ... ok
+test world::animation::tests::test_blend_poses_identity ... ok
+test world::animation::tests::test_blend_tree_1d_creation ... ok
+test world::animation::tests::test_blend_tree_2d_creation ... ok
+test world::animation::tests::test_state_machine_add_state ... ok
+test world::fbx_loader::tests::test_animation_keyframe_interpolation ... ok
+test world::fbx_loader::tests::test_animation_sample_empty ... ok
+test world::animation::tests::test_state_machine_transition ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+

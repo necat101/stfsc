@@ -1,0 +1,20 @@
+warning: method `sample_clip` is never used
+   --> src/world/animation.rs:256:8
+    |
+67  | impl Animator {
+    | ------------- method in this implementation
+...
+256 |     fn sample_clip(&s...
+    |        ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `stfsc_engine` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
+     Running unittests src/lib.rs (target/debug/deps/stfsc_engine-8cc89b81b32cd47c)
+
+running 1 test
+test world::animation::tests::test_animation_events ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+

@@ -397,7 +397,8 @@ impl UiLayerSet {
     }
     
     /// Get all visible layers in render order (Hud first, PauseMenu last)
-    pub fn visible_layers(&self) -> Vec<&UiLayout> {
+    /// If menu_stack is provided, custom layers are ordered by their stack position
+    pub fn visible_layers(&self, menu_stack: Option<&MenuStack>) -> Vec<&UiLayout> {
         let mut result = Vec::new();
         // Render order: Hud -> Custom -> MainMenu -> PauseMenu (pause on top)
         if self.is_visible(&UiLayer::Hud) {
@@ -405,14 +406,28 @@ impl UiLayerSet {
                 result.push(layout);
             }
         }
-        // Custom layers
-        for (layer, layout) in &self.layers {
-            if let UiLayer::Custom(_) = layer {
-                if self.is_visible(layer) {
-                    result.push(layout);
+        
+        // Custom layers - order by menu stack if possible
+        if let Some(stack) = menu_stack {
+            for alias in stack.iter() {
+                let layer = UiLayer::Custom(alias.clone());
+                if self.is_visible(&layer) {
+                    if let Some(layout) = self.layers.get(&layer) {
+                        result.push(layout);
+                    }
+                }
+            }
+        } else {
+            // Fallback to undefined order if no stack provided
+            for (layer, layout) in &self.layers {
+                if let UiLayer::Custom(_) = layer {
+                    if self.is_visible(layer) {
+                        result.push(layout);
+                    }
                 }
             }
         }
+
         if self.is_visible(&UiLayer::MainMenu) {
             if let Some(layout) = self.layers.get(&UiLayer::MainMenu) {
                 result.push(layout);
@@ -425,20 +440,20 @@ impl UiLayerSet {
         }
         result
     }
-    
+
     /// Check if any visible layer should pause the game
-    pub fn should_pause_game(&self) -> bool {
-        for layout in self.visible_layers() {
+    pub fn should_pause_game(&self, menu_stack: Option<&MenuStack>) -> bool {
+        for layout in self.visible_layers(menu_stack) {
             if layout.pauses_game || layout.layer_type == UiLayerType::PauseOverlay {
                 return true;
             }
         }
         false
     }
-    
+
     /// Check if any visible layer should block game input
-    pub fn should_block_input(&self) -> bool {
-        for layout in self.visible_layers() {
+    pub fn should_block_input(&self, menu_stack: Option<&MenuStack>) -> bool {
+        for layout in self.visible_layers(menu_stack) {
             if layout.blocks_input || matches!(layout.layer_type, UiLayerType::PauseOverlay | UiLayerType::MainMenu) {
                 return true;
             }
@@ -496,6 +511,11 @@ impl MenuStack {
     /// Get stack depth (for debugging)
     pub fn depth(&self) -> usize {
         self.stack.len()
+    }
+
+    /// Iterate through the stack from bottom to top
+    pub fn iter(&self) -> std::slice::Iter<String> {
+        self.stack.iter()
     }
 }
 
@@ -910,13 +930,13 @@ pub fn create_default_pause_menu_layout() -> UiLayout {
     // Resume button
     let resume_btn = Button::new(BUTTON_RESUME, "Resume", 0.0, -10.0, 200.0, 50.0)
         .with_anchor(Anchor::Center)
-        .with_callback("on_resume_clicked");
+        .with_callback("resume()");
     layout.buttons.push(resume_btn);
     
     // Settings button
     let settings_btn = Button::new(BUTTON_SETTINGS, "Settings", 0.0, 50.0, 200.0, 50.0)
         .with_anchor(Anchor::Center)
-        .with_callback("on_settings_clicked");
+        .with_callback("menu_load(\"settings\")");
     layout.buttons.push(settings_btn);
     
     // Quit button
@@ -1012,13 +1032,13 @@ pub fn draw_pause_menu_with_font(canvas: &mut UiCanvas, ui_state: &UiState, font
     // Resume button
     let resume_btn = Button::new(BUTTON_RESUME, "Resume", 0.0, -10.0, 200.0, 50.0)
         .with_anchor(Anchor::Center)
-        .with_callback("on_resume_clicked");
+        .with_callback("resume()");
     canvas.draw_button_with_font(&resume_btn, font, ui_state.hovered_button);
 
     // Settings button
     let settings_btn = Button::new(BUTTON_SETTINGS, "Settings", 0.0, 50.0, 200.0, 50.0)
         .with_anchor(Anchor::Center)
-        .with_callback("on_settings_clicked");
+        .with_callback("menu_load(\"settings\")");
     canvas.draw_button_with_font(&settings_btn, font, ui_state.hovered_button);
 
     // Quit button
@@ -1037,13 +1057,13 @@ pub fn get_hovered_pause_button(pointer: Vec2, screen_size: Vec2) -> Option<(u32
     let buttons = [
         Button::new(BUTTON_RESUME, "Resume", 0.0, -10.0, 200.0, 50.0)
             .with_anchor(Anchor::Center)
-            .with_callback("on_resume_clicked"),
+            .with_callback("resume()"),
         Button::new(BUTTON_SETTINGS, "Settings", 0.0, 50.0, 200.0, 50.0)
             .with_anchor(Anchor::Center)
-            .with_callback("on_settings_clicked"),
+            .with_callback("menu_load(\"settings\")"),
         Button::new(BUTTON_QUIT, "Quit", 0.0, 110.0, 200.0, 50.0)
             .with_anchor(Anchor::Center)
-            .with_callback("on_quit_clicked"),
+            .with_callback("quit()"),
     ];
 
     for btn in &buttons {
