@@ -597,14 +597,12 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                     let player_ent = state.player_entity;
                     if let Ok(mut t) = state.world.ecs.get::<&mut world::Transform>(player_ent) {
                         t.position = player_pos;
-                        // For VR, the rotation is handled by the head pose, but we can sync it here if we had orientation in GameState
                     }
 
-                    state.world.update_streaming(player_pos);
+                    state.world.update_streaming(player_pos, &mut state.physics);
                     
-                    let world = &mut state.world;
-                    let physics = &mut state.physics;
-                    world.update_logic(physics, 0.016);
+                    let ui_events = std::mem::take(&mut state.world.pending_ui_events);
+                    state.world.update_logic(&mut state.physics, 0.016, ui_events);
                 }
             }
             // Yield to render thread
@@ -645,12 +643,19 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             }
             // Apply physics updates with short write lock
             if !physics_updates.is_empty() {
-                if let Ok(state) = game_state_thread.try_write() {
+                if let Ok(mut state) = game_state_thread.try_write() {
                     for (id, pos, rot) in physics_updates {
                         if let Ok(mut transform) = state.world.ecs.get::<&mut world::Transform>(id)
                         {
                             transform.position = pos;
                             transform.rotation = rot;
+                        }
+                        // Update local transform too if not parented
+                        if let Ok(mut lt) = state.world.ecs.get::<&mut world::LocalTransform>(id) {
+                            if state.world.ecs.get::<&world::Hierarchy>(id).is_err() {
+                                lt.position = pos;
+                                lt.rotation = rot;
+                            }
                         }
                     }
                 }

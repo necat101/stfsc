@@ -96,11 +96,17 @@ impl ResourceLoader {
                         // Handle Albedo Texture
                         let mut albedo_texture = None;
                         if let Some(decoded) = &mesh.decoded_albedo {
+                            // Use pre-decoded texture
                             if let Ok(tex) = graphics_context.create_texture_from_raw(
                                 decoded.width,
                                 decoded.height,
                                 &decoded.data,
                             ) {
+                                albedo_texture = Some(tex);
+                            }
+                        } else if let Some(raw_bytes) = &mesh.albedo {
+                            // Decode raw PNG/JPG bytes on the fly
+                            if let Ok(tex) = graphics_context.create_texture_from_bytes(raw_bytes) {
                                 albedo_texture = Some(tex);
                             }
                         }

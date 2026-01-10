@@ -1,27 +1,858 @@
 //! Custom Animation Model Loader for STFSC Engine
 //!
-//! Provides skeletal animation model loading via custom binary format (.sanim)
-//! and OBJ conversion for static meshes.
+//! Provides skeletal animation model loading via:
+//! - glTF 2.0 format (.gltf, .glb) with full animation support
+//! - Custom binary format (.sanim) for optimized loading
+//! - OBJ conversion for static meshes
 //!
-//! # Workflow for Animated Models
+//! # Workflow for Animated Models (Recommended: glTF)
 //! 1. Create your animated model in Blender with skeleton + animations
-//! 2. Export using the STFSC Blender addon (creates .sanim file)
-//! 3. Load with `load_animated_model()` in the engine
+//! 2. Export as glTF 2.0 Binary (.glb) - best compatibility
+//! 3. Load with `load_gltf_with_animations()` in the engine
 //!
-//! This avoids gltf crate dependency issues while providing full animation support.
+//! # Alternative: SANIM Format
+//! For optimized loading, use the STFSC Blender addon to export .sanim files.
 
 use crate::world::{Mesh, Vertex};
 use crate::world::fbx_loader::{
-    AnimationClip, BoneKeyframes, ModelScene, Skeleton, SkinnedMesh,
+    AnimationClip, BoneKeyframes, ModelScene, Skeleton, SkinnedMesh, EmbeddedTexture,
 };
 use anyhow::{anyhow, Context, Result};
 use glam::{Mat4, Quat, Vec3};
 use std::io::{Read, Cursor};
+use std::collections::HashMap;
 
 /// Magic bytes for STFSC animation format: "SANM"
 const MAGIC: [u8; 4] = [0x53, 0x41, 0x4E, 0x4D];
 /// Current format version
 const VERSION: u32 = 1;
+
+// ============================================================================
+// glTF 2.0 Loader with Animation Support (Manual Parser using serde_json)
+// ============================================================================
+
+use serde_json::Value;
+
+/// Load a glTF/GLB file with full skeleton and animation extraction
+/// 
+/// This is the recommended way to import animated models.
+/// Supports .glb (binary, all-in-one) format.
+pub fn load_gltf_with_animations(data: &[u8]) -> Result<ModelScene> {
+    // Detect if this is GLB (binary) or JSON glTF
+    let (json_data, bin_data) = if data.len() >= 12 && &data[0..4] == b"glTF" {
+        // GLB format
+        parse_glb(data)?
+    } else {
+        // Plain JSON glTF
+        (String::from_utf8_lossy(data).to_string(), Vec::new())
+    };
+    
+    let gltf: Value = serde_json::from_str(&json_data)
+        .context("Failed to parse glTF JSON")?;
+    
+    let mut scene = ModelScene::new();
+    let mut joint_to_bone_index: HashMap<usize, usize> = HashMap::new();
+    
+    // Load buffers
+    let buffers = load_gltf_buffers_manual(&gltf, &bin_data)?;
+    
+    // Extract skeleton from skins
+    if let Some(skins) = gltf.get("skins").and_then(|s| s.as_array()) {
+        if let Some(skin) = skins.first() {
+            let mut skeleton = Skeleton::new();
+            
+            // Get joints array
+            if let Some(joints) = skin.get("joints").and_then(|j| j.as_array()) {
+                // Get inverse bind matrices if available
+                let inverse_bind_matrices = if let Some(accessor_idx) = skin.get("inverseBindMatrices").and_then(|i| i.as_u64()) {
+                    read_accessor_mat4_manual(&gltf, accessor_idx as usize, &buffers)?
+                } else {
+                    vec![Mat4::IDENTITY; joints.len()]
+                };
+                
+                // Add each joint as a bone
+                for (i, joint_idx) in joints.iter().enumerate() {
+                    let joint_idx = joint_idx.as_u64().unwrap_or(0) as usize;
+                    
+                    // Get node for this joint
+                    let nodes = gltf.get("nodes").and_then(|n| n.as_array());
+                    let node = nodes.and_then(|n| n.get(joint_idx));
+                    
+                    let name = node
+                        .and_then(|n| n.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or(&format!("bone_{}", joint_idx))
+                        .to_string();
+                    
+                    // Get local transform from node
+                    let local_transform = get_node_transform(node);
+                    
+                    // Find parent
+                    let parent = find_joint_parent_manual(&gltf, joint_idx, &joint_to_bone_index);
+                    
+                    let inverse_bind = inverse_bind_matrices.get(i).copied().unwrap_or(Mat4::IDENTITY);
+                    
+                    let bone_index = skeleton.add_bone(name, parent, inverse_bind, local_transform);
+                    joint_to_bone_index.insert(joint_idx, bone_index);
+                }
+            }
+            
+            scene.skeleton = Some(skeleton);
+        }
+    }
+    
+    // Extract animations
+    if let Some(animations) = gltf.get("animations").and_then(|a| a.as_array()) {
+        for animation in animations {
+            if let Ok(clip) = extract_animation_manual(&gltf, animation, &buffers, &joint_to_bone_index) {
+                scene.animations.push(clip);
+            }
+        }
+    }
+    
+    // NEW: Extract images and materials
+    let texture_data = extract_images_manual(&gltf, &buffers);
+    scene.textures = texture_data.clone();
+    let texture_names: Vec<String> = texture_data.iter().map(|t| t.name.clone()).collect();
+    
+    let mat_tex_indices = extract_materials_manual(&gltf);
+    let tex_img_indices = extract_texture_source_indices(&gltf);
+    
+    // Re-extract meshes with material info
+    scene.meshes.clear();
+    scene.skinned_meshes.clear();
+    if let Some(meshes) = gltf.get("meshes").and_then(|m| m.as_array()) {
+        for mesh in meshes {
+            if let Some(primitives) = mesh.get("primitives").and_then(|p| p.as_array()) {
+                for primitive in primitives {
+                    if let Ok(mut mesh_data) = extract_primitive_mesh_manual(&gltf, primitive, &buffers, &texture_names, &mat_tex_indices, &tex_img_indices) {
+                        // Check for skinning data
+                        let attributes = primitive.get("attributes");
+                        let has_joints = attributes.and_then(|a| a.get("JOINTS_0")).is_some();
+                        let has_weights = attributes.and_then(|a| a.get("WEIGHTS_0")).is_some();
+                        
+                        if has_joints && has_weights {
+                            if let Ok((bone_indices, bone_weights)) = extract_skin_data_manual(&gltf, primitive, &buffers) {
+                                scene.skinned_meshes.push(SkinnedMesh {
+                                    mesh: mesh_data,
+                                    bone_indices,
+                                    bone_weights,
+                                });
+                            }
+                        } else {
+                            scene.meshes.push(mesh_data);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    log::info!(
+        "Loaded glTF: {} meshes, {} skinned meshes, {} bones, {} animations, {} textures",
+        scene.meshes.len(),
+        scene.skinned_meshes.len(),
+        scene.skeleton.as_ref().map(|s| s.bones.len()).unwrap_or(0),
+        scene.animations.len(),
+        scene.textures.len()
+    );
+    
+    Ok(scene)
+}
+
+/// Load glTF from file path
+pub fn load_gltf_file(path: &str) -> Result<ModelScene> {
+    let data = std::fs::read(path)
+        .with_context(|| format!("Failed to read glTF file: {}", path))?;
+    load_gltf_with_animations(&data)
+}
+
+// --- GLB Parser ---
+
+fn parse_glb(data: &[u8]) -> Result<(String, Vec<u8>)> {
+    if data.len() < 12 {
+        return Err(anyhow!("GLB file too short"));
+    }
+    
+    // GLB Header: magic (4) + version (4) + length (4)
+    let _version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    let _total_length = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+    
+    // JSON chunk: length (4) + type (4) + data
+    let json_length = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
+    let _json_type = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
+    
+    let json_start = 20;
+    let json_end = json_start + json_length;
+    
+    if json_end > data.len() {
+        return Err(anyhow!("Invalid GLB: JSON chunk extends past file"));
+    }
+    
+    let json_data = String::from_utf8_lossy(&data[json_start..json_end]).to_string();
+    
+    // BIN chunk (optional)
+    let mut bin_data = Vec::new();
+    if json_end + 8 <= data.len() {
+        let bin_length = u32::from_le_bytes([data[json_end], data[json_end+1], data[json_end+2], data[json_end+3]]) as usize;
+        let bin_start = json_end + 8;
+        let bin_end = bin_start + bin_length;
+        
+        if bin_end <= data.len() {
+            bin_data = data[bin_start..bin_end].to_vec();
+        }
+    }
+    
+    Ok((json_data, bin_data))
+}
+
+fn load_gltf_buffers_manual(gltf: &Value, embedded_bin: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let mut buffers = Vec::new();
+    
+    if let Some(buffer_list) = gltf.get("buffers").and_then(|b| b.as_array()) {
+        for buffer in buffer_list {
+            if let Some(uri) = buffer.get("uri").and_then(|u| u.as_str()) {
+                // Data URI or external file
+                if uri.starts_with("data:") {
+                    // Base64 data URI
+                    if let Some(comma_pos) = uri.find(',') {
+                        let base64_data = &uri[comma_pos + 1..];
+                        // Simple base64 decode using standard alphabet
+                        match decode_base64(base64_data) {
+                            Ok(decoded) => buffers.push(decoded),
+                            Err(_) => buffers.push(Vec::new()),
+                        }
+                    } else {
+                        buffers.push(Vec::new());
+                    }
+                } else {
+                    // External file - try to load
+                    match std::fs::read(uri) {
+                        Ok(data) => buffers.push(data),
+                        Err(_) => buffers.push(Vec::new()),
+                    }
+                }
+            } else {
+                // No URI = embedded GLB buffer
+                buffers.push(embedded_bin.to_vec());
+            }
+        }
+    }
+    
+    // If no buffers defined but we have embedded data, use it
+    if buffers.is_empty() && !embedded_bin.is_empty() {
+        buffers.push(embedded_bin.to_vec());
+    }
+    
+    Ok(buffers)
+}
+
+fn extract_images_manual(gltf: &Value, buffers: &[Vec<u8>]) -> Vec<EmbeddedTexture> {
+    let mut textures = Vec::new();
+    
+    if let Some(image_list) = gltf.get("images").and_then(|i| i.as_array()) {
+        for (idx, image) in image_list.iter().enumerate() {
+            let name = image.get("name").and_then(|n| n.as_str())
+                .unwrap_or(&format!("texture_{}", idx)).to_string();
+            
+            let mut data = Vec::new();
+            
+            if let Some(buffer_view_idx) = image.get("bufferView").and_then(|bv| bv.as_u64()) {
+                // Load from bufferView
+                if let Some(buffer_views) = gltf.get("bufferViews").and_then(|bv| bv.as_array()) {
+                    if let Some(view) = buffer_views.get(buffer_view_idx as usize) {
+                        let buffer_idx = view.get("buffer").and_then(|b| b.as_u64()).unwrap_or(0) as usize;
+                        let offset = view.get("byteOffset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
+                        let length = view.get("byteLength").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
+                        
+                        if let Some(buffer) = buffers.get(buffer_idx) {
+                            if offset + length <= buffer.len() {
+                                data = buffer[offset..offset+length].to_vec();
+                            }
+                        }
+                    }
+                }
+            } else if let Some(uri) = image.get("uri").and_then(|u| u.as_str()) {
+                if uri.starts_with("data:") {
+                    if let Some(comma_pos) = uri.find(',') {
+                        if let Ok(decoded) = decode_base64(&uri[comma_pos+1..]) {
+                            data = decoded;
+                        }
+                    }
+                }
+            }
+            
+            if !data.is_empty() {
+                textures.push(EmbeddedTexture {
+                    name,
+                    width: 0, // Placeholder
+                    height: 0, // Placeholder
+                    data,
+                });
+            }
+        }
+    }
+    
+    textures
+}
+
+fn extract_materials_manual(gltf: &Value) -> Vec<Option<usize>> {
+    let mut mat_texture_indices = Vec::new();
+    
+    if let Some(material_list) = gltf.get("materials").and_then(|m| m.as_array()) {
+        for material in material_list {
+            let tex_idx = material.get("pbrMetallicRoughness")
+                .and_then(|p| p.get("baseColorTexture"))
+                .and_then(|t| t.get("index"))
+                .and_then(|i| i.as_u64())
+                .map(|i| i as usize);
+            mat_texture_indices.push(tex_idx);
+        }
+    }
+    
+    mat_texture_indices
+}
+
+fn extract_texture_source_indices(gltf: &Value) -> Vec<usize> {
+    let mut image_indices = Vec::new();
+    
+    if let Some(texture_list) = gltf.get("textures").and_then(|t| t.as_array()) {
+        for texture in texture_list {
+            let image_idx = texture.get("source").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
+            image_indices.push(image_idx);
+        }
+    }
+    
+    image_indices
+}
+
+fn decode_base64(input: &str) -> Result<Vec<u8>> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    
+    let input = input.as_bytes();
+    let mut output = Vec::new();
+    let mut buffer = 0u32;
+    let mut bits = 0;
+    
+    for &byte in input {
+        if byte == b'=' || byte == b'\n' || byte == b'\r' || byte == b' ' {
+            continue;
+        }
+        
+        let value = ALPHABET.iter().position(|&c| c == byte)
+            .ok_or_else(|| anyhow!("Invalid base64 character"))? as u32;
+        
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        
+        if bits >= 8 {
+            bits -= 8;
+            output.push((buffer >> bits) as u8);
+            buffer &= (1 << bits) - 1;
+        }
+    }
+    
+    Ok(output)
+}
+
+fn get_node_transform(node: Option<&Value>) -> Mat4 {
+    let node = match node {
+        Some(n) => n,
+        None => return Mat4::IDENTITY,
+    };
+    
+    // Check for matrix
+    if let Some(matrix) = node.get("matrix").and_then(|m| m.as_array()) {
+        if matrix.len() == 16 {
+            let vals: Vec<f32> = matrix.iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect();
+            if vals.len() == 16 {
+                return Mat4::from_cols_array(&[
+                    vals[0], vals[1], vals[2], vals[3],
+                    vals[4], vals[5], vals[6], vals[7],
+                    vals[8], vals[9], vals[10], vals[11],
+                    vals[12], vals[13], vals[14], vals[15],
+                ]);
+            }
+        }
+    }
+    
+    // Otherwise use TRS
+    let translation = node.get("translation")
+        .and_then(|t| t.as_array())
+        .map(|a| Vec3::new(
+            a.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            a.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            a.get(2).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+        ))
+        .unwrap_or(Vec3::ZERO);
+    
+    let rotation = node.get("rotation")
+        .and_then(|r| r.as_array())
+        .map(|a| Quat::from_xyzw(
+            a.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            a.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            a.get(2).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            a.get(3).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
+        ))
+        .unwrap_or(Quat::IDENTITY);
+    
+    let scale = node.get("scale")
+        .and_then(|s| s.as_array())
+        .map(|a| Vec3::new(
+            a.get(0).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
+            a.get(1).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
+            a.get(2).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
+        ))
+        .unwrap_or(Vec3::ONE);
+    
+    Mat4::from_scale_rotation_translation(scale, rotation, translation)
+}
+
+fn find_joint_parent_manual(gltf: &Value, joint_idx: usize, joint_map: &HashMap<usize, usize>) -> Option<usize> {
+    if let Some(nodes) = gltf.get("nodes").and_then(|n| n.as_array()) {
+        for (node_idx, node) in nodes.iter().enumerate() {
+            if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
+                for child in children {
+                    if child.as_u64() == Some(joint_idx as u64) {
+                        return joint_map.get(&node_idx).copied();
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn get_accessor_info(gltf: &Value, accessor_idx: usize) -> Option<(usize, usize, usize, usize, u64)> {
+    let accessors = gltf.get("accessors")?.as_array()?;
+    let accessor = accessors.get(accessor_idx)?;
+    
+    let buffer_view_idx = accessor.get("bufferView")?.as_u64()? as usize;
+    let count = accessor.get("count")?.as_u64()? as usize;
+    let component_type = accessor.get("componentType")?.as_u64()?;
+    let accessor_offset = accessor.get("byteOffset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
+    
+    let buffer_views = gltf.get("bufferViews")?.as_array()?;
+    let view = buffer_views.get(buffer_view_idx)?;
+    
+    let buffer_idx = view.get("buffer")?.as_u64()? as usize;
+    let view_offset = view.get("byteOffset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
+    let stride = view.get("byteStride").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
+    
+    Some((buffer_idx, view_offset + accessor_offset, count, stride, component_type))
+}
+
+fn read_accessor_mat4_manual(gltf: &Value, accessor_idx: usize, buffers: &[Vec<u8>]) -> Result<Vec<Mat4>> {
+    let (buffer_idx, offset, count, stride, _) = get_accessor_info(gltf, accessor_idx)
+        .ok_or_else(|| anyhow!("Invalid accessor"))?;
+    
+    let buffer = buffers.get(buffer_idx).ok_or_else(|| anyhow!("Buffer not found"))?;
+    let actual_stride = if stride > 0 { stride } else { 64 };
+    
+    let mut matrices = Vec::with_capacity(count);
+    for i in 0..count {
+        let start = offset + i * actual_stride;
+        if start + 64 > buffer.len() { break; }
+        
+        let mut vals = [0.0f32; 16];
+        for j in 0..16 {
+            let byte_offset = start + j * 4;
+            vals[j] = f32::from_le_bytes([
+                buffer[byte_offset], buffer[byte_offset+1],
+                buffer[byte_offset+2], buffer[byte_offset+3],
+            ]);
+        }
+        matrices.push(Mat4::from_cols_array(&vals));
+    }
+    
+    Ok(matrices)
+}
+
+fn read_accessor_vec3_manual(gltf: &Value, accessor_idx: usize, buffers: &[Vec<u8>]) -> Result<Vec<Vec3>> {
+    let (buffer_idx, offset, count, stride, _) = get_accessor_info(gltf, accessor_idx)
+        .ok_or_else(|| anyhow!("Invalid accessor"))?;
+    
+    let buffer = buffers.get(buffer_idx).ok_or_else(|| anyhow!("Buffer not found"))?;
+    let actual_stride = if stride > 0 { stride } else { 12 };
+    
+    let mut values = Vec::with_capacity(count);
+    for i in 0..count {
+        let start = offset + i * actual_stride;
+        if start + 12 > buffer.len() { break; }
+        values.push(Vec3::new(
+            f32::from_le_bytes([buffer[start], buffer[start+1], buffer[start+2], buffer[start+3]]),
+            f32::from_le_bytes([buffer[start+4], buffer[start+5], buffer[start+6], buffer[start+7]]),
+            f32::from_le_bytes([buffer[start+8], buffer[start+9], buffer[start+10], buffer[start+11]]),
+        ));
+    }
+    Ok(values)
+}
+
+fn read_accessor_vec2_manual(gltf: &Value, accessor_idx: usize, buffers: &[Vec<u8>]) -> Result<Vec<[f32; 2]>> {
+    let (buffer_idx, offset, count, stride, _) = get_accessor_info(gltf, accessor_idx)
+        .ok_or_else(|| anyhow!("Invalid accessor"))?;
+    
+    let buffer = buffers.get(buffer_idx).ok_or_else(|| anyhow!("Buffer not found"))?;
+    let actual_stride = if stride > 0 { stride } else { 8 };
+    
+    let mut values = Vec::with_capacity(count);
+    for i in 0..count {
+        let start = offset + i * actual_stride;
+        if start + 8 > buffer.len() { break; }
+        values.push([
+            f32::from_le_bytes([buffer[start], buffer[start+1], buffer[start+2], buffer[start+3]]),
+            f32::from_le_bytes([buffer[start+4], buffer[start+5], buffer[start+6], buffer[start+7]]),
+        ]);
+    }
+    Ok(values)
+}
+
+fn read_accessor_quat_manual(gltf: &Value, accessor_idx: usize, buffers: &[Vec<u8>]) -> Result<Vec<Quat>> {
+    let (buffer_idx, offset, count, stride, _) = get_accessor_info(gltf, accessor_idx)
+        .ok_or_else(|| anyhow!("Invalid accessor"))?;
+    
+    let buffer = buffers.get(buffer_idx).ok_or_else(|| anyhow!("Buffer not found"))?;
+    let actual_stride = if stride > 0 { stride } else { 16 };
+    
+    let mut values = Vec::with_capacity(count);
+    for i in 0..count {
+        let start = offset + i * actual_stride;
+        if start + 16 > buffer.len() { break; }
+        values.push(Quat::from_xyzw(
+            f32::from_le_bytes([buffer[start], buffer[start+1], buffer[start+2], buffer[start+3]]),
+            f32::from_le_bytes([buffer[start+4], buffer[start+5], buffer[start+6], buffer[start+7]]),
+            f32::from_le_bytes([buffer[start+8], buffer[start+9], buffer[start+10], buffer[start+11]]),
+            f32::from_le_bytes([buffer[start+12], buffer[start+13], buffer[start+14], buffer[start+15]]),
+        ));
+    }
+    Ok(values)
+}
+
+fn read_accessor_f32_manual(gltf: &Value, accessor_idx: usize, buffers: &[Vec<u8>]) -> Result<Vec<f32>> {
+    let (buffer_idx, offset, count, stride, _) = get_accessor_info(gltf, accessor_idx)
+        .ok_or_else(|| anyhow!("Invalid accessor"))?;
+    
+    let buffer = buffers.get(buffer_idx).ok_or_else(|| anyhow!("Buffer not found"))?;
+    let actual_stride = if stride > 0 { stride } else { 4 };
+    
+    let mut values = Vec::with_capacity(count);
+    for i in 0..count {
+        let start = offset + i * actual_stride;
+        if start + 4 > buffer.len() { break; }
+        values.push(f32::from_le_bytes([buffer[start], buffer[start+1], buffer[start+2], buffer[start+3]]));
+    }
+    Ok(values)
+}
+
+fn read_accessor_indices_manual(gltf: &Value, accessor_idx: usize, buffers: &[Vec<u8>]) -> Result<Vec<u32>> {
+    let (buffer_idx, offset, count, stride, component_type) = get_accessor_info(gltf, accessor_idx)
+        .ok_or_else(|| anyhow!("Invalid accessor"))?;
+    
+    let buffer = buffers.get(buffer_idx).ok_or_else(|| anyhow!("Buffer not found"))?;
+    
+    let mut values = Vec::with_capacity(count);
+    
+    match component_type {
+        5121 => { // UNSIGNED_BYTE
+            let actual_stride = if stride > 0 { stride } else { 1 };
+            for i in 0..count {
+                let start = offset + i * actual_stride;
+                if start >= buffer.len() { break; }
+                values.push(buffer[start] as u32);
+            }
+        }
+        5123 => { // UNSIGNED_SHORT
+            let actual_stride = if stride > 0 { stride } else { 2 };
+            for i in 0..count {
+                let start = offset + i * actual_stride;
+                if start + 2 > buffer.len() { break; }
+                values.push(u16::from_le_bytes([buffer[start], buffer[start+1]]) as u32);
+            }
+        }
+        5125 => { // UNSIGNED_INT
+            let actual_stride = if stride > 0 { stride } else { 4 };
+            for i in 0..count {
+                let start = offset + i * actual_stride;
+                if start + 4 > buffer.len() { break; }
+                values.push(u32::from_le_bytes([buffer[start], buffer[start+1], buffer[start+2], buffer[start+3]]));
+            }
+        }
+        _ => {}
+    }
+    
+    Ok(values)
+}
+
+fn read_accessor_u32x4_manual(gltf: &Value, accessor_idx: usize, buffers: &[Vec<u8>]) -> Result<Vec<[u32; 4]>> {
+    let (buffer_idx, offset, count, stride, component_type) = get_accessor_info(gltf, accessor_idx)
+        .ok_or_else(|| anyhow!("Invalid accessor"))?;
+    
+    let buffer = buffers.get(buffer_idx).ok_or_else(|| anyhow!("Buffer not found"))?;
+    
+    let mut values = Vec::with_capacity(count);
+    
+    match component_type {
+        5121 => { // UNSIGNED_BYTE
+            let actual_stride = if stride > 0 { stride } else { 4 };
+            for i in 0..count {
+                let start = offset + i * actual_stride;
+                if start + 4 > buffer.len() { break; }
+                values.push([buffer[start] as u32, buffer[start+1] as u32, buffer[start+2] as u32, buffer[start+3] as u32]);
+            }
+        }
+        5123 => { // UNSIGNED_SHORT
+            let actual_stride = if stride > 0 { stride } else { 8 };
+            for i in 0..count {
+                let start = offset + i * actual_stride;
+                if start + 8 > buffer.len() { break; }
+                values.push([
+                    u16::from_le_bytes([buffer[start], buffer[start+1]]) as u32,
+                    u16::from_le_bytes([buffer[start+2], buffer[start+3]]) as u32,
+                    u16::from_le_bytes([buffer[start+4], buffer[start+5]]) as u32,
+                    u16::from_le_bytes([buffer[start+6], buffer[start+7]]) as u32,
+                ]);
+            }
+        }
+        _ => {
+            for _ in 0..count { values.push([0, 0, 0, 0]); }
+        }
+    }
+    
+    Ok(values)
+}
+
+fn read_accessor_f32x4_manual(gltf: &Value, accessor_idx: usize, buffers: &[Vec<u8>]) -> Result<Vec<[f32; 4]>> {
+    let (buffer_idx, offset, count, stride, _) = get_accessor_info(gltf, accessor_idx)
+        .ok_or_else(|| anyhow!("Invalid accessor"))?;
+    
+    let buffer = buffers.get(buffer_idx).ok_or_else(|| anyhow!("Buffer not found"))?;
+    let actual_stride = if stride > 0 { stride } else { 16 };
+    
+    let mut values = Vec::with_capacity(count);
+    for i in 0..count {
+        let start = offset + i * actual_stride;
+        if start + 16 > buffer.len() { break; }
+        values.push([
+            f32::from_le_bytes([buffer[start], buffer[start+1], buffer[start+2], buffer[start+3]]),
+            f32::from_le_bytes([buffer[start+4], buffer[start+5], buffer[start+6], buffer[start+7]]),
+            f32::from_le_bytes([buffer[start+8], buffer[start+9], buffer[start+10], buffer[start+11]]),
+            f32::from_le_bytes([buffer[start+12], buffer[start+13], buffer[start+14], buffer[start+15]]),
+        ]);
+    }
+    Ok(values)
+}
+
+fn extract_primitive_mesh_manual(
+    gltf: &Value, 
+    primitive: &Value, 
+    buffers: &[Vec<u8>],
+    texture_names: &[String],
+    mat_tex_indices: &[Option<usize>],
+    tex_img_indices: &[usize]
+) -> Result<Mesh> {
+    let attributes = primitive.get("attributes").ok_or_else(|| anyhow!("No attributes"))?;
+    
+    let positions = if let Some(idx) = attributes.get("POSITION").and_then(|p| p.as_u64()) {
+        read_accessor_vec3_manual(gltf, idx as usize, buffers)?
+    } else {
+        Vec::new()
+    };
+    
+    let normals = if let Some(idx) = attributes.get("NORMAL").and_then(|n| n.as_u64()) {
+        read_accessor_vec3_manual(gltf, idx as usize, buffers)?
+    } else {
+        Vec::new()
+    };
+    
+    let uvs = if let Some(idx) = attributes.get("TEXCOORD_0").and_then(|t| t.as_u64()) {
+        read_accessor_vec2_manual(gltf, idx as usize, buffers)?
+    } else {
+        Vec::new()
+    };
+    
+    let vertex_count = positions.len();
+    let mut vertices = Vec::with_capacity(vertex_count);
+    
+    for i in 0..vertex_count {
+        let position = positions.get(i).copied().unwrap_or(Vec3::ZERO);
+        let normal = normals.get(i).copied().unwrap_or(Vec3::Y);
+        let uv = uvs.get(i).copied().unwrap_or([0.0, 0.0]);
+        
+        vertices.push(Vertex {
+            position: position.to_array(),
+            normal: normal.to_array(),
+            uv,
+            color: [1.0, 1.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+            bone_indices: [0, 0, 0, 0],
+            bone_weights: [1.0, 0.0, 0.0, 0.0],
+        });
+    }
+    
+    let indices = if let Some(idx) = primitive.get("indices").and_then(|i| i.as_u64()) {
+        read_accessor_indices_manual(gltf, idx as usize, buffers)?
+    } else {
+        (0..vertex_count as u32).collect()
+    };
+    
+    let (aabb_min, aabb_max) = compute_aabb(&vertices);
+    
+    let material_idx = primitive.get("material").and_then(|m| m.as_u64()).map(|m| m as usize);
+    let mut albedo_texture = None;
+    
+    if let Some(mat_idx) = material_idx {
+        if mat_idx < mat_tex_indices.len() {
+            if let Some(tex_idx) = mat_tex_indices[mat_idx] {
+                if tex_idx < tex_img_indices.len() {
+                    let img_idx = tex_img_indices[tex_idx];
+                    if img_idx < texture_names.len() {
+                        albedo_texture = Some(texture_names[img_idx].clone());
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(Mesh {
+        vertices,
+        indices,
+        albedo: None,
+        normal: None,
+        metallic_roughness: None,
+        albedo_texture,
+        aabb_min,
+        aabb_max,
+        decoded_albedo: None,
+        decoded_normal: None,
+        decoded_mr: None,
+    })
+}
+
+fn extract_skin_data_manual(gltf: &Value, primitive: &Value, buffers: &[Vec<u8>]) -> Result<(Vec<[u32; 4]>, Vec<[f32; 4]>)> {
+    let attributes = primitive.get("attributes").ok_or_else(|| anyhow!("No attributes"))?;
+    
+    let bone_indices = if let Some(idx) = attributes.get("JOINTS_0").and_then(|j| j.as_u64()) {
+        read_accessor_u32x4_manual(gltf, idx as usize, buffers)?
+    } else {
+        Vec::new()
+    };
+    
+    let bone_weights = if let Some(idx) = attributes.get("WEIGHTS_0").and_then(|w| w.as_u64()) {
+        read_accessor_f32x4_manual(gltf, idx as usize, buffers)?
+    } else {
+        Vec::new()
+    };
+    
+    Ok((bone_indices, bone_weights))
+}
+
+fn extract_animation_manual(
+    gltf: &Value,
+    animation: &Value,
+    buffers: &[Vec<u8>],
+    joint_map: &HashMap<usize, usize>,
+) -> Result<AnimationClip> {
+    let name = animation.get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("animation")
+        .to_string();
+    
+    let mut duration = 0.0f32;
+    let mut channels_map: HashMap<usize, BoneKeyframes> = HashMap::new();
+    
+    let channels = animation.get("channels").and_then(|c| c.as_array());
+    let samplers = animation.get("samplers").and_then(|s| s.as_array());
+    
+    if let (Some(channels), Some(samplers)) = (channels, samplers) {
+        for channel in channels {
+            let target = match channel.get("target") {
+                Some(t) => t,
+                None => continue,
+            };
+            
+            let node_idx = match target.get("node").and_then(|n| n.as_u64()) {
+                Some(n) => n as usize,
+                None => continue,
+            };
+            
+            let bone_index = match joint_map.get(&node_idx) {
+                Some(&idx) => idx,
+                None => continue,
+            };
+            
+            let sampler_idx = match channel.get("sampler").and_then(|s| s.as_u64()) {
+                Some(s) => s as usize,
+                None => continue,
+            };
+            
+            let sampler = match samplers.get(sampler_idx) {
+                Some(s) => s,
+                None => continue,
+            };
+            
+            let input_idx = sampler.get("input").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+            let output_idx = sampler.get("output").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
+            
+            let times = read_accessor_f32_manual(gltf, input_idx, buffers)?;
+            
+            if let Some(&max_time) = times.iter().max_by(|a, b| a.partial_cmp(b).unwrap()) {
+                duration = duration.max(max_time);
+            }
+            
+            let entry = channels_map.entry(bone_index).or_insert_with(|| BoneKeyframes {
+                bone_index,
+                position_keys: Vec::new(),
+                rotation_keys: Vec::new(),
+                scale_keys: Vec::new(),
+            });
+            
+            let path = target.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            
+            match path {
+                "translation" => {
+                    let translations = read_accessor_vec3_manual(gltf, output_idx, buffers)?;
+                    for (i, &t) in times.iter().enumerate() {
+                        if i < translations.len() {
+                            entry.position_keys.push((t, translations[i]));
+                        }
+                    }
+                }
+                "rotation" => {
+                    let rotations = read_accessor_quat_manual(gltf, output_idx, buffers)?;
+                    for (i, &t) in times.iter().enumerate() {
+                        if i < rotations.len() {
+                            entry.rotation_keys.push((t, rotations[i]));
+                        }
+                    }
+                }
+                "scale" => {
+                    let scales = read_accessor_vec3_manual(gltf, output_idx, buffers)?;
+                    for (i, &t) in times.iter().enumerate() {
+                        if i < scales.len() {
+                            entry.scale_keys.push((t, scales[i]));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    
+    Ok(AnimationClip {
+        name,
+        duration,
+        channels: channels_map.into_values().collect(),
+        events: Vec::new(),
+    })
+}
+
+
+// ============================================================================
+// SANIM Format Loader (Custom Binary Format)
+// ============================================================================
+
 
 /// Load a STFSC animated model from file path
 pub fn load_animated_model(path: &str) -> Result<ModelScene> {

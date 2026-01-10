@@ -41,6 +41,8 @@ rayon = "1.8"  # Parallel iteration for game logic
 eframe = "0.24"
 home = "=0.5.9"
 tobj = "3.2"
+rfd = { version = "0.12", default-features = false, features = ["xdg-portal"] } # Use portal to avoid GTK/glib dependency
+# glTF parsing done manually via serde_json to avoid dependency conflicts
 # glTF loading: Use Blender to export as custom binary format until gltf crate compatibility is resolved
 # Model loading via tobj (OBJ format) - FBX files should be converted to OBJ
 winit = { version = "0.29", features = ["rwh_05"] }

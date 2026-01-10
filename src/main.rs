@@ -1,5 +1,5 @@
 use stfsc_engine::graphics::{GraphicsContext, GpuMesh, InstanceData, Texture, calculate_shadow_resolution};
-use stfsc_engine::world::{GameWorld, MeshHandle, Material, Transform, RigidBodyHandle, Mesh, AudioSource};
+use stfsc_engine::world::{GameWorld, MeshHandle, Material, Transform, RigidBodyHandle, Mesh, AudioSource, Hierarchy, LocalTransform};
 use stfsc_engine::audio::{AudioSystem, AudioBuffer, AudioSourceProperties, AttenuationModel, AudioBufferHandle};
 use stfsc_engine::physics::PhysicsWorld;
 use stfsc_engine::resource_loader::{ResourceLoader, ResourceLoadResult};
@@ -220,7 +220,7 @@ fn main() {
         player_entity,
         player_rb: stfsc_engine::world::RigidBodyHandle(player_rb),
         player_position: glam::Vec3::from(player_pos), 
-        player_yaw: -std::f32::consts::FRAC_PI_2, // Look towards -Z
+        player_yaw: 0.0, // Face towards -Z (scene center)
         player_pitch: 0.0,
     }));
 
@@ -319,25 +319,34 @@ fn main() {
 
                     // Sync player entity transform
                     let player_ent = state.player_entity;
-                    if let Ok(mut t) = state.world.ecs.get::<&mut Transform>(player_ent) {
-                        t.position = state.player_position;
-                        t.rotation = glam::Quat::from_rotation_y(-state.player_yaw);
+                    let mut has_parent = false;
+                    if let Ok(hierarchy) = state.world.ecs.get::<&stfsc_engine::world::Hierarchy>(player_ent) {
+                        has_parent = hierarchy.parent.is_some();
+                    }
+
+                    if has_parent {
+                        if let Ok(mut lt) = state.world.ecs.get::<&mut stfsc_engine::world::LocalTransform>(player_ent) {
+                            lt.position = state.player_position;
+                            lt.rotation = glam::Quat::from_rotation_y(-state.player_yaw);
+                        }
+                    } else {
+                        if let Ok(mut t) = state.world.ecs.get::<&mut Transform>(player_ent) {
+                            t.position = state.player_position;
+                            t.rotation = glam::Quat::from_rotation_y(-state.player_yaw);
+                        }
                     }
 
                     let GameState { world, physics, .. } = &mut *state;
                     world.update_streaming(pos, physics);
                     
-                    // Transfer UI events from global state if we had a shared queue, 
-                    // but since ui_state is in the event loop thread, we'll drain 
-                    // the world's internal queue which was populated by the event loop.
                     let ui_events = std::mem::take(&mut world.pending_ui_events);
                     world.update_logic(physics, 0.016, ui_events);
-                    
-                    // Sync physics to ECS - Parallelized gathering
+
+                    // Sync physics to ECS - Keep world transforms and update local transforms if no parent
                     use rayon::prelude::*;
-                    let updates: Vec<_> = world.ecs.query::<(&Transform, &RigidBodyHandle)>()
+                    let updates: Vec<_> = world.ecs.query::<(&Transform, &stfsc_engine::world::RigidBodyHandle)>()
                         .iter()
-                        .map(|(id, (_, handle))| (id, handle.0)) // Copy handles out
+                        .map(|(id, (_, handle))| (id, handle.0))
                         .collect::<Vec<_>>() 
                         .into_par_iter()
                         .filter_map(|(id, handle_idx)| {
@@ -353,6 +362,32 @@ fn main() {
                         if let Ok(mut t) = world.ecs.get::<&mut Transform>(id) {
                             t.position = p;
                             t.rotation = r;
+                        }
+                        // Update local transform too for standalone physics objects or children
+                        if let Ok(mut lt) = world.ecs.get::<&mut stfsc_engine::world::LocalTransform>(id) {
+                            if let Ok(hierarchy) = world.ecs.get::<&stfsc_engine::world::Hierarchy>(id) {
+                                if let Some(parent) = hierarchy.parent {
+                                    if let Ok(pt) = world.ecs.get::<&Transform>(parent) {
+                                        // p = pt.pos + (pt.rot * (pt.scale * lt.pos))
+                                        // (p - pt.pos) = pt.rot * (pt.scale * lt.pos)
+                                        // pt.rot.inv() * (p - pt.pos) = pt.scale * lt.pos
+                                        // lt.pos = (pt.rot.inv() * (p - pt.pos)) / pt.scale
+                                        let inv_parent_rot = pt.rotation.inverse();
+                                        lt.position = (inv_parent_rot * (p - pt.position)) / pt.scale;
+                                        lt.rotation = inv_parent_rot * r;
+                                    } else {
+                                        // Fallback if parent not found
+                                        lt.position = p;
+                                        lt.rotation = r;
+                                    }
+                                } else {
+                                    lt.position = p;
+                                    lt.rotation = r;
+                                }
+                            } else {
+                                lt.position = p;
+                                lt.rotation = r;
+                            }
                         }
                     }
                 }
@@ -823,13 +858,23 @@ fn main() {
                 if cursor_captured {
                     if let Ok(mut state) = game_state.write() {
                         let mut move_dir = glam::Vec3::ZERO;
-                        let forward = glam::Vec3::new(state.player_yaw.cos(), 0.0, state.player_yaw.sin()).normalize();
-                        let right = glam::Vec3::new(-state.player_yaw.sin(), 0.0, state.player_yaw.cos()).normalize();
+                        let mut forward_basis = glam::Vec3::new(state.player_yaw.sin(), 0.0, -state.player_yaw.cos()).normalize();
+                        let mut right_basis = glam::Vec3::new(state.player_yaw.cos(), 0.0, state.player_yaw.sin()).normalize();
 
-                        if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyW)) { move_dir += forward; }
-                        if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyS)) { move_dir -= forward; }
-                        if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyA)) { move_dir -= right; }
-                        if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyD)) { move_dir += right; }
+                        // If parented, rotate movement basis by parent's rotation
+                        if let Ok(hierarchy) = state.world.ecs.get::<&stfsc_engine::world::Hierarchy>(state.player_entity) {
+                            if let Some(parent) = hierarchy.parent {
+                                if let Ok(pt) = state.world.ecs.get::<&Transform>(parent) {
+                                    forward_basis = pt.rotation * forward_basis;
+                                    right_basis = pt.rotation * right_basis;
+                                }
+                            }
+                        }
+
+                        if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyW)) { move_dir += forward_basis; }
+                        if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyS)) { move_dir -= forward_basis; }
+                        if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyA)) { move_dir -= right_basis; }
+                        if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyD)) { move_dir += right_basis; }
 
                         let mut speed = 5.0;
                         if keys_pressed.contains(&PhysicalKey::Code(KeyCode::ShiftLeft)) || keys_pressed.contains(&PhysicalKey::Code(KeyCode::ShiftRight)) {
@@ -1012,29 +1057,38 @@ fn main() {
                 let mut textured_draws: Vec<(usize, InstanceData, vk::DescriptorSet)> = Vec::new();
                 let mut view_proj = glam::Mat4::IDENTITY;
                 let mut player_pos = glam::Vec3::ZERO;
+                let mut camera_fov = std::f32::consts::FRAC_PI_4;
                 
                 if let Ok(state) = game_state.read() {
-                    player_pos = state.player_position;
-                    let forward = glam::Vec3::new(
-                        state.player_yaw.cos() * state.player_pitch.cos(),
-                        state.player_pitch.sin(),
-                        state.player_yaw.sin() * state.player_pitch.cos(),
-                    );
-                    let view_matrix = glam::Mat4::look_at_rh(state.player_position, state.player_position + forward, glam::Vec3::Y);
+                    // Try to find an active camera entity
+                    let mut active_camera = None;
+                    for (entity, (camera, transform)) in state.world.ecs.query::<(&stfsc_engine::world::Camera, &Transform)>().iter() {
+                        if camera.active {
+                            active_camera = Some((entity, *transform, camera.fov));
+                            break;
+                        }
+                    }
+
+                    let (cam_pos, cam_rot, fov) = if let Some((_, transform, fov)) = active_camera {
+                        camera_fov = fov;
+                        (transform.position, transform.rotation, fov)
+                    } else {
+                        // Fallback to default player controller
+                        (state.player_position, glam::Quat::from_rotation_y(-state.player_yaw) * glam::Quat::from_rotation_x(state.player_pitch), camera_fov)
+                    };
+
+                    player_pos = cam_pos;
+                    let view_matrix = glam::Mat4::look_at_rh(cam_pos, cam_pos + (cam_rot * -glam::Vec3::Z), cam_rot * glam::Vec3::Y);
+                    
                     let extent = graphics_context.swapchain_extent.unwrap_or(vk::Extent2D { width: 1920, height: 1080 });
                     let aspect = extent.width as f32 / (extent.height as f32).max(1.0);
                     
-                    // Reversed-Z infinite far plane projection for maximum depth precision
-                    // This eliminates z-fighting on large ground planes (556 Downtown open world)
                     let near = 0.1;
-                    let fov = std::f32::consts::FRAC_PI_4;
                     let f = 1.0 / (fov / 2.0).tan();
                     
-                    // Reversed-Z infinite projection matrix (near maps to 1.0, far maps to 0.0)
-                    // This distributes depth precision evenly across the view frustum
                     let proj_matrix = glam::Mat4::from_cols(
                         glam::Vec4::new(f / aspect, 0.0, 0.0, 0.0),
-                        glam::Vec4::new(0.0, -f, 0.0, 0.0),  // Flip Y for Vulkan
+                        glam::Vec4::new(0.0, -f, 0.0, 0.0),
                         glam::Vec4::new(0.0, 0.0, 0.0, -1.0),
                         glam::Vec4::new(0.0, 0.0, near, 0.0),
                     );

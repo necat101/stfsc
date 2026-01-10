@@ -237,8 +237,18 @@ struct SceneEntity {
     layer: u32,
     #[serde(default)]
     is_static: bool,  // If true, object is not affected by gravity
+    #[serde(default)]
+    animator_config: Option<stfsc_engine::world::animation::AnimatorConfig>,
+    #[serde(default)]
+    parent_id: Option<u32>,
+    #[serde(default = "default_fov")]
+    fov: f32,
     #[serde(skip)]
     deployed: bool,
+}
+
+fn default_fov() -> f32 {
+    0.785 // PI/4
 }
 
 fn default_layer() -> u32 {
@@ -324,6 +334,7 @@ struct Scene {
     pub ui_layouts: Vec<NamedUiLayout>,
     /// Legacy single layout (for backwards compatibility on load)
     #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
     pub ui_layout: stfsc_engine::ui::UiLayout,
 }
 
@@ -341,6 +352,7 @@ impl Scene {
     }
     
     /// Get current layout for editing (ensures at least one exists)
+    #[allow(dead_code)]
     fn get_or_create_layout(&mut self, idx: usize) -> &mut NamedUiLayout {
         if self.ui_layouts.is_empty() {
             // Migrate legacy ui_layout if present
@@ -380,6 +392,9 @@ impl Scene {
             collision_enabled: true,
             layer: LAYER_ENVIRONMENT,
             is_static: false,
+            animator_config: None,
+            parent_id: None,
+            fov: 0.785,
             deployed: false,
         });
         // Physics Cube
@@ -398,6 +413,9 @@ impl Scene {
             collision_enabled: true,
             layer: LAYER_PROP,
             is_static: false,
+            animator_config: None,
+            parent_id: None,
+            fov: 0.785,
             deployed: false,
         });
         // Vehicle
@@ -413,6 +431,9 @@ impl Scene {
             collision_enabled: true,
             layer: LAYER_VEHICLE,
             is_static: false,
+            animator_config: None,
+            parent_id: None,
+            fov: 0.785,
             deployed: false,
         });
         // Agents
@@ -442,6 +463,9 @@ impl Scene {
                 collision_enabled: false,
                 layer: LAYER_CHARACTER,
                 is_static: false,
+                animator_config: None,
+                parent_id: None,
+                fov: 0.785,
                 deployed: false,
             });
         }
@@ -463,6 +487,9 @@ impl Scene {
                 collision_enabled: false,
                 layer: LAYER_ENVIRONMENT,
                 is_static: true,  // Buildings are static by default
+                animator_config: None,
+                parent_id: None,
+                fov: 0.785,
                 deployed: false,
             });
         }
@@ -482,6 +509,9 @@ impl Scene {
             collision_enabled: false,
             layer: LAYER_DEFAULT,
             is_static: true,
+            animator_config: None,
+            parent_id: None,
+            fov: 0.785,
             deployed: false,
         });
         s
@@ -918,6 +948,9 @@ impl EditorApp {
                 collision_enabled: true,
                 layer: LAYER_PROP, // Default new primitives to Props
                 is_static: false,
+                animator_config: None,
+                parent_id: None,
+                fov: 0.785,
                 deployed: false,
             };
             // Push to undo stack
@@ -1041,7 +1074,7 @@ impl EditorApp {
                     if path.is_file() {
                         if let Some(ext) = path.extension() {
                             let ext_lower = ext.to_string_lossy().to_lowercase();
-                            if ext_lower == "obj" || ext_lower == "fbx" {
+                            if ext_lower == "obj" || ext_lower == "fbx" || ext_lower == "glb" || ext_lower == "gltf" {
                                 if let Some(path_str) = path.to_str() {
                                     files.push(path_str.to_string());
                                 }
@@ -1068,15 +1101,56 @@ impl EditorApp {
             .unwrap_or("Model")
             .to_string();
         
+        // Detect file extension
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+        
         let id = if let Some(scene) = &self.current_scene {
             scene.entities.iter().map(|e| e.id).max().unwrap_or(0) + 1
         } else {
             return Err("No scene loaded".into());
         };
         
+        // Check if this is a glTF file with animations
+        let (animator_config, animation_info) = if ext == "glb" || ext == "gltf" {
+            match stfsc_engine::world::gltf_loader::load_gltf_with_animations(&data) {
+                Ok(model_scene) => {
+                    if !model_scene.animations.is_empty() {
+                        // Create AnimatorConfig from animations
+                        let mut config = stfsc_engine::world::animation::AnimatorConfig::new();
+                        
+                        for (i, anim) in model_scene.animations.iter().enumerate() {
+                            config.add_state(&anim.name, i);
+                            config.clip_names.push(anim.name.clone());
+                            config.clip_durations.push(anim.duration);
+                        }
+                        
+                        // Set first animation as default
+                        if let Some(first_anim) = model_scene.animations.first() {
+                            config.default_state = first_anim.name.clone();
+                        }
+                        
+                        let info = format!("({} animations)", model_scene.animations.len());
+                        (Some(config), info)
+                    } else {
+                        (None, String::new())
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Could not parse glTF for animations: {}", e);
+                    (None, String::new())
+                }
+            }
+        } else {
+            (None, String::new())
+        };
+        
         let new_entity = SceneEntity {
             id,
-            name: filename.clone(),
+            name: format!("{}{}", filename, if !animation_info.is_empty() { format!(" {}", animation_info) } else { String::new() }),
             position: [0.0, 0.0, 0.0],
             rotation: [0.0, 0.0, 0.0, 1.0],
             scale: [1.0, 1.0, 1.0],
@@ -1085,7 +1159,10 @@ impl EditorApp {
             script: None,
             collision_enabled: false,
             layer: LAYER_PROP,
-            is_static: true,  // Imported meshes are static by default (no gravity)
+            is_static: animator_config.is_none(),  // Animated models are not static
+            animator_config,
+            parent_id: None,
+            fov: 0.785,
             deployed: false,
         };
         
@@ -1102,6 +1179,14 @@ impl EditorApp {
                 layer: new_entity.layer,
                 is_static: new_entity.is_static,
             }));
+            
+            // Also send AnimatorConfig if present
+            if let Some(ref anim_config) = new_entity.animator_config {
+                let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::AttachAnimator {
+                    id: new_entity.id,
+                    config: anim_config.clone(),
+                }));
+            }
         }
         
         // Now add to scene
@@ -1111,14 +1196,14 @@ impl EditorApp {
         
         self.selected_entity_id = Some(id);
         self.scene_dirty = true;
-        self.status = format!("Imported: {}", filename);
+        self.status = format!("Imported: {}{}", filename, animation_info);
         
         Ok(())
     }
     
-    /// Deploy a mesh entity to the Quest via SpawnFbxMesh
+    /// Deploy a mesh entity to the Quest via SpawnGltfMesh or SpawnFbxMesh
     fn deploy_mesh_entity(&self, entity: &SceneEntity, mesh_data: &[u8]) {
-        // Upload texture if present
+        // Upload texture if present (mainly for OBJ/FBX fallback)
         if let (Some(texture_id), Some(texture_data)) = (&entity.material.albedo_texture, &entity.material.albedo_texture_data) {
             let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::UploadTexture {
                 id: texture_id.clone(),
@@ -1126,17 +1211,37 @@ impl EditorApp {
             }));
         }
         
-        let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SpawnFbxMesh {
-            id: entity.id,
-            mesh_data: mesh_data.to_vec(),
-            position: entity.position,
-            rotation: entity.rotation,
-            scale: entity.scale,
-            albedo_texture: entity.material.albedo_texture.clone(),
-            collision_enabled: entity.collision_enabled,
-            layer: entity.layer,
-            is_static: entity.is_static,
-        }));
+        let is_gltf = if let EntityType::Mesh { path } = &entity.entity_type {
+            let path_lower = path.to_lowercase();
+            path_lower.ends_with(".glb") || path_lower.ends_with(".gltf")
+        } else {
+            false
+        };
+
+        if is_gltf {
+            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SpawnGltfMesh {
+                id: entity.id,
+                mesh_data: mesh_data.to_vec(),
+                position: entity.position,
+                rotation: entity.rotation,
+                scale: entity.scale,
+                collision_enabled: entity.collision_enabled,
+                layer: entity.layer,
+                is_static: entity.is_static,
+            }));
+        } else {
+            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SpawnFbxMesh {
+                id: entity.id,
+                mesh_data: mesh_data.to_vec(),
+                position: entity.position,
+                rotation: entity.rotation,
+                scale: entity.scale,
+                albedo_texture: entity.material.albedo_texture.clone(),
+                collision_enabled: entity.collision_enabled,
+                layer: entity.layer,
+                is_static: entity.is_static,
+            }));
+        }
     }
 
     /// Add a path to the recent scenes list (max 5 entries)
@@ -1902,6 +2007,9 @@ impl eframe::App for EditorApp {
                                 collision_enabled: true,
                                 layer: LAYER_VEHICLE,
                                 is_static: false,
+                                animator_config: None,
+                                parent_id: None,
+                                fov: 0.785,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1926,6 +2034,9 @@ impl eframe::App for EditorApp {
                                 collision_enabled: true,
                                 layer: LAYER_CHARACTER,
                                 is_static: false,
+                                animator_config: None,
+                                parent_id: None,
+                                fov: 0.785,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1950,6 +2061,9 @@ impl eframe::App for EditorApp {
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
+                                animator_config: None,
+                                parent_id: None,
+                                fov: 0.785,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -1981,6 +2095,9 @@ impl eframe::App for EditorApp {
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
+                                animator_config: None,
+                                parent_id: None,
+                                fov: 0.785,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -2010,6 +2127,9 @@ impl eframe::App for EditorApp {
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
+                                animator_config: None,
+                                parent_id: None,
+                                fov: 0.785,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -2039,6 +2159,9 @@ impl eframe::App for EditorApp {
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
+                                animator_config: None,
+                                parent_id: None,
+                                fov: 0.785,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -2071,6 +2194,9 @@ impl eframe::App for EditorApp {
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
+                                animator_config: None,
+                                parent_id: None,
+                                fov: 0.785,
                                 deployed: false,
                             });
                             self.selected_entity_id = Some(id);
@@ -2079,10 +2205,17 @@ impl eframe::App for EditorApp {
                     }
                     ui.separator();
                     ui.label("📦 Import");
-                    if ui.button("📦 Import 3D Model (.obj)").clicked() {
-                        // Scan for model files
-                        self.import_model_files = Self::scan_model_files();
-                        self.show_import_model_dialog = true;
+                    if ui.button("📦 Import 3D Model...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("3D Models", &["obj", "glb", "gltf", "fbx"])
+                            .pick_file()
+                        {
+                            if let Some(path_str) = path.to_str() {
+                                if let Err(e) = self.import_model_from_path(path_str) {
+                                    self.status = format!("Import failed: {}", e);
+                                }
+                            }
+                        }
                         ui.close_menu();
                     }
                     if ui.button("🖼 UI Editor").clicked() {
@@ -2317,6 +2450,11 @@ impl eframe::App for EditorApp {
             
             if let Some(id) = self.selected_entity_id {
                 if let Some(scene) = &mut self.current_scene {
+                    // Pre-collect potential parents for the dropdown
+                    let parent_options: Vec<(u32, String)> = scene.entities.iter()
+                        .map(|e| (e.id, e.name.clone()))
+                        .collect();
+
                     if let Some(entity) = scene.entities.iter_mut().find(|e| e.id == id) {
                         ui.horizontal(|ui| { 
                             ui.label("Name:"); 
@@ -2324,6 +2462,45 @@ impl eframe::App for EditorApp {
                                 inspector_dirty = true;
                             }
                         });
+                        
+                        // Hierarchy: Parent Dropdown
+                        ui.horizontal(|ui| {
+                            ui.label("🔗 Parent:");
+                            let parent_name = if let Some(pid) = entity.parent_id {
+                                parent_options.iter()
+                                    .find(|(id, _)| *id == pid)
+                                    .map(|(_, name)| name.clone())
+                                    .unwrap_or_else(|| format!("Unknown ({})", pid))
+                            } else {
+                                "None".to_string()
+                            };
+                            
+                            egui::ComboBox::from_id_source(format!("parent_{}", entity.id))
+                                .selected_text(&parent_name)
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_label(entity.parent_id.is_none(), "None").clicked() {
+                                        entity.parent_id = None;
+                                        inspector_dirty = true;
+                                    }
+                                    for (other_id, other_name) in &parent_options {
+                                        if *other_id == entity.id { continue; } // Can't parent to self
+                                        if ui.selectable_label(entity.parent_id == Some(*other_id), other_name).clicked() {
+                                            entity.parent_id = Some(*other_id);
+                                            inspector_dirty = true;
+                                        }
+                                    }
+                                });
+                        });
+
+                        if let EntityType::Camera = entity.entity_type {
+                            ui.horizontal(|ui| {
+                                ui.label("🎥 FOV:");
+                                if ui.add(egui::Slider::new(&mut entity.fov, 0.1..=3.0)).changed() {
+                                    inspector_dirty = true;
+                                }
+                            });
+                        }
+
                         ui.horizontal(|ui| {
                             ui.label("📜 Script:");
                             let mut script_name = entity.script.clone().unwrap_or_default();
@@ -2332,6 +2509,219 @@ impl eframe::App for EditorApp {
                                 inspector_dirty = true;
                             }
                         });
+                        
+                        // Animator Controller Section
+                        ui.add_space(4.0);
+                        let has_animator = entity.animator_config.is_some();
+                        let mut enable_animator = has_animator;
+                        if ui.checkbox(&mut enable_animator, "🎬 Enable Animator").changed() {
+                            if enable_animator && !has_animator {
+                                entity.animator_config = Some(stfsc_engine::world::animation::AnimatorConfig::new());
+                            } else if !enable_animator && has_animator {
+                                entity.animator_config = None;
+                            }
+                            inspector_dirty = true;
+                        }
+                        
+                        if let Some(anim_config) = &mut entity.animator_config {
+                            egui::CollapsingHeader::new("🎬 Animator Controller")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    // Root Motion & Speed
+                                    ui.horizontal(|ui| {
+                                        ui.checkbox(&mut anim_config.apply_root_motion, "Apply Root Motion");
+                                        ui.add(egui::DragValue::new(&mut anim_config.speed).speed(0.05).prefix("Speed: ").clamp_range(0.0..=5.0));
+                                    });
+                                    
+                                    // Clips List (Metadata)
+                                    ui.collapsing("🎬 All Animations", |ui| {
+                                        if anim_config.clip_names.is_empty() {
+                                            ui.label("No clips found.");
+                                        } else {
+                                            for (i, name) in anim_config.clip_names.iter().enumerate() {
+                                                let duration = anim_config.clip_durations.get(i).copied().unwrap_or(0.0);
+                                                ui.horizontal(|ui| {
+                                                    ui.label(format!("{}: {}", i, name));
+                                                    
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        if ui.button("▶ Play").clicked() {
+                                                            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::PreviewAnimation {
+                                                                id: entity.id,
+                                                                clip_index: i,
+                                                            }));
+                                                        }
+                                                        ui.label(format!("{:.2}s", duration));
+                                                    });
+                                                });
+                                            }
+                                        }
+                                    });
+
+                                    // States
+                                    ui.collapsing("📦 States", |ui| {
+                                        let mut remove_idx = None;
+                                        let param_names: Vec<String> = anim_config.parameters.iter().map(|(p, _)| p.clone()).collect();
+                                        
+                                        for (idx, state) in anim_config.states.iter_mut().enumerate() {
+                                            ui.group(|ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.text_edit_singleline(&mut state.name);
+                                                    ui.add(egui::DragValue::new(&mut state.clip_index).prefix("Clip: "));
+                                                    if ui.small_button("🗑").clicked() {
+                                                        remove_idx = Some(idx);
+                                                    }
+                                                });
+                                                
+                                                ui.horizontal(|ui| {
+                                                    ui.add(egui::DragValue::new(&mut state.speed_multiplier).speed(0.05).prefix("Speed: "));
+                                                    
+                                                    ui.add_space(8.0);
+                                                    ui.label("Trigger:");
+                                                    let current_trigger = state.trigger_param.clone().unwrap_or_else(|| "None".to_string());
+                                                    egui::ComboBox::from_id_source(format!("trigger_{}", idx))
+                                                        .selected_text(&current_trigger)
+                                                        .show_ui(ui, |ui| {
+                                                            if ui.selectable_label(state.trigger_param.is_none(), "None").clicked() {
+                                                                state.trigger_param = None;
+                                                                inspector_dirty = true;
+                                                            }
+                                                            for param in &param_names {
+                                                                if ui.selectable_label(state.trigger_param.as_ref() == Some(param), param).clicked() {
+                                                                    state.trigger_param = Some(param.clone());
+                                                                    inspector_dirty = true;
+                                                                }
+                                                            }
+                                                        });
+                                                });
+                                            });
+                                        }
+                                        if let Some(idx) = remove_idx {
+                                            anim_config.states.remove(idx);
+                                            inspector_dirty = true;
+                                        }
+                                        if ui.small_button("+ Add State").clicked() {
+                                            let name = format!("State{}", anim_config.states.len());
+                                            anim_config.add_state(&name, 0);
+                                            inspector_dirty = true;
+                                        }
+                                    });
+                                    
+                                    // Default State
+                                    ui.horizontal(|ui| {
+                                        ui.label("Default:");
+                                        egui::ComboBox::from_id_source("default_state")
+                                            .selected_text(&anim_config.default_state)
+                                            .show_ui(ui, |ui| {
+                                                for state in &anim_config.states {
+                                                    ui.selectable_value(&mut anim_config.default_state, state.name.clone(), &state.name);
+                                                }
+                                            });
+                                    });
+                                    
+                                    // Transitions
+                                    ui.collapsing("↔️ Transitions", |ui| {
+                                        let state_names: Vec<String> = anim_config.states.iter().map(|s| s.name.clone()).collect();
+                                        let mut remove_idx = None;
+                                        for (idx, trans) in anim_config.transitions.iter_mut().enumerate() {
+                                            ui.horizontal(|ui| {
+                                                egui::ComboBox::from_id_source(format!("from_{}", idx))
+                                                    .width(60.0)
+                                                    .selected_text(&trans.from_state)
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(&mut trans.from_state, "ANY".to_string(), "ANY");
+                                                        for name in &state_names {
+                                                            ui.selectable_value(&mut trans.from_state, name.clone(), name);
+                                                        }
+                                                    });
+                                                ui.label("→");
+                                                egui::ComboBox::from_id_source(format!("to_{}", idx))
+                                                    .width(60.0)
+                                                    .selected_text(&trans.to_state)
+                                                    .show_ui(ui, |ui| {
+                                                        for name in &state_names {
+                                                            ui.selectable_value(&mut trans.to_state, name.clone(), name);
+                                                        }
+                                                    });
+                                                ui.add(egui::DragValue::new(&mut trans.duration).speed(0.01).prefix("t:").clamp_range(0.0..=2.0));
+                                                if ui.small_button("🗑").clicked() {
+                                                    remove_idx = Some(idx);
+                                                }
+                                            });
+                                        }
+                                        if let Some(idx) = remove_idx {
+                                            anim_config.transitions.remove(idx);
+                                            inspector_dirty = true;
+                                        }
+                                        if ui.small_button("+ Add Transition").clicked() {
+                                            use stfsc_engine::world::animation::TransitionConditionConfig;
+                                            anim_config.add_transition("", "", TransitionConditionConfig::AnimationComplete, 0.2);
+                                            inspector_dirty = true;
+                                        }
+                                    });
+                                    
+                                    // Parameters
+                                    ui.collapsing("⚙️ Parameters", |ui| {
+                                        let mut remove_idx = None;
+                                        for (idx, (name, param)) in anim_config.parameters.iter_mut().enumerate() {
+                                            ui.horizontal(|ui| {
+                                                ui.text_edit_singleline(name);
+                                                match param {
+                                                    stfsc_engine::world::animation::AnimParamConfig::Float(v) => {
+                                                        ui.label("Float");
+                                                        ui.add(egui::DragValue::new(v).speed(0.05));
+                                                    }
+                                                    stfsc_engine::world::animation::AnimParamConfig::Bool(v) => {
+                                                        ui.checkbox(v, "Bool");
+                                                    }
+                                                    stfsc_engine::world::animation::AnimParamConfig::Int(v) => {
+                                                        ui.label("Int");
+                                                        ui.add(egui::DragValue::new(v));
+                                                    }
+                                                    stfsc_engine::world::animation::AnimParamConfig::Trigger => {
+                                                        ui.label("Trigger");
+                                                    }
+                                                }
+                                                if ui.small_button("🗑").clicked() {
+                                                    remove_idx = Some(idx);
+                                                }
+                                            });
+                                        }
+                                        if let Some(idx) = remove_idx {
+                                            anim_config.parameters.remove(idx);
+                                            inspector_dirty = true;
+                                        }
+                                        ui.horizontal(|ui| {
+                                            if ui.small_button("+ Float").clicked() {
+                                                anim_config.add_float(&format!("Param{}", anim_config.parameters.len()), 0.0);
+                                                inspector_dirty = true;
+                                            }
+                                            if ui.small_button("+ Bool").clicked() {
+                                                anim_config.add_bool(&format!("Flag{}", anim_config.parameters.len()), false);
+                                                inspector_dirty = true;
+                                            }
+                                            if ui.small_button("+ Trigger").clicked() {
+                                                anim_config.add_trigger(&format!("Trigger{}", anim_config.parameters.len()));
+                                                inspector_dirty = true;
+                                            }
+                                        });
+                                    });
+                                    
+                                    // IK Toggles
+                                    ui.horizontal(|ui| {
+                                        ui.checkbox(&mut anim_config.look_at_ik_enabled, "Look-At IK");
+                                        ui.checkbox(&mut anim_config.foot_ik_enabled, "Foot IK");
+                                    });
+                                    
+                                    // Deploy Animator button
+                                    if ui.button("🚀 Deploy Animator").clicked() {
+                                        let _ = command_tx.send(AppCommand::Send(SceneUpdate::AttachAnimator {
+                                            id: entity.id,
+                                            config: anim_config.clone(),
+                                        }));
+                                    }
+                                });
+                        }
+
                         if ui.checkbox(&mut entity.collision_enabled, "🧱 Toggle Collision").changed() {
                             inspector_dirty = true;
                             if self.is_connected {
@@ -2624,27 +3014,72 @@ impl eframe::App for EditorApp {
                 if let Some(scene) = &mut self.current_scene {
                     if let Some(e) = scene.entities.iter_mut().find(|e| e.id == id) {
                         if self.is_connected {
-                            if let EntityType::Camera = e.entity_type {
-                                let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetPlayerStart {
-                                    position: e.position, rotation: e.rotation,
-                                }));
-                            } else {
-                                let color = e.material.albedo_color;
-                                let primitive = match &e.entity_type {
-                                    EntityType::Primitive(p) => match p {
-                                        PrimitiveType::Cube => 0, PrimitiveType::Sphere => 1, PrimitiveType::Cylinder => 2,
-                                        PrimitiveType::Plane => 3, PrimitiveType::Capsule => 4, PrimitiveType::Cone => 5,
-                                    },
-                                    EntityType::Ground => 0, EntityType::Vehicle => 0, EntityType::Building { .. } => 0, EntityType::CrowdAgent { .. } => 4, _ => 0
-                                };
-                                let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::Spawn {
-                                    id: e.id, primitive, position: e.position, rotation: e.rotation, color,
-                                    albedo_texture: e.material.albedo_texture.clone(),
-                                    collision_enabled: e.collision_enabled,
-                                    layer: e.layer,
-                                    is_static: e.is_static,
+                            match &e.entity_type {
+                                EntityType::Camera => {
+                                    let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetActiveCamera {
+                                        id: e.id, fov: e.fov,
+                                    }));
+                                },
+                                EntityType::Mesh { path } => {
+                                    // Load file data and send correct spawn command
+                                    if let Ok(data) = std::fs::read(path) {
+                                        let path_lower = path.to_lowercase();
+                                        if path_lower.ends_with(".glb") || path_lower.ends_with(".gltf") {
+                                            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SpawnGltfMesh {
+                                                id: e.id,
+                                                mesh_data: data,
+                                                position: e.position,
+                                                rotation: e.rotation,
+                                                scale: e.scale,
+                                                collision_enabled: e.collision_enabled,
+                                                layer: e.layer,
+                                                is_static: e.is_static,
+                                            }));
+                                        } else {
+                                            // Assume FBX/OBJ for SpawnFbxMesh
+                                            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SpawnFbxMesh {
+                                                id: e.id,
+                                                mesh_data: data,
+                                                position: e.position,
+                                                rotation: e.rotation,
+                                                scale: e.scale,
+                                                albedo_texture: e.material.albedo_texture.clone(),
+                                                collision_enabled: e.collision_enabled,
+                                                layer: e.layer,
+                                                is_static: e.is_static,
+                                            }));
+                                        }
+                                    } else {
+                                        self.status = format!("Error: Could not read mesh file {}", path);
+                                    }
+                                },
+                                _ => {
+                                    let color = e.material.albedo_color;
+                                    let primitive = match &e.entity_type {
+                                        EntityType::Primitive(p) => match p {
+                                            PrimitiveType::Cube => 0, PrimitiveType::Sphere => 1, PrimitiveType::Cylinder => 2,
+                                            PrimitiveType::Plane => 3, PrimitiveType::Capsule => 4, PrimitiveType::Cone => 5,
+                                        },
+                                        EntityType::CrowdAgent { .. } => 4, _ => 0
+                                    };
+                                    let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::Spawn {
+                                        id: e.id, primitive, position: e.position, rotation: e.rotation, color,
+                                        albedo_texture: e.material.albedo_texture.clone(),
+                                        collision_enabled: e.collision_enabled,
+                                        layer: e.layer,
+                                        is_static: e.is_static,
+                                    }));
+                                }
+                            }
+
+                            // Always send parenting command if parent exists
+                            if let Some(parent_id) = e.parent_id {
+                                let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::AttachEntity {
+                                    id: e.id,
+                                    parent_id: Some(parent_id),
                                 }));
                             }
+
                             e.deployed = true;
                             self.status = format!("Deployed #{}", id);
                         }

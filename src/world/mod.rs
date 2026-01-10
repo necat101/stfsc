@@ -52,6 +52,13 @@ pub struct Transform {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct LocalTransform {
+    pub position: glam::Vec3,
+    pub rotation: glam::Quat,
+    pub scale: glam::Vec3,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct Vector3 {
     pub x: f32,
     pub y: f32,
@@ -175,6 +182,19 @@ pub struct EditorEntityId(pub u32);
 
 #[derive(Debug)]
 pub struct Procedural; // Tag for procedurally generated entities
+
+/// Hierarchy component for parent-child relationships
+#[derive(Clone, Copy, Debug)]
+pub struct Hierarchy {
+    pub parent: Option<Entity>,
+}
+
+/// Camera component for defining view perspectives
+#[derive(Clone, Copy, Debug)]
+pub struct Camera {
+    pub fov: f32,
+    pub active: bool,
+}
 
 /// Marker component for entities spawned at engine startup (test scene, etc.)
 /// These entities will be cleared when ClearScene is called
@@ -448,6 +468,21 @@ pub enum SceneUpdate {
         looping: bool,
         max_distance: f32,
     },
+    /// Play a specific animation clip on an entity for preview
+    PreviewAnimation {
+        id: u32,
+        clip_index: usize,
+    },
+    /// Attach an entity to a parent
+    AttachEntity {
+        id: u32,
+        parent_id: Option<u32>,
+    },
+    /// Set an entity's camera as the active rendering camera
+    SetActiveCamera {
+        id: u32,
+        fov: f32,
+    },
     /// Stop a playing sound
     StopSound {
         id: u32,
@@ -466,6 +501,11 @@ pub enum SceneUpdate {
     AttachScript {
         id: u32,
         name: String,
+    },
+    /// Attach an animator controller to an entity
+    AttachAnimator {
+        id: u32,
+        config: crate::world::animation::AnimatorConfig,
     },
     /// Spawn a ground plane with shadow frustum sizing
     SpawnGroundPlane {
@@ -501,6 +541,20 @@ pub enum SceneUpdate {
         scale: [f32; 3],
         #[serde(default)]
         albedo_texture: Option<String>,  // Optional texture ID
+        #[serde(default)]
+        collision_enabled: bool,
+        #[serde(default)]
+        layer: u32,
+        #[serde(default)]
+        is_static: bool,
+    },
+    /// Spawn a glTF/GLB mesh with full model data and animation support
+    SpawnGltfMesh {
+        id: u32,
+        mesh_data: Vec<u8>,  // Raw GLB/GLTF file bytes
+        position: [f32; 3],
+        rotation: [f32; 4],
+        scale: [f32; 3],
         #[serde(default)]
         collision_enabled: bool,
         #[serde(default)]
@@ -633,6 +687,57 @@ impl GameWorld {
         world
     }
 
+    /// Helper to find an entity by its EditorEntityId
+    pub fn find_by_editor_id(&self, id: u32) -> Option<Entity> {
+        for (entity, editor_id) in self.ecs.query::<&EditorEntityId>().iter() {
+            if editor_id.0 == id {
+                return Some(entity);
+            }
+        }
+        None
+    }
+
+    /// Propagate world-space transforms from parents to children
+    pub fn resolve_hierarchies(&mut self) {
+        // Multi-pass to handle nested hierarchies (up to 8 levels)
+        for _ in 0..8 {
+            let mut updates = Vec::new();
+            
+            for (entity, (hierarchy, local_transform)) in self.ecs.query::<(&Hierarchy, &LocalTransform)>().iter() {
+                if let Some(parent) = hierarchy.parent {
+                    if let Ok(parent_transform) = self.ecs.get::<&Transform>(parent) {
+                        // Calculate world-space transform:
+                        // world_pos = parent_pos + (parent_rot * (parent_scale * local_pos))
+                        let world_pos = parent_transform.position + (parent_transform.rotation * (parent_transform.scale * local_transform.position));
+                        let world_rot = parent_transform.rotation * local_transform.rotation;
+                        let world_scale = parent_transform.scale * local_transform.scale;
+                        
+                        // Only add to updates if it actually changed to avoid infinite loops
+                        if let Ok(t) = self.ecs.get::<&Transform>(entity) {
+                            if (t.position - world_pos).length_squared() > 0.0001 || 
+                               (t.rotation.dot(world_rot)).abs() < 0.9999 ||
+                               (t.scale - world_scale).length_squared() > 0.0001 {
+                                updates.push((entity, world_pos, world_rot, world_scale));
+                            }
+                        } else {
+                            updates.push((entity, world_pos, world_rot, world_scale));
+                        }
+                    }
+                }
+            }
+            
+            if updates.is_empty() { break; }
+            
+            for (entity, p, r, s) in updates {
+                if let Ok(mut t) = self.ecs.get::<&mut Transform>(entity) {
+                    t.position = p;
+                    t.rotation = r;
+                    t.scale = s;
+                }
+            }
+        }
+    }
+
     pub fn update_streaming(&mut self, player_pos: glam::Vec3, physics: &mut PhysicsWorld) {
         // Chunk Settings
         let chunk_size = 16.0; // 16 meters
@@ -697,6 +802,11 @@ impl GameWorld {
                             rotation: glam::Quat::from_array(rotation),
                             scale: glam::Vec3::ONE,
                         },
+                        LocalTransform {
+                            position: glam::Vec3::from(position),
+                            rotation: glam::Quat::from_array(rotation),
+                            scale: glam::Vec3::ONE,
+                        },
                         MeshHandle(primitive as usize), // Use requested primitive
                         Material {
                             color: [color[0], color[1], color[2], 1.0],
@@ -729,6 +839,11 @@ impl GameWorld {
                     self.ecs.spawn((
                         EditorEntityId(id), // Track this entity's ID for deletion
                         Transform {
+                            position: glam::Vec3::from(position),
+                            rotation: glam::Quat::from_array(rotation),
+                            scale: glam::Vec3::ONE,
+                        },
+                        LocalTransform {
                             position: glam::Vec3::from(position),
                             rotation: glam::Quat::from_array(rotation),
                             scale: glam::Vec3::ONE,
@@ -1007,6 +1122,112 @@ impl GameWorld {
                         warn!("AttachScript: Script '{}' not found in registry", name);
                     }
                 }
+                SceneUpdate::AttachAnimator { id, config } => {
+                    // Find entity by EditorEntityId
+                    let mut target_entity = None;
+                    for (entity, editor_id) in self.ecs.query::<&EditorEntityId>().iter() {
+                        if editor_id.0 == id {
+                            target_entity = Some(entity);
+                            break;
+                        }
+                    }
+
+                    if let Some(entity) = target_entity {
+                        use crate::world::animation::*;
+                        
+                        // Create state machine from config
+                        let mut state_machine = AnimationStateMachine::new();
+                        
+                        // Add states
+                        for state_cfg in &config.states {
+                            state_machine.add_state(&state_cfg.name, state_cfg.clip_index);
+                            
+                            // Automatically add a transition from ANY to this state if a trigger is provided
+                            if let Some(ref trigger) = state_cfg.trigger_param {
+                                state_machine.transitions.push(
+                                    StateTransition::new(
+                                        "ANY",
+                                        &state_cfg.name,
+                                        TransitionCondition::Trigger(trigger.clone()),
+                                        0.2, // Default transition duration
+                                    )
+                                );
+                            }
+                        }
+                        
+                        // Add transitions
+                        for trans_cfg in &config.transitions {
+                            let condition: TransitionCondition = trans_cfg.condition.clone().into();
+                            state_machine.transitions.push(
+                                StateTransition::new(
+                                    &trans_cfg.from_state,
+                                    &trans_cfg.to_state,
+                                    condition,
+                                    trans_cfg.duration,
+                                ).with_priority(trans_cfg.priority)
+                            );
+                        }
+                        
+                        // Add parameters
+                        for (name, param_cfg) in &config.parameters {
+                            match param_cfg {
+                                AnimParamConfig::Float(v) => state_machine.set_float(name, *v),
+                                AnimParamConfig::Bool(v) => state_machine.set_bool(name, *v),
+                                AnimParamConfig::Int(v) => state_machine.set_int(name, *v),
+                                AnimParamConfig::Trigger => state_machine.set_trigger(name),
+                            }
+                        }
+                        
+                        // Set default state
+                        if !config.default_state.is_empty() {
+                            state_machine.current_state = config.default_state.clone();
+                        }
+                        
+                        // Create controller
+                        let mut controller = AnimatorController::new(state_machine);
+                        controller.apply_root_motion = config.apply_root_motion;
+                        controller.speed = config.speed;
+                        
+                        // Attach to entity
+                        let _ = self.ecs.insert_one(entity, controller);
+                        info!("Attached AnimatorController to entity {} with {} states, {} transitions", 
+                              id, config.states.len(), config.transitions.len());
+                    } else {
+                        warn!("AttachAnimator: No entity found with id {}", id);
+                    }
+                }
+
+                SceneUpdate::PreviewAnimation { id, clip_index } => {
+                    if let Some(entity) = self.find_by_editor_id(id) {
+                        if let Ok(mut animator) = self.ecs.get::<&mut Animator>(entity) {
+                            animator.play(clip_index);
+                            info!("Previewing animation clip {} on entity {}", clip_index, id);
+                        }
+                    }
+                }
+
+                SceneUpdate::AttachEntity { id, parent_id } => {
+                    if let Some(entity) = self.find_by_editor_id(id) {
+                        let parent = parent_id.and_then(|pid| self.find_by_editor_id(pid));
+                        let _ = self.ecs.insert_one(entity, Hierarchy { parent });
+                        info!("Attached entity {} to parent {:?}", id, parent_id);
+                    }
+                }
+
+                SceneUpdate::SetActiveCamera { id, fov } => {
+                    if let Some(entity) = self.find_by_editor_id(id) {
+                        // Deactivate other cameras
+                        for (e, cam) in self.ecs.query::<&mut Camera>().iter() {
+                            if e != entity {
+                                cam.active = false;
+                            }
+                        }
+                        
+                        let _ = self.ecs.insert_one(entity, Camera { fov, active: true });
+                        info!("Set entity {} as active camera (FOV: {})", id, fov);
+                    }
+                }
+
                 SceneUpdate::SpawnGroundPlane {
                     id,
                     primitive,
@@ -1099,6 +1320,97 @@ impl GameWorld {
                             let is_dynamic = primitive != 3; 
                             self.attach_physics_to_entity(entity, physics, primitive, transform.position.into(), transform.rotation.into(), transform.scale.into(), is_dynamic, layer);
                             info!("Updated collision for entity {} (Layer: {})", id, layer);
+                        }
+                    }
+                }
+                SceneUpdate::SpawnGltfMesh {
+                    id,
+                    mesh_data,
+                    position,
+                    rotation,
+                    scale,
+                    collision_enabled,
+                    layer,
+                    is_static,
+                } => {
+                    match gltf_loader::load_gltf_with_animations(&mesh_data) {
+                        Ok(model_scene) => {
+                            // Merge meshes for rendering
+                            let mut mesh = fbx_loader::merge_fbx_meshes(&model_scene);
+                            
+                            if mesh.vertices.is_empty() {
+                                warn!("glTF file contains no mesh data for entity {}", id);
+                            } else {
+                                let vert_count = mesh.vertices.len();
+                                let idx_count = mesh.indices.len();
+                                
+                                // Find the texture bytes for this mesh's albedo_texture
+                                if let Some(tex_name) = &mesh.albedo_texture {
+                                    for texture in &model_scene.textures {
+                                        if &texture.name == tex_name {
+                                            // Embed the raw texture bytes into the mesh
+                                            mesh.albedo = Some(texture.data.clone());
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                let albedo_texture = mesh.albedo_texture.clone();
+
+                                let entity = self.ecs.spawn((
+                                    EditorEntityId(id),
+                                    Transform {
+                                        position: glam::Vec3::from(position),
+                                        rotation: glam::Quat::from_array(rotation),
+                                        scale: glam::Vec3::from(scale),
+                                    },
+                                    mesh,
+                                    Material {
+                                        color: [1.0, 1.0, 1.0, 1.0],
+                                        albedo_texture,
+                                        metallic: 0.0,
+                                        roughness: 0.5,
+                                    },
+                                ));
+
+                                // Store skeleton and animations if present for the Animator to find later
+                                if let Some(skeleton) = model_scene.skeleton {
+                                    self.ecs.insert_one(entity, skeleton).unwrap();
+                                }
+                                
+                                if !model_scene.animations.is_empty() {
+                                    // Normally we would store these in a global registry or on the entity
+                                    // For now, let's just log it
+                                    info!("glTF model {} loaded with {} animations", id, model_scene.animations.len());
+                                }
+
+                                if collision_enabled {
+                                    self.attach_physics_to_entity(
+                                        entity,
+                                        physics,
+                                        255, // 255 = custom mesh using its AABB
+                                        position,
+                                        rotation,
+                                        scale,
+                                        !is_static,
+                                        layer,
+                                    );
+                                }
+
+                                info!(
+                                    "Spawned glTF mesh EditorEntityId({}) at pos {:?} scale {:?} - {} vertices, {} indices (collision: {}, static: {})",
+                                    id,
+                                    position,
+                                    scale,
+                                    vert_count,
+                                    idx_count,
+                                    collision_enabled,
+                                    is_static
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to load glTF for entity {}: {}", id, e);
                         }
                     }
                 }
@@ -1335,7 +1647,7 @@ impl GameWorld {
             };
 
             if apply_rm {
-                if let Ok(mut animator) = self.ecs.get::<&mut Animator>(entity) {
+                if let Ok(animator) = self.ecs.get::<&mut Animator>(entity) {
                     if animator.root_motion.has_motion {
                         let delta_pos = animator.root_motion.delta_position;
                         let delta_rot = animator.root_motion.delta_rotation;
@@ -1373,9 +1685,15 @@ impl GameWorld {
     }
 
     pub fn update_logic(&mut self, physics: &mut PhysicsWorld, dt: f32, ui_events: Vec<crate::ui::UiEvent>) {
-        // 0. Process UI Events
-        for event in &ui_events {
-            self.dispatch_ui_event(physics, event);
+        // Resolve hierarchical transforms BEFORE script/physics updates if we want them to affect visibility,
+        // or AFTER if we want them to reflect the latest parent movement.
+        // Let's do it AFTER script/physics logic in the main loop to ensure we have the latest world positions.
+        self.resolve_hierarchies();
+
+        // Drain pending UI events
+        let mut events = ui_events;
+        for event in events.drain(..) {
+            self.dispatch_ui_event(physics, &event);
         }
 
         // 0.5 Update Animations - tick all skeletal animators

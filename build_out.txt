@@ -1,0 +1,14 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/stfsc-main)
+error[E0282]: type annotations needed for `Vec<_>`
+    --> src/world/mod.rs:1206:29
+     |
+1206 |                         let mut cameras_to_deactivate = Vec::new();
+     |                             ^^^^^^^^^^^^^^^^^^^^^^^^^   ---------- type must be known at this point
+     |
+help: consider giving `cameras_to_deactivate` an explicit type, where the type for type parameter `T` is specified
+     |
+1206 |                         let mut cameras_to_deactivate: Vec<T> = Vec::new();
+     |                                                      ++++++++
+
+For more information about this error, try `rustc --explain E0282`.
+error: could not compile `stfsc_engine` (lib) due to 1 previous error
