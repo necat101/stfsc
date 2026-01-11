@@ -5,9 +5,9 @@ use std::net::TcpStream;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use stfsc_engine::world::{
-    LightType, SceneUpdate, Mesh, Vertex, LAYER_ENVIRONMENT, LAYER_PROP, LAYER_CHARACTER, LAYER_VEHICLE, LAYER_DEFAULT,
+    LightType, SceneUpdate, LAYER_ENVIRONMENT, LAYER_PROP, LAYER_CHARACTER, LAYER_VEHICLE, LAYER_DEFAULT,
     animation::{EditorKeyframe, KeyframeChannel, KeyframeValue, KeyframeInterpolation},
-    fbx_loader::{ModelScene, AnimationClip, Skeleton},
+    fbx_loader::ModelScene,
 };
 use glam::{Mat4, Vec3 as GVec3, Quat as GQuat};
 use std::collections::HashMap;
@@ -729,6 +729,9 @@ struct EditorApp {
     // Local assets for editor rendering
     model_cache: HashMap<String, Arc<ModelScene>>,
     egui_textures: HashMap<String, egui::TextureHandle>,
+    
+    // Interaction
+    gizmo_axis: Option<usize>, // 0=X, 1=Y, 2=Z
 }
 
 impl EditorApp {
@@ -854,6 +857,7 @@ impl EditorApp {
                 cache
             },
             egui_textures: HashMap::new(),
+            gizmo_axis: None,
         }
     }
 
@@ -1097,7 +1101,7 @@ impl EditorApp {
     }
 
     /// Load a scene from the specified file path
-    fn load_scene_from_path(&mut self, path: &str) -> Result<(), String> {
+    fn load_scene_from_path(&mut self, ctx: &egui::Context, path: &str) -> Result<(), String> {
         let contents = std::fs::read_to_string(path)
             .map_err(|e| format!("Read error: {}", e))?;
         
@@ -1132,6 +1136,11 @@ impl EditorApp {
                 } else {
                     eprintln!("Warning: Could not load texture at '{}'", texture_path);
                 }
+            }
+            
+            // Cache model for editor rendering
+            if let EntityType::Mesh { path } = &entity.entity_type {
+                let _ = self.cache_model_at_path(ctx, path);
             }
         }
         
@@ -1190,6 +1199,54 @@ impl EditorApp {
         files
     }
     
+    /// Cache a 3D model and its textures for editor rendering
+    fn cache_model_at_path(&mut self, ctx: &egui::Context, path: &str) -> Result<Arc<ModelScene>, String> {
+        if let Some(cached) = self.model_cache.get(path) {
+            return Ok(cached.clone());
+        }
+
+        let data = std::fs::read(path).map_err(|e| format!("Failed to read file {}: {}", path, e))?;
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+
+        let model_scene = if ext == "glb" || ext == "gltf" {
+            stfsc_engine::world::gltf_loader::load_gltf_with_animations(&data)
+                .map_err(|e| format!("glTF Error: {}", e))?
+        } else if ext == "obj" {
+            stfsc_engine::world::fbx_loader::ModelScene::from_obj_bytes(&data)
+                .map_err(|e| format!("OBJ Error: {}", e))?
+        } else {
+            return Err(format!("Unsupported model format: .{}", ext));
+        };
+
+        // Load textures into egui
+        for tex in &model_scene.textures {
+            if !self.egui_textures.contains_key(&tex.name) {
+                if let Ok(img) = image::load_from_memory(&tex.data) {
+                    let rgba = img.to_rgba8();
+                    let pixels = rgba.as_flat_samples();
+                    let color_img = egui::ColorImage::from_rgba_unmultiplied(
+                        [img.width() as usize, img.height() as usize],
+                        pixels.as_slice(),
+                    );
+                    let handle = ctx.load_texture(
+                        &tex.name,
+                        color_img,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.egui_textures.insert(tex.name.clone(), handle);
+                }
+            }
+        }
+
+        let arc_model = Arc::new(model_scene);
+        self.model_cache.insert(path.to_string(), arc_model.clone());
+        Ok(arc_model)
+    }
+
     /// Import a 3D model from file path and add to scene
     /// Import a 3D model (glTF/OBJ/FBX) and add it as a Mesh entity
     fn import_model_from_path(&mut self, ctx: &egui::Context, path: &str) -> Result<(), String> {
@@ -1217,31 +1274,9 @@ impl EditorApp {
         };
         
         // Check if this is a glTF file with animations
-        let (animator_config, animation_info) = if ext == "glb" || ext == "gltf" {
-            match stfsc_engine::world::gltf_loader::load_gltf_with_animations(&data) {
+        let (animator_config, animation_info) = if ext == "glb" || ext == "gltf" || ext == "obj" {
+            match self.cache_model_at_path(ctx, path) {
                 Ok(model_scene) => {
-                    self.model_cache.insert(path.to_string(), Arc::new(model_scene.clone()));
-                    
-                    // Load textures into egui
-                    for tex in &model_scene.textures {
-                        if !self.egui_textures.contains_key(&tex.name) {
-                            if let Ok(img) = image::load_from_memory(&tex.data) {
-                                let rgba = img.to_rgba8();
-                                let pixels = rgba.as_flat_samples();
-                                let color_img = egui::ColorImage::from_rgba_unmultiplied(
-                                    [img.width() as usize, img.height() as usize],
-                                    pixels.as_slice(),
-                                );
-                                let handle = ctx.load_texture(
-                                    &tex.name,
-                                    color_img,
-                                    egui::TextureOptions::LINEAR,
-                                );
-                                self.egui_textures.insert(tex.name.clone(), handle);
-                            }
-                        }
-                    }
-
                     if !model_scene.animations.is_empty() {
                         // Create AnimatorConfig from animations
                         let mut config = stfsc_engine::world::animation::AnimatorConfig::new();
@@ -1273,7 +1308,7 @@ impl EditorApp {
                     }
                 }
                 Err(e) => {
-                    log::warn!("Could not parse glTF for animations: {}", e);
+                    log::warn!("Could not cache model: {}", e);
                     (None, String::new())
                 }
             }
@@ -1400,7 +1435,7 @@ impl EditorApp {
     }
 
     /// Execute the pending action after user confirms in unsaved dialog
-    fn execute_pending_action(&mut self) {
+    fn execute_pending_action(&mut self, ctx: &egui::Context) {
         if let Some(action) = self.pending_action.take() {
             match action {
                 PendingAction::NewScene => {
@@ -1408,7 +1443,7 @@ impl EditorApp {
                     self.new_scene_name.clear();
                 }
                 PendingAction::OpenScene(path) => {
-                    if let Err(e) = self.load_scene_from_path(&path) {
+                    if let Err(e) = self.load_scene_from_path(ctx, &path) {
                         self.status = format!("Error: {}", e);
                     }
                 }
@@ -1834,52 +1869,103 @@ impl EditorApp {
         let scroll = ui.input(|i| i.scroll_delta.y);
         self.camera.distance = (self.camera.distance - scroll * 1.5).clamp(2.0, 500.0);
 
-        // Premium Background - Dark Gradient
-        let bg_color_top = egui::Color32::from_rgb(20, 25, 35);
-        let bg_color_bottom = egui::Color32::from_rgb(10, 12, 18);
-        
-        painter.rect_filled(rect, 0.0, bg_color_bottom);
-        
-        let steps = 15;
-        for i in 0..steps {
-            let t = i as f32 / steps as f32;
-            let h = rect.height() * 0.6;
-            let r = egui::Rect::from_min_max(
-                egui::pos2(rect.min.x, rect.min.y + t * h),
-                egui::pos2(rect.max.x, rect.min.y + (t + 1.0/steps as f32) * h),
-            );
-            let color = egui::Color32::from_rgb(
-                (bg_color_top.r() as f32 * (1.0 - t) + bg_color_bottom.r() as f32 * t) as u8,
-                (bg_color_top.g() as f32 * (1.0 - t) + bg_color_bottom.g() as f32 * t) as u8,
-                (bg_color_top.b() as f32 * (1.0 - t) + bg_color_bottom.b() as f32 * t) as u8,
-            );
-            painter.rect_filled(r, 0.0, color);
+        // Background - Unity-style sky for High mode, dark for Low mode
+        if self.render_quality == RenderQuality::High {
+            // Unity-style bright sky gradient (bottom = horizon light blue, top = sky blue)
+            let sky_horizon = egui::Color32::from_rgb(147, 180, 210);   // Light blue at horizon
+            let sky_zenith = egui::Color32::from_rgb(82, 127, 175);     // Deeper blue at top
+            
+            let steps = 16;
+            for i in 0..steps {
+                let t = i as f32 / steps as f32;
+                let h = rect.height();
+                let r = egui::Rect::from_min_max(
+                    egui::pos2(rect.min.x, rect.min.y + t * h),
+                    egui::pos2(rect.max.x, rect.min.y + (t + 1.0/steps as f32) * h),
+                );
+                // Inverse t: sky is brighter at top (t=0) in this loop runs top-to-bottom
+                let inv_t = 1.0 - t;
+                let color = egui::Color32::from_rgb(
+                    (sky_zenith.r() as f32 * inv_t + sky_horizon.r() as f32 * t) as u8,
+                    (sky_zenith.g() as f32 * inv_t + sky_horizon.g() as f32 * t) as u8,
+                    (sky_zenith.b() as f32 * inv_t + sky_horizon.b() as f32 * t) as u8,
+                );
+                painter.rect_filled(r, 0.0, color);
+            }
+        } else {
+            // Low Quality: Dark professional gradient
+            let bg_color_top = egui::Color32::from_rgb(20, 22, 26);
+            let bg_color_bottom = egui::Color32::from_rgb(45, 50, 60);
+            
+            painter.rect_filled(rect, 0.0, bg_color_top);
+            
+            let steps = 12;
+            for i in 0..steps {
+                let t = i as f32 / steps as f32;
+                let h = rect.height();
+                let r = egui::Rect::from_min_max(
+                    egui::pos2(rect.min.x, rect.min.y + t * h),
+                    egui::pos2(rect.max.x, rect.min.y + (t + 1.0/steps as f32) * h),
+                );
+                let color = egui::Color32::from_rgb(
+                    (bg_color_top.r() as f32 * (1.0 - t) + bg_color_bottom.r() as f32 * t) as u8,
+                    (bg_color_top.g() as f32 * (1.0 - t) + bg_color_bottom.g() as f32 * t) as u8,
+                    (bg_color_top.b() as f32 * (1.0 - t) + bg_color_bottom.b() as f32 * t) as u8,
+                );
+                painter.rect_filled(r, 0.0, color);
+            }
         }
 
-        // Grid - Professional subtle grid
-        let grid_spacing = 5.0;
-        let grid_alpha = (40.0 / (self.camera.distance * 0.1).max(1.0)).clamp(10.0, 80.0) as u8;
-        let stroke_main = egui::Stroke::new(0.8, egui::Color32::from_rgba_unmultiplied(100, 110, 130, grid_alpha));
-        let stroke_sub = egui::Stroke::new(0.4, egui::Color32::from_rgba_unmultiplied(80, 90, 110, grid_alpha/2));
+        // Professional fading grid - colors adjusted for background
+        let grid_size = 100.0;
+        let grid_step = 5.0;
+        let cam_dist = self.camera.distance;
+        let base_alpha = (120.0 / (cam_dist * 0.05).max(1.0)).clamp(30.0, 180.0);
+        
+        // Grid colors based on mode (darker for bright sky, lighter for dark)
+        let (major_color, minor_color) = if self.render_quality == RenderQuality::High {
+            // Dark grid on bright sky (like Unity)
+            ([60, 80, 100], [80, 100, 120])
+        } else {
+            // Light grid on dark background
+            ([140, 150, 170], [100, 110, 130])
+        };
         
         for i in -20..=20 {
-            let x = i as f32 * grid_spacing;
+            let val = i as f32 * grid_step;
+            if val.abs() > grid_size { continue; }
             let is_major = i % 5 == 0;
-            let stroke = if is_major { stroke_main } else { stroke_sub };
             
+            // Dist alpha - fade at edges
+            let edge_fade = 1.0 - (val.abs() / grid_size);
+            let alpha = (base_alpha * edge_fade) as u8;
+            
+            // X-lines
             if let (Some(p1), Some(p2)) = (
-                self.camera.project(Vec3::new(x, 0.0, -100.0), available),
-                self.camera.project(Vec3::new(x, 0.0, 100.0), available),
+                self.camera.project(Vec3::new(val, 0.0, -grid_size), available),
+                self.camera.project(Vec3::new(val, 0.0, grid_size), available),
             ) {
+                let stroke = if is_major { 
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(major_color[0], major_color[1], major_color[2], alpha))
+                } else {
+                    egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(minor_color[0], minor_color[1], minor_color[2], alpha / 2))
+                };
                 painter.line_segment(
                     [egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)],
                     stroke,
                 );
             }
+            
+            // Z-lines
             if let (Some(p1), Some(p2)) = (
-                self.camera.project(Vec3::new(-100.0, 0.0, x), available),
-                self.camera.project(Vec3::new(100.0, 0.0, x), available),
+                self.camera.project(Vec3::new(-grid_size, 0.0, val), available),
+                self.camera.project(Vec3::new(grid_size, 0.0, val), available),
             ) {
+                let stroke = if is_major { 
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(major_color[0], major_color[1], major_color[2], alpha))
+                } else {
+                    egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(minor_color[0], minor_color[1], minor_color[2], alpha / 2))
+                };
                 painter.line_segment(
                     [egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)],
                     stroke,
@@ -1967,12 +2053,19 @@ impl EditorApp {
                             );
                             
                             let pose = Self::compute_animated_pose(entity, model_cache, anim_state);
+                            
+                            // Get material base color for this entity
+                            let mat_color = GVec3::new(
+                                entity.material.albedo_color[0],
+                                entity.material.albedo_color[1],
+                                entity.material.albedo_color[2],
+                            );
 
                             for mesh in &model.meshes {
                                 let mut egui_vertices = Vec::with_capacity(mesh.vertices.len());
                                 for v in &mesh.vertices {
-                                    let mut world_pos;
-                                    let mut world_normal;
+                                    let world_pos;
+                                    let world_normal;
                                     if let Some((_, skinning_matrices)) = &pose {
                                         let mut skinned_pos = GVec3::ZERO;
                                         let mut skinned_norm = GVec3::ZERO;
@@ -1993,19 +2086,30 @@ impl EditorApp {
                                         world_normal = transform.transform_vector3(GVec3::from(v.normal)).normalize();
                                     }
 
-                                    // Simple diffuse shading
-                                    let light_dir = GVec3::new(0.5, 1.0, 0.5).normalize();
-                                    let diffuse = world_normal.dot(light_dir).max(0.2);
+                                    // Professional Shaded Rendering
+                                    let light_dir = GVec3::new(0.6, 1.0, 0.4).normalize();
+                                    let cam_pos = camera.get_position();
+                                    let view_dir = (GVec3::new(cam_pos.x, cam_pos.y, cam_pos.z) - world_pos).normalize();
                                     
-                                    let mut v_color = GVec3::from(v.color) * diffuse;
+                                    // Ambient + Diffuse
+                                    let ambient = 0.15;
+                                    let diffuse = world_normal.dot(light_dir).max(0.0) * 0.75;
+                                    
+                                    // Specular (Blinn-Phong)
+                                    let half_dir = (light_dir + view_dir).normalize();
+                                    let specular = world_normal.dot(half_dir).max(0.0).powf(24.0) * 0.25;
+                                    
+                                    // Use material color blended with vertex color (for textured models)
+                                    let base_color = mat_color * GVec3::from(v.color);
+                                    let mut v_color = base_color * (diffuse + ambient) + GVec3::splat(specular);
                                     if is_selected {
-                                        v_color = v_color.lerp(GVec3::new(1.0, 0.9, 0.6), 0.3);
+                                        v_color = v_color.lerp(GVec3::new(1.0, 0.85, 0.4), 0.25);
                                     }
                                     
                                     let color = egui::Color32::from_rgb(
-                                        (v_color.x * 255.0) as u8,
-                                        (v_color.y * 255.0) as u8,
-                                        (v_color.z * 255.0) as u8,
+                                        (v_color.x.clamp(0.0, 1.0) * 255.0) as u8,
+                                        (v_color.y.clamp(0.0, 1.0) * 255.0) as u8,
+                                        (v_color.z.clamp(0.0, 1.0) * 255.0) as u8,
                                     );
 
                                     if let Some(p) = camera.project(Vec3::new(world_pos.x, world_pos.y, world_pos.z), available) {
@@ -2015,21 +2119,46 @@ impl EditorApp {
                                             color,
                                         });
                                     } else {
+                                        // Mark vertex as invalid with a flag position
                                         egui_vertices.push(egui::epaint::Vertex {
-                                            pos: egui::pos2(-10000.0, -10000.0),
+                                            pos: egui::pos2(f32::NEG_INFINITY, f32::NEG_INFINITY),
                                             uv: egui::pos2(v.uv[0], v.uv[1]),
                                             color,
                                         });
                                     }
                                 }
-                                high_res_meshes.push((egui_vertices, mesh.indices.clone(), mesh.albedo_texture.clone()));
+                                
+                                // Filter triangles: only include if all 3 vertices are valid
+                                let mut valid_indices = Vec::new();
+                                for tri in mesh.indices.chunks(3) {
+                                    if tri.len() == 3 {
+                                        let i0 = tri[0] as usize;
+                                        let i1 = tri[1] as usize;
+                                        let i2 = tri[2] as usize;
+                                        if i0 < egui_vertices.len() && i1 < egui_vertices.len() && i2 < egui_vertices.len() {
+                                            let v0 = &egui_vertices[i0];
+                                            let v1 = &egui_vertices[i1];
+                                            let v2 = &egui_vertices[i2];
+                                            // Check if all vertices are valid (not at infinity)
+                                            if v0.pos.x.is_finite() && v1.pos.x.is_finite() && v2.pos.x.is_finite() {
+                                                valid_indices.push(tri[0]);
+                                                valid_indices.push(tri[1]);
+                                                valid_indices.push(tri[2]);
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                if !valid_indices.is_empty() {
+                                    high_res_meshes.push((egui_vertices, valid_indices, mesh.albedo_texture.clone()));
+                                }
                             }
                             // Same for skinned meshes
                             for skinned in &model.skinned_meshes {
                                 let mut egui_vertices = Vec::with_capacity(skinned.mesh.vertices.len());
                                 for v in &skinned.mesh.vertices {
-                                    let mut world_pos;
-                                    let mut world_normal;
+                                    let world_pos;
+                                    let world_normal;
                                     if let Some((_, skinning_matrices)) = &pose {
                                         let mut skinned_pos = GVec3::ZERO;
                                         let mut skinned_norm = GVec3::ZERO;
@@ -2050,19 +2179,28 @@ impl EditorApp {
                                         world_normal = transform.transform_vector3(GVec3::from(v.normal)).normalize();
                                     }
 
-                                    // Simple diffuse shading
-                                    let light_dir = GVec3::new(0.5, 1.0, 0.5).normalize();
-                                    let diffuse = world_normal.dot(light_dir).max(0.2);
+                                    // Professional Shaded Rendering
+                                    let light_dir = GVec3::new(0.6, 1.0, 0.4).normalize();
+                                    let cam_pos = camera.get_position();
+                                    let view_dir = (GVec3::new(cam_pos.x, cam_pos.y, cam_pos.z) - world_pos).normalize();
                                     
-                                    let mut v_color = GVec3::from(v.color) * diffuse;
+                                    // Ambient + Diffuse
+                                    let ambient = 0.15;
+                                    let diffuse = world_normal.dot(light_dir).max(0.0) * 0.75;
+                                    
+                                    // Specular (Blinn-Phong)
+                                    let half_dir = (light_dir + view_dir).normalize();
+                                    let specular = world_normal.dot(half_dir).max(0.0).powf(24.0) * 0.25;
+                                    
+                                    let mut v_color = mat_color * GVec3::from(v.color) * (diffuse + ambient) + GVec3::splat(specular);
                                     if is_selected {
-                                        v_color = v_color.lerp(GVec3::new(1.0, 0.9, 0.6), 0.3);
+                                        v_color = v_color.lerp(GVec3::new(1.0, 0.85, 0.4), 0.25);
                                     }
                                     
                                     let color = egui::Color32::from_rgb(
-                                        (v_color.x * 255.0) as u8,
-                                        (v_color.y * 255.0) as u8,
-                                        (v_color.z * 255.0) as u8,
+                                        (v_color.x.clamp(0.0, 1.0) * 255.0) as u8,
+                                        (v_color.y.clamp(0.0, 1.0) * 255.0) as u8,
+                                        (v_color.z.clamp(0.0, 1.0) * 255.0) as u8,
                                     );
 
                                     if let Some(p) = camera.project(Vec3::new(world_pos.x, world_pos.y, world_pos.z), available) {
@@ -2073,13 +2211,36 @@ impl EditorApp {
                                         });
                                     } else {
                                         egui_vertices.push(egui::epaint::Vertex {
-                                            pos: egui::pos2(-10000.0, -10000.0),
+                                            pos: egui::pos2(f32::NEG_INFINITY, f32::NEG_INFINITY),
                                             uv: egui::pos2(v.uv[0], v.uv[1]),
                                             color,
                                         });
                                     }
                                 }
-                                high_res_meshes.push((egui_vertices, skinned.mesh.indices.clone(), skinned.mesh.albedo_texture.clone()));
+                                
+                                // Filter triangles: only include if all 3 vertices are valid
+                                let mut valid_indices = Vec::new();
+                                for tri in skinned.mesh.indices.chunks(3) {
+                                    if tri.len() == 3 {
+                                        let i0 = tri[0] as usize;
+                                        let i1 = tri[1] as usize;
+                                        let i2 = tri[2] as usize;
+                                        if i0 < egui_vertices.len() && i1 < egui_vertices.len() && i2 < egui_vertices.len() {
+                                            let v0 = &egui_vertices[i0];
+                                            let v1 = &egui_vertices[i1];
+                                            let v2 = &egui_vertices[i2];
+                                            if v0.pos.x.is_finite() && v1.pos.x.is_finite() && v2.pos.x.is_finite() {
+                                                valid_indices.push(tri[0]);
+                                                valid_indices.push(tri[1]);
+                                                valid_indices.push(tri[2]);
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                if !valid_indices.is_empty() {
+                                    high_res_meshes.push((egui_vertices, valid_indices, skinned.mesh.albedo_texture.clone()));
+                                }
                             }
                         }
                     }
@@ -2094,8 +2255,9 @@ impl EditorApp {
                 let wire_color = if is_selected { egui::Color32::GOLD } else { base };
                 let stroke = egui::Stroke::new(if is_selected { 2.5 } else { 1.0 }, wire_color);
                 
-                // Draw wireframe/Solid
+                // Draw wireframe/Solid - Low = ALWAYS wireframe, High = solid meshes if available
                 if self.render_quality == RenderQuality::High && !high_res_meshes.is_empty() {
+                    // High Quality: Render solid lit meshes with textures
                     for (egui_vertices, indices, texture_name) in high_res_meshes {
                         let mut egui_mesh = egui::Mesh::default();
                         egui_mesh.vertices = egui_vertices;
@@ -2109,7 +2271,21 @@ impl EditorApp {
                         
                         painter.add(egui::Shape::mesh(egui_mesh));
                     }
+                    
+                    // Also draw a subtle wireframe overlay on selected objects for clarity
+                    if is_selected {
+                        for (i, j) in [
+                            (0, 1), (1, 2), (2, 3), (3, 0),
+                            (4, 5), (5, 6), (6, 7), (7, 4),
+                            (0, 4), (1, 5), (2, 6), (3, 7),
+                        ] {
+                            if let (Some(p1), Some(p2)) = (proj[i], proj[j]) {
+                                painter.line_segment([p1, p2], egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(255, 200, 50, 180)));
+                            }
+                        }
+                    }
                 } else {
+                    // Low Quality: Always render wireframe bounding boxes
                     for (i, j) in [
                         (0, 1), (1, 2), (2, 3), (3, 0),
                         (4, 5), (5, 6), (6, 7), (7, 4),
@@ -2122,9 +2298,18 @@ impl EditorApp {
                 }
                 
                 // Center dot + click detection
+                // Low mode = outline only, High mode = filled center
                 if let Some(c) = center_proj {
                     let size = (8.0 + 400.0 / self.camera.distance).clamp(4.0, 25.0);
-                    painter.circle_filled(c, size, base.linear_multiply(0.6));
+                    
+                    if self.render_quality == RenderQuality::High {
+                        // High: filled center dot
+                        painter.circle_filled(c, size, base.linear_multiply(0.6));
+                    } else {
+                        // Low: outline only - transparent with stroke
+                        painter.circle_stroke(c, size, egui::Stroke::new(1.5, wire_color));
+                    }
+                    
                     if is_selected {
                         painter.circle_stroke(c, size + 2.0, egui::Stroke::new(2.0, egui::Color32::GOLD));
                     }
@@ -2153,8 +2338,134 @@ impl EditorApp {
             }
         }
         
+        // ========================================================================
+        // 3D TRANSLATE GIZMO
+        // ========================================================================
+        if let Some(selected_id) = self.selected_entity_id {
+            if let Some(scene) = &mut self.current_scene {
+                if let Some(entity_idx) = scene.entities.iter().position(|e| e.id == selected_id) {
+                    let pos = scene.entities[entity_idx].position;
+                    let entity_pos = Vec3::new(pos[0], pos[1], pos[2]);
+                    let gizmo_scale = (self.camera.distance * 0.15).max(0.5);
+                    let axes = [
+                        (Vec3::new(1.0, 0.0, 0.0), egui::Color32::from_rgb(255, 60, 60), "X"),
+                        (Vec3::new(0.0, 1.0, 0.0), egui::Color32::from_rgb(60, 255, 60), "Y"),
+                        (Vec3::new(0.0, 0.0, 1.0), egui::Color32::from_rgb(60, 60, 255), "Z"),
+                    ];
+
+                    let mut hovered_axis = None;
+                    let mouse_pos = ui.input(|i| i.pointer.interact_pos());
+                    
+                    for (i, (dir, color, _label)) in axes.iter().enumerate() {
+                        let start = entity_pos;
+                        let scaled_dir = Vec3::new(dir.x * gizmo_scale, dir.y * gizmo_scale, dir.z * gizmo_scale);
+                        let end = entity_pos.add(&scaled_dir);
+                        
+                        if let (Some(p1), Some(p2)) = (self.camera.project(start, available), self.camera.project(end, available)) {
+                            let p1 = egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y);
+                            let p2 = egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y);
+                            
+                            let is_dragging = self.gizmo_axis == Some(i);
+                            let mut draw_color = *color;
+                            if is_dragging { draw_color = egui::Color32::WHITE; }
+                            
+                            // Check for hover
+                            if let Some(m) = mouse_pos {
+                                let dist_to_segment = {
+                                    let l2 = p1.distance_sq(p2);
+                                    if l2 == 0.0 { p1.distance(m) }
+                                    else {
+                                        let t = ((m.x - p1.x) * (p2.x - p1.x) + (m.y - p1.y) * (p2.y - p1.y)) / l2;
+                                        let t = t.clamp(0.0, 1.0);
+                                        m.distance(egui::pos2(p1.x + t * (p2.x - p1.x), p1.y + t * (p2.y - p1.y)))
+                                    }
+                                };
+                                if dist_to_segment < 10.0 {
+                                    hovered_axis = Some(i);
+                                    if !is_dragging { draw_color = egui::Color32::YELLOW; }
+                                }
+                            }
+                            
+                            painter.line_segment([p1, p2], egui::Stroke::new(if is_dragging || hovered_axis == Some(i) { 4.0 } else { 2.5 }, draw_color));
+                            
+                            // Draw Arrowhead (Cone)
+                            if let Some(cone_model) = self.model_cache.get("primitive://cone") {
+                                let cone_transform = Mat4::from_scale_rotation_translation(
+                                    GVec3::splat(gizmo_scale * 0.1),
+                                    GQuat::from_rotation_arc(GVec3::Y, GVec3::new(dir.x, dir.y, dir.z)),
+                                    GVec3::new(end.x, end.y, end.z)
+                                );
+                                for mesh in &cone_model.meshes {
+                                    let mut egui_mesh = egui::Mesh::default();
+                                    for v in &mesh.vertices {
+                                        let world_v = cone_transform.transform_point3(GVec3::from(v.position));
+                                        if let Some(p) = self.camera.project(Vec3::new(world_v.x, world_v.y, world_v.z), available) {
+                                            egui_mesh.vertices.push(egui::epaint::Vertex {
+                                                pos: egui::pos2(rect.min.x + p.x, rect.min.y + p.y),
+                                                uv: egui::pos2(0.0, 0.0),
+                                                color: draw_color,
+                                            });
+                                        }
+                                    }
+                                    egui_mesh.indices = mesh.indices.clone();
+                                    painter.add(egui::Shape::mesh(egui_mesh));
+                                }
+                            }
+                        }
+                    }
+
+                    // Selection / Dragging logic
+                    if ui.input(|i| i.pointer.any_pressed()) {
+                        if let Some(i) = hovered_axis {
+                            self.gizmo_axis = Some(i);
+                        }
+                    }
+                    if ui.input(|i| !i.pointer.any_down()) {
+                        self.gizmo_axis = None;
+                    }
+
+                    if let Some(axis_idx) = self.gizmo_axis {
+                        let axis_dir = axes[axis_idx].0;
+                        let mouse_delta = ui.input(|i| i.pointer.delta());
+                        
+                        // Convert mouse delta to world space delta
+                        // Simple approach: project mouse delta onto axis in screen space
+                        if let (Some(p1), Some(p2)) = (self.camera.project(entity_pos, available), self.camera.project(entity_pos.add(&axis_dir), available)) {
+                            let screen_dir = egui::vec2(p2.x - p1.x, p2.y - p1.y);
+                            let screen_len = screen_dir.length();
+                            if screen_len > 0.0 {
+                                let normalized_screen_dir = screen_dir / screen_len;
+                                let projection = mouse_delta.x * normalized_screen_dir.x + mouse_delta.y * normalized_screen_dir.y;
+                                let world_delta = projection / screen_len; // Scale by reciprocal of screen-space unit length
+                                
+                                let mut new_pos = scene.entities[entity_idx].position;
+                                match axis_idx {
+                                    0 => new_pos[0] += world_delta,
+                                    1 => new_pos[1] += world_delta,
+                                    2 => new_pos[2] += world_delta,
+                                    _ => {}
+                                }
+                                scene.entities[entity_idx].position = new_pos;
+                                self.scene_dirty = true;
+                                
+                                // Deploy to engine
+                                if self.is_connected {
+                                    let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::Move {
+                                        id: selected_id,
+                                        position: new_pos,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
         if let Some(id) = clicked_entity {
-            self.selected_entity_id = Some(id);
+            if self.gizmo_axis.is_none() { // Don't change selection while dragging gizmo
+                self.selected_entity_id = Some(id);
+            }
         }
 
         // Overlay
@@ -3039,7 +3350,7 @@ impl eframe::App for EditorApp {
                                 if ui.button(display_name).clicked() {
                                     let path_clone = path.clone();
                                     if self.check_unsaved_and_set_action(PendingAction::OpenScene(path_clone.clone())) {
-                                        if let Err(e) = self.load_scene_from_path(&path_clone) {
+                                        if let Err(e) = self.load_scene_from_path(ctx, &path_clone) {
                                             self.status = format!("Error: {}", e);
                                         }
                                     }
@@ -3112,6 +3423,21 @@ impl eframe::App for EditorApp {
                     ui.label("Rendering Quality");
                     ui.selectable_value(&mut self.render_quality, RenderQuality::Low, "Low (Wireframe)");
                     ui.selectable_value(&mut self.render_quality, RenderQuality::High, "High (Solid)");
+                    
+                    ui.separator();
+                    ui.label("Camera");
+                    if ui.button("🔄 Reset Camera").clicked() {
+                        self.camera = Camera3D::new();
+                        ui.close_menu();
+                    }
+                    if ui.button("🔍 Focus Selected").clicked() {
+                        if let (Some(id), Some(scene)) = (self.selected_entity_id, &self.current_scene) {
+                            if let Some(e) = scene.entities.iter().find(|e| e.id == id) {
+                                self.camera.target = Vec3::new(e.position[0], e.position[1], e.position[2]);
+                            }
+                        }
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("GameObject", |ui| {
                     ui.label("3D Primitives");
@@ -3430,23 +3756,7 @@ impl eframe::App for EditorApp {
                         }
                     }
                 });
-                ui.menu_button("View", |ui| {
-                    if ui.button("Reset Camera").clicked() {
-                        self.camera = Camera3D::new();
-                        ui.close_menu();
-                    }
-                    if ui.button("Focus Selected").clicked() {
-                        if let (Some(id), Some(scene)) =
-                            (self.selected_entity_id, &self.current_scene)
-                        {
-                            if let Some(e) = scene.entities.iter().find(|e| e.id == id) {
-                                self.camera.target =
-                                    Vec3::new(e.position[0], e.position[1], e.position[2]);
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                });
+
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let c = if self.is_connected {
@@ -4396,7 +4706,7 @@ impl eframe::App for EditorApp {
                                 if ui.selectable_label(false, format!("📄 {}", display_name)).clicked() {
                                     let file_path = file.clone();
                                     if self.check_unsaved_and_set_action(PendingAction::OpenScene(file_path.clone())) {
-                                        if let Err(e) = self.load_scene_from_path(&file_path) {
+                                        if let Err(e) = self.load_scene_from_path(ctx, &file_path) {
                                             self.status = format!("Error: {}", e);
                                         }
                                     }
@@ -5453,11 +5763,11 @@ impl eframe::App for EditorApp {
                                     return;
                                 }
                             }
-                            self.execute_pending_action();
+                            self.execute_pending_action(ctx);
                         }
                         if ui.button("🚫 Don't Save").clicked() {
                             self.scene_dirty = false; // Discard changes
-                            self.execute_pending_action();
+                            self.execute_pending_action(ctx);
                         }
                         if ui.button("Cancel").clicked() {
                             self.show_unsaved_warning = false;

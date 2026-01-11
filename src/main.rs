@@ -1,5 +1,5 @@
 use stfsc_engine::graphics::{GraphicsContext, GpuMesh, InstanceData, Texture, calculate_shadow_resolution};
-use stfsc_engine::world::{GameWorld, MeshHandle, Material, Transform, RigidBodyHandle, Mesh, AudioSource, Hierarchy, LocalTransform};
+use stfsc_engine::world::{GameWorld, MeshHandle, Material, Transform, RigidBodyHandle, Mesh, AudioSource};
 use stfsc_engine::audio::{AudioSystem, AudioBuffer, AudioSourceProperties, AttenuationModel, AudioBufferHandle};
 use stfsc_engine::physics::PhysicsWorld;
 use stfsc_engine::resource_loader::{ResourceLoader, ResourceLoadResult};
@@ -17,7 +17,7 @@ use log::info;
 use std::sync::{Arc, RwLock};
 use ash::vk;
 use std::collections::{HashMap, HashSet};
-use rapier3d::prelude::{LockedAxes, vector};
+use rapier3d::prelude::LockedAxes;
 
 // ============================================================================
 // SCENE CONFIGURATION - Define these before graphics initialization
@@ -1070,7 +1070,6 @@ fn main() {
                     }
 
                     let (cam_pos, cam_rot, fov) = if let Some((_, transform, fov)) = active_camera {
-                        camera_fov = fov;
                         (transform.position, transform.rotation, fov)
                     } else {
                         // Fallback to default player controller
