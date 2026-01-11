@@ -4,7 +4,14 @@ use std::io::Write;
 use std::net::TcpStream;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
-use stfsc_engine::world::{LightType, SceneUpdate, LAYER_ENVIRONMENT, LAYER_PROP, LAYER_CHARACTER, LAYER_VEHICLE, LAYER_DEFAULT};
+use stfsc_engine::world::{
+    LightType, SceneUpdate, Mesh, Vertex, LAYER_ENVIRONMENT, LAYER_PROP, LAYER_CHARACTER, LAYER_VEHICLE, LAYER_DEFAULT,
+    animation::{EditorKeyframe, KeyframeChannel, KeyframeValue, KeyframeInterpolation},
+    fbx_loader::{ModelScene, AnimationClip, Skeleton},
+};
+use glam::{Mat4, Vec3 as GVec3, Quat as GQuat};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 fn main() -> Result<(), eframe::Error> {
     if let Err(e) = std::process::Command::new("adb")
@@ -593,6 +600,67 @@ enum EditorAction {
 }
 
 // ============================================================================
+// EDITOR VIEW TABS
+// ============================================================================
+
+/// Active editor view tab
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum EditorView {
+    #[default]
+    SceneEditor,
+    AnimationEditor,
+}
+
+/// State for the animation editor
+#[derive(Clone, Debug)]
+struct AnimationEditorState {
+    /// Currently selected animation clip index
+    selected_clip_idx: Option<usize>,
+    /// Current playback time (seconds)
+    current_time: f32,
+    /// Is animation playing
+    is_playing: bool,
+    /// Playback speed multiplier
+    playback_speed: f32,
+    /// Selected bone indices for keyframe editing
+    selected_bones: Vec<usize>,
+    /// Selected keyframe indices
+    selected_keyframes: Vec<usize>,
+    /// Timeline zoom level
+    timeline_zoom: f32,
+    /// Timeline scroll offset
+    timeline_scroll: f32,
+    /// Auto-key mode (automatically create keyframes on transform change)
+    auto_key: bool,
+    /// Last playback update time
+    last_update: std::time::Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+enum RenderQuality {
+    #[default]
+    Low,  // Wireframe
+    High, // Solid meshes + textures
+}
+
+impl Default for AnimationEditorState {
+    fn default() -> Self {
+        Self {
+            selected_clip_idx: None,
+            current_time: 0.0,
+            is_playing: false,
+            playback_speed: 1.0,
+            selected_bones: Vec::new(),
+            selected_keyframes: Vec::new(),
+            timeline_zoom: 1.0,
+            timeline_scroll: 0.0,
+            auto_key: false,
+            last_update: std::time::Instant::now(),
+        }
+    }
+}
+
+// ============================================================================
 // EDITOR
 // ============================================================================
 struct EditorApp {
@@ -651,6 +719,16 @@ struct EditorApp {
     ui_inspector_start_element: Option<UiElementHistory>, // State before inspector edit
     last_selected_ui_type: Option<String>,
     last_selected_ui_id: Option<u32>,
+    
+    // Editor view tabs
+    active_view: EditorView,
+    animation_editor_state: AnimationEditorState,
+
+    // Rendering Quality
+    render_quality: RenderQuality,
+    // Local assets for editor rendering
+    model_cache: HashMap<String, Arc<ModelScene>>,
+    egui_textures: HashMap<String, egui::TextureHandle>,
 }
 
 impl EditorApp {
@@ -753,6 +831,29 @@ impl EditorApp {
             ui_inspector_start_element: None,
             last_selected_ui_type: None,
             last_selected_ui_id: None,
+            // Editor view tabs
+            active_view: EditorView::SceneEditor,
+            animation_editor_state: AnimationEditorState::default(),
+            // Rendering Quality
+            render_quality: RenderQuality::Low,
+            model_cache: {
+                let mut cache = HashMap::new();
+                for ptype in PrimitiveType::all() {
+                    let mesh = stfsc_engine::world::create_primitive(match ptype {
+                        PrimitiveType::Cube => 0,
+                        PrimitiveType::Sphere => 1,
+                        PrimitiveType::Cylinder => 2,
+                        PrimitiveType::Plane => 3,
+                        PrimitiveType::Capsule => 4,
+                        PrimitiveType::Cone => 5,
+                    });
+                    let mut scene = ModelScene::new();
+                    scene.meshes.push(mesh);
+                    cache.insert(format!("primitive://{}", ptype.name().to_lowercase()), Arc::new(scene));
+                }
+                cache
+            },
+            egui_textures: HashMap::new(),
         }
     }
 
@@ -1090,7 +1191,8 @@ impl EditorApp {
     }
     
     /// Import a 3D model from file path and add to scene
-    fn import_model_from_path(&mut self, path: &str) -> Result<(), String> {
+    /// Import a 3D model (glTF/OBJ/FBX) and add it as a Mesh entity
+    fn import_model_from_path(&mut self, ctx: &egui::Context, path: &str) -> Result<(), String> {
         // Read the file
         let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
         
@@ -1118,6 +1220,28 @@ impl EditorApp {
         let (animator_config, animation_info) = if ext == "glb" || ext == "gltf" {
             match stfsc_engine::world::gltf_loader::load_gltf_with_animations(&data) {
                 Ok(model_scene) => {
+                    self.model_cache.insert(path.to_string(), Arc::new(model_scene.clone()));
+                    
+                    // Load textures into egui
+                    for tex in &model_scene.textures {
+                        if !self.egui_textures.contains_key(&tex.name) {
+                            if let Ok(img) = image::load_from_memory(&tex.data) {
+                                let rgba = img.to_rgba8();
+                                let pixels = rgba.as_flat_samples();
+                                let color_img = egui::ColorImage::from_rgba_unmultiplied(
+                                    [img.width() as usize, img.height() as usize],
+                                    pixels.as_slice(),
+                                );
+                                let handle = ctx.load_texture(
+                                    &tex.name,
+                                    color_img,
+                                    egui::TextureOptions::LINEAR,
+                                );
+                                self.egui_textures.insert(tex.name.clone(), handle);
+                            }
+                        }
+                    }
+
                     if !model_scene.animations.is_empty() {
                         // Create AnimatorConfig from animations
                         let mut config = stfsc_engine::world::animation::AnimatorConfig::new();
@@ -1126,6 +1250,15 @@ impl EditorApp {
                             config.add_state(&anim.name, i);
                             config.clip_names.push(anim.name.clone());
                             config.clip_durations.push(anim.duration);
+                        }
+                        
+                        // Populate bone metadata if skeleton exists
+                        if let Some(skeleton) = &model_scene.skeleton {
+                            for bone in &skeleton.bones {
+                                config.bone_names.push(bone.name.clone());
+                                config.bone_parents.push(bone.parent_index);
+                                config.bone_transforms.push(bone.local_transform);
+                            }
                         }
                         
                         // Set first animation as default
@@ -1324,26 +1457,62 @@ impl EditorApp {
         if let Some(copied) = self.clipboard.clone() {
             if let Some(scene) = &mut self.current_scene {
                 let new_id = scene.entities.iter().map(|e| e.id).max().unwrap_or(0) + 1;
-                let mut new_entity = copied;
+                let mut new_entity = copied.clone();
                 new_entity.id = new_id;
-                new_entity.name = format!("{} (Copy)", new_entity.name);
-                // Offset position slightly so it's visible
-                new_entity.position[0] += 1.0;
-                new_entity.position[2] += 1.0;
-                new_entity.deployed = false;
-                
-                // Push to undo stack
-                self.undo_stack.push(EditorAction::AddEntity { entity: new_entity.clone() });
-                self.redo_stack.clear(); // Clear redo on new action
-                
+                new_entity.position[0] += 2.0; // Offset pasted entity
                 scene.entities.push(new_entity);
                 self.selected_entity_id = Some(new_id);
                 self.scene_dirty = true;
-                self.status = format!("Pasted entity #{}", new_id);
             }
         }
     }
 
+    /// Compute character-space and skinning matrices for an entity's current animation state
+    fn compute_animated_pose(
+        entity: &SceneEntity,
+        model_cache: &HashMap<String, Arc<ModelScene>>,
+        anim_state: &AnimationEditorState,
+    ) -> Option<(Vec<Mat4>, Vec<Mat4>)> {
+        let anim_config = entity.animator_config.as_ref()?;
+        
+        let clip_idx = anim_state.selected_clip_idx?;
+        let clip_name = anim_config.clip_names.get(clip_idx)?;
+        
+        if let EntityType::Mesh { path } = &entity.entity_type {
+            if let Some(model) = model_cache.get(path) {
+                if let Some(clip) = model.animations.iter().find(|a| a.name == *clip_name) {
+                    if let Some(skeleton) = &model.skeleton {
+                        let time = anim_state.current_time;
+                        let local_transforms = clip.sample(time, skeleton);
+                        
+                        let bone_count = skeleton.bones.len();
+                        let mut global_transforms = vec![Mat4::IDENTITY; bone_count];
+                        let mut skinning_matrices = vec![Mat4::IDENTITY; bone_count];
+
+                        for i in 0..bone_count {
+                            let bone = &skeleton.bones[i];
+                            let local = local_transforms.get(i).copied().unwrap_or(bone.local_transform);
+
+                            global_transforms[i] = if let Some(parent_idx) = bone.parent_index {
+                                if parent_idx < bone_count {
+                                    global_transforms[parent_idx] * local
+                                } else {
+                                    local
+                                }
+                            } else {
+                                local
+                            };
+
+                            skinning_matrices[i] = global_transforms[i] * bone.inverse_bind_matrix;
+                        }
+                        
+                        return Some((global_transforms, skinning_matrices));
+                    }
+                }
+            }
+        }
+        None
+    }
     /// Push action to undo stack (clears redo stack)
     #[allow(dead_code)]
     fn push_undo_action(&mut self, action: EditorAction) {
@@ -1521,7 +1690,7 @@ impl EditorApp {
         }
     }
 
-    fn draw_3d_viewport(&mut self, ui: &mut egui::Ui) {
+    fn draw_3d_viewport(&mut self, ui: &mut egui::Ui) -> egui::Rect {
         let available = ui.available_size();
         let (response, painter) = ui.allocate_painter(available, egui::Sense::click_and_drag());
         let rect = response.rect;
@@ -1555,8 +1724,6 @@ impl EditorApp {
             // Check for entity drag start (Middle Mouse)
             if self.drag_button == Some(egui::PointerButton::Middle) {
                 if let Some(scene) = &self.current_scene {
-                    // Reverse iterate to find top-most object? Or just check all.
-                    // Basic check using project() distance
                     for entity in &scene.entities {
                         let pos =
                             Vec3::new(entity.position[0], entity.position[1], entity.position[2]);
@@ -1582,7 +1749,6 @@ impl EditorApp {
             if let (Some(start_entity), Some(drag_id)) = (self.drag_start_entity.take(), self.dragging_id) {
                 if let Some(scene) = &self.current_scene {
                     if let Some(after_entity) = scene.entities.iter().find(|e| e.id == drag_id) {
-                        // Only push if position actually changed
                         if start_entity.position != after_entity.position {
                             self.undo_stack.push(EditorAction::ModifyEntity {
                                 id: drag_id,
@@ -1608,20 +1774,14 @@ impl EditorApp {
             let delta = egui::vec2(mouse.x - self.last_mouse.x, mouse.y - self.last_mouse.y);
             self.last_mouse = mouse;
 
-            // Handle Object Dragging
             if let Some(drag_id) = self.dragging_id {
                 let rect_size = rect.size();
-                // Ensure raycast uses relative coordinates properly
                 let rel_x = mouse.x - rect.min.x;
                 let rel_y = mouse.y - rect.min.y;
                 let (cam_pos, ray_dir) = self.camera.get_ray(egui::pos2(rel_x, rel_y), rect_size);
 
                 if let Some(scene) = &mut self.current_scene {
                     if let Some(entity) = scene.entities.iter_mut().find(|e| e.id == drag_id) {
-                        // Ray-Plane Intersection (Y = entity.y)
-                        // P = O + tD
-                        // P.y = PlaneY
-                        // O.y + t*D.y = PlaneY  =>  t = (PlaneY - O.y) / D.y
                         if ray_dir.y.abs() > 0.001 {
                             let t = (entity.position[1] - cam_pos.y) / ray_dir.y;
                             if t > 0.0 {
@@ -1636,12 +1796,10 @@ impl EditorApp {
             } else {
                 match self.drag_button {
                     Some(egui::PointerButton::Secondary) => {
-                        // Right-drag: Orbit
                         self.camera.yaw -= delta.x * 0.01;
                         self.camera.pitch = (self.camera.pitch - delta.y * 0.01).clamp(-1.5, 1.5);
                     }
                     Some(egui::PointerButton::Middle) | Some(egui::PointerButton::Primary) => {
-                        // Middle/Left-drag: Pan (if not dragging object)
                         let right = self.camera.get_right();
                         let pan_speed = self.camera.distance * 0.002;
                         self.camera.target.x -= right.x * delta.x * pan_speed;
@@ -1653,27 +1811,69 @@ impl EditorApp {
             }
         }
 
+        // Camera focus for Animation Editor
+        if self.active_view == EditorView::AnimationEditor {
+            if let Some(id) = self.selected_entity_id {
+                if let Some(scene) = &self.current_scene {
+                   if let Some(entity) = scene.entities.iter().find(|e| e.id == id) {
+                       let target = Vec3::new(entity.position[0], entity.position[1] + 1.2, entity.position[2]);
+                       // Smooth camera interpolation
+                       self.camera.target.x = self.camera.target.x * 0.95 + target.x * 0.05;
+                       self.camera.target.y = self.camera.target.y * 0.95 + target.y * 0.05;
+                       self.camera.target.z = self.camera.target.z * 0.95 + target.z * 0.05;
+                       // Ensure comfortable viewing distance
+                       if self.camera.distance > 15.0 {
+                           self.camera.distance = self.camera.distance * 0.98 + 15.0 * 0.02;
+                       }
+                   }
+                }
+            }
+        }
+
         // Zoom
         let scroll = ui.input(|i| i.scroll_delta.y);
-        self.camera.distance = (self.camera.distance - scroll * 0.5).clamp(5.0, 200.0);
+        self.camera.distance = (self.camera.distance - scroll * 1.5).clamp(2.0, 500.0);
 
-        // Background
-        painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 40, 60));
+        // Premium Background - Dark Gradient
+        let bg_color_top = egui::Color32::from_rgb(20, 25, 35);
+        let bg_color_bottom = egui::Color32::from_rgb(10, 12, 18);
+        
+        painter.rect_filled(rect, 0.0, bg_color_bottom);
+        
+        let steps = 15;
+        for i in 0..steps {
+            let t = i as f32 / steps as f32;
+            let h = rect.height() * 0.6;
+            let r = egui::Rect::from_min_max(
+                egui::pos2(rect.min.x, rect.min.y + t * h),
+                egui::pos2(rect.max.x, rect.min.y + (t + 1.0/steps as f32) * h),
+            );
+            let color = egui::Color32::from_rgb(
+                (bg_color_top.r() as f32 * (1.0 - t) + bg_color_bottom.r() as f32 * t) as u8,
+                (bg_color_top.g() as f32 * (1.0 - t) + bg_color_bottom.g() as f32 * t) as u8,
+                (bg_color_top.b() as f32 * (1.0 - t) + bg_color_bottom.b() as f32 * t) as u8,
+            );
+            painter.rect_filled(r, 0.0, color);
+        }
 
-        // Grid
+        // Grid - Professional subtle grid
         let grid_spacing = 5.0;
+        let grid_alpha = (40.0 / (self.camera.distance * 0.1).max(1.0)).clamp(10.0, 80.0) as u8;
+        let stroke_main = egui::Stroke::new(0.8, egui::Color32::from_rgba_unmultiplied(100, 110, 130, grid_alpha));
+        let stroke_sub = egui::Stroke::new(0.4, egui::Color32::from_rgba_unmultiplied(80, 90, 110, grid_alpha/2));
+        
         for i in -20..=20 {
             let x = i as f32 * grid_spacing;
+            let is_major = i % 5 == 0;
+            let stroke = if is_major { stroke_main } else { stroke_sub };
+            
             if let (Some(p1), Some(p2)) = (
                 self.camera.project(Vec3::new(x, 0.0, -100.0), available),
                 self.camera.project(Vec3::new(x, 0.0, 100.0), available),
             ) {
                 painter.line_segment(
-                    [
-                        egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y),
-                        egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y),
-                    ],
-                    egui::Stroke::new(0.5, egui::Color32::from_rgb(50, 50, 60)),
+                    [egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)],
+                    stroke,
                 );
             }
             if let (Some(p1), Some(p2)) = (
@@ -1681,11 +1881,8 @@ impl EditorApp {
                 self.camera.project(Vec3::new(100.0, 0.0, x), available),
             ) {
                 painter.line_segment(
-                    [
-                        egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y),
-                        egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y),
-                    ],
-                    egui::Stroke::new(0.5, egui::Color32::from_rgb(50, 50, 60)),
+                    [egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)],
+                    stroke,
                 );
             }
         }
@@ -1695,14 +1892,14 @@ impl EditorApp {
         if let Some(o) = self.camera.project(origin, available) {
             let o = egui::pos2(rect.min.x + o.x, rect.min.y + o.y);
             for (axis, color) in [
-                (Vec3::new(5.0, 0.0, 0.0), egui::Color32::RED),
-                (Vec3::new(0.0, 5.0, 0.0), egui::Color32::GREEN),
-                (Vec3::new(0.0, 0.0, 5.0), egui::Color32::BLUE),
+                (Vec3::new(5.0, 0.0, 0.0), egui::Color32::from_rgb(255, 60, 60)),
+                (Vec3::new(0.0, 5.0, 0.0), egui::Color32::from_rgb(60, 255, 60)),
+                (Vec3::new(0.0, 0.0, 5.0), egui::Color32::from_rgb(60, 60, 255)),
             ] {
                 if let Some(p) = self.camera.project(axis, available) {
                     painter.line_segment(
                         [o, egui::pos2(rect.min.x + p.x, rect.min.y + p.y)],
-                        egui::Stroke::new(2.0, color),
+                        egui::Stroke::new(1.5, color),
                     );
                 }
             }
@@ -1713,6 +1910,9 @@ impl EditorApp {
         if let Some(scene) = &self.current_scene {
             let camera = self.camera; // Copy for parallel access
             let selected_id = self.selected_entity_id;
+            let model_cache = &self.model_cache;
+            let anim_state = &self.animation_editor_state;
+            let render_quality = self.render_quality;
             
             // Parallel: Compute all entity render data (projections, colors, etc.)
             let entity_renders: Vec<_> = scene.entities.par_iter().map(|entity| {
@@ -1750,23 +1950,174 @@ impl EditorApp {
                 let center_proj = camera.project(pos, available)
                     .map(|p| egui::pos2(rect.min.x + p.x, rect.min.y + p.y));
                 
-                (entity.id, is_selected, base_color, proj, center_proj)
+                let mut high_res_meshes = Vec::new();
+                if render_quality == RenderQuality::High {
+                    let mesh_path = match &entity.entity_type {
+                        EntityType::Mesh { path } => Some(path.clone()),
+                        EntityType::Primitive(ptype) => Some(format!("primitive://{}", ptype.name().to_lowercase())),
+                        _ => None,
+                    };
+
+                    if let Some(path) = mesh_path {
+                        if let Some(model) = model_cache.get(&path) {
+                            let transform = Mat4::from_scale_rotation_translation(
+                                GVec3::from(entity.scale),
+                                GQuat::from_array(entity.rotation),
+                                GVec3::from(entity.position),
+                            );
+                            
+                            let pose = Self::compute_animated_pose(entity, model_cache, anim_state);
+
+                            for mesh in &model.meshes {
+                                let mut egui_vertices = Vec::with_capacity(mesh.vertices.len());
+                                for v in &mesh.vertices {
+                                    let mut world_pos;
+                                    let mut world_normal;
+                                    if let Some((_, skinning_matrices)) = &pose {
+                                        let mut skinned_pos = GVec3::ZERO;
+                                        let mut skinned_norm = GVec3::ZERO;
+                                        for i in 0..4 {
+                                            let weight = v.bone_weights[i];
+                                            if weight > 0.0 {
+                                                let bone_idx = v.bone_indices[i] as usize;
+                                                if let Some(mat) = skinning_matrices.get(bone_idx) {
+                                                    skinned_pos += mat.transform_point3(GVec3::from(v.position)) * weight;
+                                                    skinned_norm += mat.transform_vector3(GVec3::from(v.normal)) * weight;
+                                                }
+                                            }
+                                        }
+                                        world_pos = transform.transform_point3(skinned_pos);
+                                        world_normal = transform.transform_vector3(skinned_norm).normalize();
+                                    } else {
+                                        world_pos = transform.transform_point3(GVec3::from(v.position));
+                                        world_normal = transform.transform_vector3(GVec3::from(v.normal)).normalize();
+                                    }
+
+                                    // Simple diffuse shading
+                                    let light_dir = GVec3::new(0.5, 1.0, 0.5).normalize();
+                                    let diffuse = world_normal.dot(light_dir).max(0.2);
+                                    
+                                    let mut v_color = GVec3::from(v.color) * diffuse;
+                                    if is_selected {
+                                        v_color = v_color.lerp(GVec3::new(1.0, 0.9, 0.6), 0.3);
+                                    }
+                                    
+                                    let color = egui::Color32::from_rgb(
+                                        (v_color.x * 255.0) as u8,
+                                        (v_color.y * 255.0) as u8,
+                                        (v_color.z * 255.0) as u8,
+                                    );
+
+                                    if let Some(p) = camera.project(Vec3::new(world_pos.x, world_pos.y, world_pos.z), available) {
+                                        egui_vertices.push(egui::epaint::Vertex {
+                                            pos: egui::pos2(rect.min.x + p.x, rect.min.y + p.y),
+                                            uv: egui::pos2(v.uv[0], v.uv[1]),
+                                            color,
+                                        });
+                                    } else {
+                                        egui_vertices.push(egui::epaint::Vertex {
+                                            pos: egui::pos2(-10000.0, -10000.0),
+                                            uv: egui::pos2(v.uv[0], v.uv[1]),
+                                            color,
+                                        });
+                                    }
+                                }
+                                high_res_meshes.push((egui_vertices, mesh.indices.clone(), mesh.albedo_texture.clone()));
+                            }
+                            // Same for skinned meshes
+                            for skinned in &model.skinned_meshes {
+                                let mut egui_vertices = Vec::with_capacity(skinned.mesh.vertices.len());
+                                for v in &skinned.mesh.vertices {
+                                    let mut world_pos;
+                                    let mut world_normal;
+                                    if let Some((_, skinning_matrices)) = &pose {
+                                        let mut skinned_pos = GVec3::ZERO;
+                                        let mut skinned_norm = GVec3::ZERO;
+                                        for i in 0..4 {
+                                            let weight = v.bone_weights[i];
+                                            if weight > 0.0 {
+                                                let bone_idx = v.bone_indices[i] as usize;
+                                                if let Some(mat) = skinning_matrices.get(bone_idx) {
+                                                    skinned_pos += mat.transform_point3(GVec3::from(v.position)) * weight;
+                                                    skinned_norm += mat.transform_vector3(GVec3::from(v.normal)) * weight;
+                                                }
+                                            }
+                                        }
+                                        world_pos = transform.transform_point3(skinned_pos);
+                                        world_normal = transform.transform_vector3(skinned_norm).normalize();
+                                    } else {
+                                        world_pos = transform.transform_point3(GVec3::from(v.position));
+                                        world_normal = transform.transform_vector3(GVec3::from(v.normal)).normalize();
+                                    }
+
+                                    // Simple diffuse shading
+                                    let light_dir = GVec3::new(0.5, 1.0, 0.5).normalize();
+                                    let diffuse = world_normal.dot(light_dir).max(0.2);
+                                    
+                                    let mut v_color = GVec3::from(v.color) * diffuse;
+                                    if is_selected {
+                                        v_color = v_color.lerp(GVec3::new(1.0, 0.9, 0.6), 0.3);
+                                    }
+                                    
+                                    let color = egui::Color32::from_rgb(
+                                        (v_color.x * 255.0) as u8,
+                                        (v_color.y * 255.0) as u8,
+                                        (v_color.z * 255.0) as u8,
+                                    );
+
+                                    if let Some(p) = camera.project(Vec3::new(world_pos.x, world_pos.y, world_pos.z), available) {
+                                        egui_vertices.push(egui::epaint::Vertex {
+                                            pos: egui::pos2(rect.min.x + p.x, rect.min.y + p.y),
+                                            uv: egui::pos2(v.uv[0], v.uv[1]),
+                                            color,
+                                        });
+                                    } else {
+                                        egui_vertices.push(egui::epaint::Vertex {
+                                            pos: egui::pos2(-10000.0, -10000.0),
+                                            uv: egui::pos2(v.uv[0], v.uv[1]),
+                                            color,
+                                        });
+                                    }
+                                }
+                                high_res_meshes.push((egui_vertices, skinned.mesh.indices.clone(), skinned.mesh.albedo_texture.clone()));
+                            }
+                        }
+                    }
+                }
+                
+                (entity.id, is_selected, base_color, proj, center_proj, high_res_meshes)
             }).collect();
             
             // Sequential: Draw using pre-computed projections
-            for (id, is_selected, base_color, proj, center_proj) in entity_renders {
+            for (id, is_selected, base_color, proj, center_proj, high_res_meshes) in entity_renders {
                 let base = egui::Color32::from_rgb(base_color[0], base_color[1], base_color[2]);
                 let wire_color = if is_selected { egui::Color32::GOLD } else { base };
                 let stroke = egui::Stroke::new(if is_selected { 2.5 } else { 1.0 }, wire_color);
                 
-                // Draw wireframe
-                for (i, j) in [
-                    (0, 1), (1, 2), (2, 3), (3, 0),
-                    (4, 5), (5, 6), (6, 7), (7, 4),
-                    (0, 4), (1, 5), (2, 6), (3, 7),
-                ] {
-                    if let (Some(p1), Some(p2)) = (proj[i], proj[j]) {
-                        painter.line_segment([p1, p2], stroke);
+                // Draw wireframe/Solid
+                if self.render_quality == RenderQuality::High && !high_res_meshes.is_empty() {
+                    for (egui_vertices, indices, texture_name) in high_res_meshes {
+                        let mut egui_mesh = egui::Mesh::default();
+                        egui_mesh.vertices = egui_vertices;
+                        egui_mesh.indices = indices;
+                        
+                        if let Some(name) = texture_name {
+                            if let Some(handle) = self.egui_textures.get(&name) {
+                                egui_mesh.texture_id = handle.id();
+                            }
+                        }
+                        
+                        painter.add(egui::Shape::mesh(egui_mesh));
+                    }
+                } else {
+                    for (i, j) in [
+                        (0, 1), (1, 2), (2, 3), (3, 0),
+                        (4, 5), (5, 6), (6, 7), (7, 4),
+                        (0, 4), (1, 5), (2, 6), (3, 7),
+                    ] {
+                        if let (Some(p1), Some(p2)) = (proj[i], proj[j]) {
+                            painter.line_segment([p1, p2], stroke);
+                        }
                     }
                 }
                 
@@ -1790,6 +2141,18 @@ impl EditorApp {
                 }
             }
         }
+        
+        // Draw Skeleton for selected entity in Animation Editor
+        if self.active_view == EditorView::AnimationEditor {
+            if let Some(id) = self.selected_entity_id {
+                if let Some(scene) = &self.current_scene {
+                    if let Some(entity) = scene.entities.iter().find(|e| e.id == id) {
+                        self.draw_skeleton(&painter, entity, &self.camera, rect, available);
+                    }
+                }
+            }
+        }
+        
         if let Some(id) = clicked_entity {
             self.selected_entity_id = Some(id);
         }
@@ -1802,6 +2165,775 @@ impl EditorApp {
             egui::FontId::proportional(11.0),
             egui::Color32::WHITE,
         );
+        
+        rect
+    }
+
+    fn draw_skeleton(&self, painter: &egui::Painter, entity: &SceneEntity, camera: &Camera3D, rect: egui::Rect, available: egui::Vec2) {
+        if let Some(config) = &entity.animator_config {
+            if config.bone_transforms.is_empty() { return; }
+            
+            // Try to get animated pose first
+            let animated_pose = Self::compute_animated_pose(entity, &self.model_cache, &self.animation_editor_state);
+            
+            let entity_mat = Mat4::from_scale_rotation_translation(
+                GVec3::from(entity.scale),
+                GQuat::from_array(entity.rotation),
+                GVec3::from(entity.position)
+            );
+            
+            let globals = if let Some((global_transforms, _)) = animated_pose {
+                global_transforms
+            } else {
+                // Fallback to bind pose
+                let mut base_globals = vec![Mat4::IDENTITY; config.bone_transforms.len()];
+                for i in 0..config.bone_transforms.len() {
+                    if let Some(parent_idx) = config.bone_parents[i] {
+                        if parent_idx < base_globals.len() {
+                            base_globals[i] = base_globals[parent_idx] * config.bone_transforms[i];
+                        }
+                    } else {
+                        base_globals[i] = config.bone_transforms[i];
+                    }
+                }
+                base_globals
+            };
+            
+            // Draw bones
+            let bone_color = egui::Color32::from_rgb(100, 200, 255);
+            let joint_color = egui::Color32::WHITE;
+            
+            for i in 0..globals.len() {
+                let world_mat = entity_mat * globals[i];
+                let pos = world_mat.transform_point3(GVec3::ZERO);
+                let v3_pos = Vec3::new(pos.x, pos.y, pos.z);
+                
+                if let Some(p1) = camera.project(v3_pos, available) {
+                    let p1_egui = egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y);
+                    
+                    // Draw joint
+                    painter.circle_filled(p1_egui, 3.0, joint_color);
+                    
+                    // Draw line to parent
+                    if let Some(parent_idx) = config.bone_parents[i] {
+                        if parent_idx < globals.len() {
+                            let p_world_mat = entity_mat * globals[parent_idx];
+                            let p_pos = p_world_mat.transform_point3(GVec3::ZERO);
+                            let v3_p_pos = Vec3::new(p_pos.x, p_pos.y, p_pos.z);
+                            
+                            if let Some(p2) = camera.project(v3_p_pos, available) {
+                                let p2_egui = egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y);
+                                painter.line_segment([p1_egui, p2_egui], egui::Stroke::new(1.5, bone_color));
+                            }
+                        }
+                    }
+                    
+                    // Label bone if selected
+                    if self.animation_editor_state.selected_bones.contains(&i) {
+                        painter.text(
+                            p1_egui + egui::vec2(5.0, 5.0),
+                            egui::Align2::LEFT_TOP,
+                            &config.bone_names[i],
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::YELLOW,
+                        );
+                        painter.circle_stroke(p1_egui, 5.0, egui::Stroke::new(1.0, egui::Color32::YELLOW));
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_keyframe_inspector(&mut self, ui: &mut egui::Ui) {
+        ui.heading("🔍 Keyframe Inspector");
+        ui.add_space(8.0);
+        
+        let state = &mut self.animation_editor_state;
+        if state.selected_keyframes.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(20.0);
+                ui.label(egui::RichText::new("No keyframe selected").weak());
+                ui.label(egui::RichText::new("Click a keyframe in the timeline to edit its properties").small());
+            });
+            return;
+        }
+        
+        if state.selected_keyframes.len() > 1 {
+            ui.label(format!("Multiple keyframes selected ({}).", state.selected_keyframes.len()));
+            return;
+        }
+        
+        let kf_idx = state.selected_keyframes[0];
+        
+        if let Some(scene) = &mut self.current_scene {
+            if let Some(entity) = self.selected_entity_id
+                .and_then(|id| scene.entities.iter_mut().find(|e| e.id == id))
+            {
+                if let Some(config) = &mut entity.animator_config {
+                    if let Some(kf) = config.editor_keyframes.get_mut(kf_idx) {
+                        egui::Grid::new("kf_inspector_grid")
+                            .num_columns(2)
+                            .spacing([10.0, 10.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.label("Time:");
+                                if ui.add(egui::DragValue::new(&mut kf.time).speed(0.01).clamp_range(0.0..=60.0).suffix("s")).changed() {
+                                    self.scene_dirty = true;
+                                }
+                                ui.end_row();
+                                
+                                ui.label("Bone:");
+                                let bone_name = config.bone_names.get(kf.bone_index).cloned().unwrap_or_else(|| "Unknown".to_string());
+                                ui.label(egui::RichText::new(format!("#{} {}", kf.bone_index, bone_name)).strong());
+                                ui.end_row();
+                                
+                                ui.label("Channel:");
+                                ui.label(format!("{:?}", kf.channel));
+                                ui.end_row();
+                                
+                                ui.label("Interpolation:");
+                                if egui::ComboBox::from_id_source("kf_interp")
+                                    .selected_text(format!("{:?}", kf.interpolation))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut kf.interpolation, KeyframeInterpolation::Linear, "Linear");
+                                        ui.selectable_value(&mut kf.interpolation, KeyframeInterpolation::Step, "Step");
+                                        ui.selectable_value(&mut kf.interpolation, KeyframeInterpolation::Bezier, "Bezier");
+                                    }).response.changed() {
+                                        self.scene_dirty = true;
+                                    }
+                                ui.end_row();
+                            });
+                        
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+                        
+                        ui.label("Value:");
+                        match &mut kf.value {
+                            KeyframeValue::Float(f) => {
+                                if ui.add(egui::DragValue::new(f).speed(0.1)).changed() {
+                                    self.scene_dirty = true;
+                                }
+                            }
+                            KeyframeValue::Vec3(v) => {
+                                ui.horizontal(|ui| {
+                                    ui.label("X"); if ui.add(egui::DragValue::new(&mut v[0]).speed(0.05)).changed() { self.scene_dirty = true; }
+                                    ui.label("Y"); if ui.add(egui::DragValue::new(&mut v[1]).speed(0.05)).changed() { self.scene_dirty = true; }
+                                    ui.label("Z"); if ui.add(egui::DragValue::new(&mut v[2]).speed(0.05)).changed() { self.scene_dirty = true; }
+                                });
+                            }
+                            KeyframeValue::Quat(q) => {
+                                egui::Grid::new("quat_grid").show(ui, |ui| {
+                                    ui.label("X"); if ui.add(egui::DragValue::new(&mut q[0]).speed(0.02)).changed() { self.scene_dirty = true; }
+                                    ui.label("Y"); if ui.add(egui::DragValue::new(&mut q[1]).speed(0.02)).changed() { self.scene_dirty = true; }
+                                    ui.end_row();
+                                    ui.label("Z"); if ui.add(egui::DragValue::new(&mut q[2]).speed(0.02)).changed() { self.scene_dirty = true; }
+                                    ui.label("W"); if ui.add(egui::DragValue::new(&mut q[3]).speed(0.02)).changed() { self.scene_dirty = true; }
+                                    ui.end_row();
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // ========================================================================
+    // ANIMATION EDITOR
+    // ========================================================================
+    
+    fn draw_animation_editor(&mut self, ui: &mut egui::Ui) {
+        ui.heading("🎭 Animation Editor");
+        
+        // Get selected entity with animator
+        let has_animator = self.selected_entity_id.map(|id| {
+            self.current_scene.as_ref()
+                .and_then(|s| s.entities.iter().find(|e| e.id == id))
+                .and_then(|e| e.animator_config.as_ref())
+                .is_some()
+        }).unwrap_or(false);
+        
+        if !has_animator {
+            ui.add_space(20.0);
+            ui.label("⚠ Select an entity with an Animator to edit animations.");
+            ui.add_space(10.0);
+            ui.label("To add an Animator:");
+            ui.label("1. Select an entity in the Hierarchy (left panel)");
+            ui.label("2. Enable '🎬 Enable Animator' in the Inspector (right panel)");
+            ui.label("3. Import a 3D model with animations (.glb/.gltf)");
+            return;
+        }
+        
+        // Toolbar
+        ui.horizontal(|ui| {
+            self.draw_animation_toolbar(ui);
+        });
+        
+        ui.separator();
+        
+        // Main content: split vertically
+        // Top: Preview viewport + Bone hierarchy
+        // Bottom: Timeline/Dopesheet
+        
+        let available = ui.available_size();
+        let timeline_height = 220.0_f32.min(available.y * 0.4);
+        let top_height = (available.y - timeline_height - 20.0).max(100.0);
+        
+        // Split top section into Hierarchy | Preview | Inspector
+        ui.horizontal(|ui| {
+            // Left: Bone hierarchy (220px)
+            ui.allocate_ui(egui::vec2(220.0, top_height), |ui| {
+                ui.vertical(|ui| {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        self.draw_bone_hierarchy(ui);
+                    });
+                });
+            });
+            
+            ui.separator();
+            
+            // Middle: Animation preview viewport (flexible)
+            let preview_width = (ui.available_width() - 270.0).max(100.0);
+            ui.allocate_ui(egui::vec2(preview_width, top_height), |ui| {
+                ui.vertical(|ui| {
+                    self.draw_animation_preview(ui);
+                });
+            });
+            
+            ui.separator();
+            
+            // Right: Keyframe Inspector (250px)
+            ui.allocate_ui(egui::vec2(250.0, top_height), |ui| {
+                ui.vertical(|ui| {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        self.draw_keyframe_inspector(ui);
+                    });
+                });
+            });
+        });
+        
+        ui.separator();
+        
+        // Bottom: Timeline/Dopesheet
+        ui.allocate_ui(egui::vec2(available.x, timeline_height), |ui| {
+            self.draw_animation_timeline(ui);
+        });
+    }
+    
+    fn draw_animation_toolbar(&mut self, ui: &mut egui::Ui) {
+        // Clip selector
+        ui.label("Clip:");
+        if let Some(scene) = &self.current_scene {
+            if let Some(entity) = self.selected_entity_id
+                .and_then(|id| scene.entities.iter().find(|e| e.id == id)) 
+            {
+                if let Some(config) = &entity.animator_config {
+                    egui::ComboBox::from_id_source("anim_clip_select")
+                        .width(150.0)
+                        .selected_text(
+                            self.animation_editor_state.selected_clip_idx
+                                .and_then(|i| config.clip_names.get(i))
+                                .map(|s| s.as_str())
+                                .unwrap_or("Select clip...")
+                        )
+                        .show_ui(ui, |ui| {
+                            for (i, name) in config.clip_names.iter().enumerate() {
+                                let duration = config.clip_durations.get(i).copied().unwrap_or(0.0);
+                                let text = format!("{} ({:.2}s)", name, duration);
+                                if ui.selectable_label(
+                                    self.animation_editor_state.selected_clip_idx == Some(i),
+                                    &text
+                                ).clicked() {
+                                    self.animation_editor_state.selected_clip_idx = Some(i);
+                                    self.animation_editor_state.current_time = 0.0;
+                                }
+                            }
+                        });
+                }
+            }
+        }
+        
+        ui.separator();
+        
+        // Playback controls
+        let state = &mut self.animation_editor_state;
+        
+        if ui.button("⏮").on_hover_text("Go to start").clicked() {
+            state.current_time = 0.0;
+        }
+        
+        if state.is_playing {
+            if ui.button("⏸").on_hover_text("Pause").clicked() {
+                state.is_playing = false;
+            }
+        } else {
+            if ui.button("▶").on_hover_text("Play").clicked() {
+                state.is_playing = true;
+                state.last_update = std::time::Instant::now();
+            }
+        }
+        
+        if ui.button("⏹").on_hover_text("Stop").clicked() {
+            state.is_playing = false;
+            state.current_time = 0.0;
+        }
+        
+        if ui.button("⏭").on_hover_text("Go to end").clicked() {
+            // Set to clip duration
+            if let Some(scene) = &self.current_scene {
+                if let Some(entity) = self.selected_entity_id
+                    .and_then(|id| scene.entities.iter().find(|e| e.id == id))
+                {
+                    if let Some(config) = &entity.animator_config {
+                        if let Some(idx) = state.selected_clip_idx {
+                            if let Some(duration) = config.clip_durations.get(idx) {
+                                state.current_time = *duration;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        ui.separator();
+        
+        // Speed control
+        ui.label("Speed:");
+        ui.add(egui::DragValue::new(&mut self.animation_editor_state.playback_speed)
+            .speed(0.1)
+            .clamp_range(0.1..=3.0)
+            .suffix("x"));
+        
+        ui.separator();
+        
+        // Auto-key toggle
+        ui.checkbox(&mut self.animation_editor_state.auto_key, "🔑 Auto-Key")
+            .on_hover_text("Automatically create keyframes when modifying transforms");
+        
+        ui.separator();
+        
+        // Time display
+        let time = self.animation_editor_state.current_time;
+        ui.label(format!("⏱ {:.2}s", time));
+        
+        ui.separator();
+        
+        // Add keyframe button
+        if ui.button("➕ Add Keyframe").on_hover_text("Add keyframe at current time for selected bones").clicked() {
+            if let Some(entity_id) = self.selected_entity_id {
+                let time = self.animation_editor_state.current_time;
+                let bones = self.animation_editor_state.selected_bones.clone();
+                
+                if let Some(scene) = &mut self.current_scene {
+                    if let Some(entity) = scene.entities.iter_mut().find(|e| e.id == entity_id) {
+                        if let Some(config) = &mut entity.animator_config {
+                            for &bone_idx in &bones {
+                                // Add default keyframes for Position X, Y, Z for now
+                                config.editor_keyframes.push(EditorKeyframe {
+                                    time,
+                                    bone_index: bone_idx,
+                                    channel: KeyframeChannel::PositionX,
+                                    value: KeyframeValue::Float(0.0),
+                                    interpolation: KeyframeInterpolation::Linear,
+                                });
+                            }
+                            self.scene_dirty = true;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Delete keyframe button
+        if ui.button("🗑 Delete").on_hover_text("Delete selected keyframes").clicked() {
+            if let Some(entity_id) = self.selected_entity_id {
+                if let Some(scene) = &mut self.current_scene {
+                    if let Some(entity) = scene.entities.iter_mut().find(|e| e.id == entity_id) {
+                        if let Some(config) = &mut entity.animator_config {
+                            let mut kf_indices = self.animation_editor_state.selected_keyframes.clone();
+                            kf_indices.sort_unstable_by(|a, b| b.cmp(a)); // Delete from end
+                            
+                            for idx in kf_indices {
+                                if idx < config.editor_keyframes.len() {
+                                    config.editor_keyframes.remove(idx);
+                                }
+                            }
+                            self.animation_editor_state.selected_keyframes.clear();
+                            self.scene_dirty = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    fn draw_animation_timeline(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::dark_canvas(ui.style()).show(ui, |ui| {
+            let (response, painter) = ui.allocate_painter(
+                ui.available_size(),
+                egui::Sense::click_and_drag(),
+            );
+            
+            let rect = response.rect;
+            let state = &mut self.animation_editor_state;
+            
+            // Get clip duration
+            let duration = self.current_scene.as_ref()
+                .and_then(|s| self.selected_entity_id
+                    .and_then(|id| s.entities.iter().find(|e| e.id == id)))
+                .and_then(|e| e.animator_config.as_ref())
+                .and_then(|c| state.selected_clip_idx
+                    .and_then(|i| c.clip_durations.get(i)))
+                .copied()
+                .unwrap_or(1.0)
+                .max(0.1);
+            
+            let header_height = 25.0;
+            let track_height = 20.0;
+            let time_offset = 100.0; // Left margin for labels
+            let usable_width = (rect.width() - time_offset).max(100.0);
+            let pixels_per_second = usable_width / duration * state.timeline_zoom;
+            
+            // Draw timeline header with time markers
+            painter.rect_filled(
+                egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), header_height)),
+                0.0,
+                egui::Color32::from_gray(40),
+            );
+            
+            // Draw time markers
+            let step = if state.timeline_zoom > 2.0 { 0.25 } else if state.timeline_zoom > 1.0 { 0.5 } else { 1.0 };
+            let mut t = 0.0;
+            while t <= duration {
+                let x = rect.min.x + time_offset + t * pixels_per_second;
+                if x < rect.max.x {
+                    painter.line_segment(
+                        [egui::pos2(x, rect.min.y + 15.0), egui::pos2(x, rect.min.y + header_height)],
+                        egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
+                    );
+                    painter.text(
+                        egui::pos2(x + 2.0, rect.min.y + 3.0),
+                        egui::Align2::LEFT_TOP,
+                        format!("{:.1}s", t),
+                        egui::FontId::proportional(10.0),
+                        egui::Color32::from_gray(180),
+                    );
+                }
+                t += step;
+            }
+            
+            // Draw "Timeline" label
+            painter.text(
+                egui::pos2(rect.min.x + 5.0, rect.min.y + 5.0),
+                egui::Align2::LEFT_TOP,
+                "Timeline",
+                egui::FontId::proportional(11.0),
+                egui::Color32::WHITE,
+            );
+            
+            // Draw keyframe tracks (dopesheet style)
+            let tracks_start_y = rect.min.y + header_height;
+            let num_tracks = ((rect.height() - header_height) / track_height) as usize;
+            
+            for i in 0..num_tracks.min(20) {
+                let y = tracks_start_y + (i as f32) * track_height;
+                
+                if y + track_height > rect.max.y {
+                    break;
+                }
+                
+                // Track background
+                let bg_color = if i % 2 == 0 { 
+                    egui::Color32::from_gray(30) 
+                } else { 
+                    egui::Color32::from_gray(25) 
+                };
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(rect.min.x, y),
+                        egui::vec2(rect.width(), track_height)
+                    ),
+                    0.0,
+                    bg_color,
+                );
+                
+                // Track label
+                let is_selected = state.selected_bones.contains(&i);
+                let text_color = if is_selected { 
+                    egui::Color32::from_rgb(100, 200, 255) 
+                } else { 
+                    egui::Color32::from_gray(150) 
+                };
+                painter.text(
+                    egui::pos2(rect.min.x + 5.0, y + 3.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("Bone {}", i),
+                    egui::FontId::proportional(11.0),
+                    text_color,
+                );
+                
+                // Draw separator line
+                painter.line_segment(
+                    [egui::pos2(rect.min.x + time_offset - 5.0, y), egui::pos2(rect.min.x + time_offset - 5.0, y + track_height)],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(50)),
+                );
+
+                // Draw keyframes for this track/bone
+                if let Some(scene) = &self.current_scene {
+                    if let Some(entity) = self.selected_entity_id
+                        .and_then(|id| scene.entities.iter().find(|e| e.id == id))
+                    {
+                        if let Some(config) = &entity.animator_config {
+                            for (kf_idx, kf) in config.editor_keyframes.iter().enumerate() {
+                                if kf.bone_index == i {
+                                    let kf_x = rect.min.x + time_offset + kf.time * pixels_per_second;
+                                    if kf_x >= rect.min.x + time_offset && kf_x <= rect.max.x {
+                                        let is_kf_selected = state.selected_keyframes.contains(&kf_idx);
+                                        let kf_color = if is_kf_selected {
+                                            egui::Color32::from_rgb(255, 255, 0)
+                                        } else {
+                                            egui::Color32::from_gray(200)
+                                        };
+                                        
+                                        // Draw diamond shape for keyframe
+                                        let size = 5.0;
+                                        let center = egui::pos2(kf_x, y + track_height / 2.0);
+                                        painter.add(egui::Shape::convex_polygon(
+                                            vec![
+                                                center + egui::vec2(0.0, -size),
+                                                center + egui::vec2(size, 0.0),
+                                                center + egui::vec2(0.0, size),
+                                                center + egui::vec2(-size, 0.0),
+                                            ],
+                                            kf_color,
+                                            egui::Stroke::NONE,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Draw current time playhead
+            let playhead_x = rect.min.x + time_offset + state.current_time * pixels_per_second;
+            if playhead_x >= rect.min.x + time_offset && playhead_x <= rect.max.x {
+                painter.line_segment(
+                    [egui::pos2(playhead_x, rect.min.y), egui::pos2(playhead_x, rect.max.y)],
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 80, 80)),
+                );
+                
+                // Playhead handle
+                painter.circle_filled(
+                    egui::pos2(playhead_x, rect.min.y + 12.0),
+                    6.0,
+                    egui::Color32::from_rgb(255, 80, 80),
+                );
+            }
+            
+            // Handle drag to scrub time
+            if response.dragged() && !ui.input(|i| i.modifiers.shift) {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let x = pos.x - rect.min.x - time_offset;
+                    let new_time = (x / pixels_per_second).clamp(0.0, duration);
+                    state.current_time = new_time;
+                }
+            }
+            
+            // Handle keyframe selection
+            if response.clicked() {
+                if let Some(mouse_pos) = response.interact_pointer_pos() {
+                    let mut found_kf = None;
+                    if let Some(scene) = &self.current_scene {
+                        if let Some(entity) = self.selected_entity_id
+                            .and_then(|id| scene.entities.iter().find(|e| e.id == id))
+                        {
+                            if let Some(config) = &entity.animator_config {
+                                for (kf_idx, kf) in config.editor_keyframes.iter().enumerate() {
+                                    let kf_x = rect.min.x + time_offset + kf.time * pixels_per_second;
+                                    let y = tracks_start_y + (kf.bone_index as f32) * track_height;
+                                    let center = egui::pos2(kf_x, y + track_height / 2.0);
+                                    if mouse_pos.distance(center) < 8.0 {
+                                        found_kf = Some(kf_idx);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    if let Some(kf_idx) = found_kf {
+                        if ui.input(|i| i.modifiers.shift) {
+                            if state.selected_keyframes.contains(&kf_idx) {
+                                state.selected_keyframes.retain(|&idx| idx != kf_idx);
+                            } else {
+                                state.selected_keyframes.push(kf_idx);
+                            }
+                        } else {
+                            state.selected_keyframes = vec![kf_idx];
+                        }
+                    } else if mouse_pos.x > rect.min.x + time_offset {
+                        // Clicked empty space in timeline (not labels)
+                        if !ui.input(|i| i.modifiers.shift) {
+                            state.selected_keyframes.clear();
+                        }
+                    }
+                }
+            }
+            
+            // Handle scroll to zoom
+            let scroll = ui.input(|i| i.scroll_delta.y);
+            if scroll != 0.0 && response.hovered() {
+                state.timeline_zoom = (state.timeline_zoom + scroll * 0.01).clamp(0.5, 5.0);
+            }
+        });
+    }
+    
+    fn draw_bone_hierarchy(&mut self, ui: &mut egui::Ui) {
+        ui.heading("🦴 Bones");
+        ui.add_space(4.0);
+        
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            if let Some(scene) = &self.current_scene {
+                if let Some(entity) = self.selected_entity_id
+                    .and_then(|id| scene.entities.iter().find(|e| e.id == id))
+                {
+                    if let Some(config) = &entity.animator_config {
+                        if config.clip_names.is_empty() {
+                            ui.label("No animation clips found.");
+                            ui.add_space(4.0);
+                            ui.label("Import a model with animations (.glb/.gltf)");
+                        } else {
+                            // Show bone list
+                            ui.label(egui::RichText::new("Select bones to edit:").small());
+                            ui.add_space(4.0);
+                            
+                            if config.bone_names.is_empty() {
+                                for i in 0..16 {
+                                    let selected = self.animation_editor_state.selected_bones.contains(&i);
+                                    let label = format!("  🦴 Bone {}", i);
+                                    if ui.selectable_label(selected, label).clicked() {
+                                        if selected { self.animation_editor_state.selected_bones.retain(|&b| b != i); }
+                                        else { self.animation_editor_state.selected_bones.push(i); }
+                                    }
+                                }
+                            } else {
+                                for (i, name) in config.bone_names.iter().enumerate() {
+                                    let selected = self.animation_editor_state.selected_bones.contains(&i);
+                                    
+                                    // Simple indentation logic
+                                    let mut depth = 0;
+                                    let mut curr = config.bone_parents.get(i).copied().flatten();
+                                    while let Some(parent_idx) = curr {
+                                        depth += 1;
+                                        curr = config.bone_parents.get(parent_idx).copied().flatten();
+                                        if depth > 10 { break; } // Safety
+                                    }
+                                    
+                                    let indent = "  ".repeat(depth);
+                                    let label = format!("{}🦴 {}", indent, name);
+                                    
+                                    if ui.selectable_label(selected, label).clicked() {
+                                        if selected { self.animation_editor_state.selected_bones.retain(|&b| b != i); }
+                                        else { self.animation_editor_state.selected_bones.push(i); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+    
+    fn draw_animation_preview(&mut self, ui: &mut egui::Ui) {
+        // Update playback time if playing
+        if self.animation_editor_state.is_playing {
+            let now = std::time::Instant::now();
+            let dt = now.duration_since(self.animation_editor_state.last_update).as_secs_f32();
+            self.animation_editor_state.last_update = now;
+            
+            self.animation_editor_state.current_time += dt * self.animation_editor_state.playback_speed;
+            
+            // Loop at end of clip
+            if let Some(scene) = &self.current_scene {
+                if let Some(entity) = self.selected_entity_id
+                    .and_then(|id| scene.entities.iter().find(|e| e.id == id))
+                {
+                    if let Some(config) = &entity.animator_config {
+                        if let Some(idx) = self.animation_editor_state.selected_clip_idx {
+                            if let Some(&duration) = config.clip_durations.get(idx) {
+                                if self.animation_editor_state.current_time >= duration {
+                                    self.animation_editor_state.current_time = 0.0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Request repaint for continuous playback
+            ui.ctx().request_repaint();
+        }
+        
+        // Show 3D Viewport in preview area
+        let rect = self.draw_3d_viewport(ui);
+        
+        // Add Animation Info Overlay on top of the 3D Viewport
+        let painter = ui.painter().with_clip_rect(rect);
+        
+        // Draw "Animation Preview" label (top left)
+        painter.text(
+            egui::pos2(rect.min.x + 10.0, rect.min.y + 10.0),
+            egui::Align2::LEFT_TOP,
+            "🎭 Animation Preview",
+            egui::FontId::proportional(14.0),
+            egui::Color32::from_gray(180),
+        );
+        
+        // Draw current time and clip info (top center)
+        let clip_info = self.current_scene.as_ref()
+            .and_then(|s| self.selected_entity_id
+                .and_then(|id| s.entities.iter().find(|e| e.id == id)))
+            .and_then(|e| e.animator_config.as_ref())
+            .and_then(|c| self.animation_editor_state.selected_clip_idx
+                .and_then(|i| c.clip_names.get(i).map(|name| (name.clone(), c.clip_durations.get(i).copied().unwrap_or(0.0)))))
+            .map(|(name, dur)| format!("{} ({:.2}s)", name, dur))
+            .unwrap_or_else(|| "No clip selected".to_string());
+        
+        painter.text(
+            egui::pos2(rect.center().x, rect.min.y + 15.0),
+            egui::Align2::CENTER_TOP,
+            format!("🎬 Clip: {} | ⏱ Time: {:.2}s", clip_info, self.animation_editor_state.current_time),
+            egui::FontId::proportional(16.0),
+            egui::Color32::WHITE,
+        );
+        
+        // Draw play indicator if playing (top right)
+        if self.animation_editor_state.is_playing {
+            painter.text(
+                egui::pos2(rect.max.x - 10.0, rect.min.y + 10.0),
+                egui::Align2::RIGHT_TOP,
+                "▶ Playing",
+                egui::FontId::proportional(12.0),
+                egui::Color32::from_rgb(100, 255, 100),
+            );
+        }
+        
+        // Send preview update to engine if connected
+        if self.is_connected {
+            if let Some(id) = self.selected_entity_id {
+                if let Some(clip_idx) = self.animation_editor_state.selected_clip_idx {
+                    let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::PreviewAnimationAt {
+                        id,
+                        clip_index: clip_idx,
+                        time: self.animation_editor_state.current_time,
+                    }));
+                }
+            }
+        }
     }
 }
 
@@ -1975,6 +3107,11 @@ impl eframe::App for EditorApp {
                         }
                         ui.close_menu();
                     }
+                });
+                ui.menu_button("View", |ui| {
+                    ui.label("Rendering Quality");
+                    ui.selectable_value(&mut self.render_quality, RenderQuality::Low, "Low (Wireframe)");
+                    ui.selectable_value(&mut self.render_quality, RenderQuality::High, "High (Solid)");
                 });
                 ui.menu_button("GameObject", |ui| {
                     ui.label("3D Primitives");
@@ -2211,7 +3348,7 @@ impl eframe::App for EditorApp {
                             .pick_file()
                         {
                             if let Some(path_str) = path.to_str() {
-                                if let Err(e) = self.import_model_from_path(path_str) {
+                                if let Err(e) = self.import_model_from_path(ctx, path_str) {
                                     self.status = format!("Import failed: {}", e);
                                 }
                             }
@@ -3147,10 +4284,35 @@ impl eframe::App for EditorApp {
                 });
             });
 
-        // CENTER - 3D VIEWPORT
+        // CENTER - 3D VIEWPORT with TABS
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("3D Scene Viewport");
-            self.draw_3d_viewport(ui);
+            // Tab bar at top
+            ui.horizontal(|ui| {
+                if ui.selectable_label(
+                    self.active_view == EditorView::SceneEditor,
+                    "🎬 Scene Editor"
+                ).clicked() {
+                    self.active_view = EditorView::SceneEditor;
+                }
+                if ui.selectable_label(
+                    self.active_view == EditorView::AnimationEditor,
+                    "🎭 Animation Editor"
+                ).clicked() {
+                    self.active_view = EditorView::AnimationEditor;
+                }
+            });
+            ui.separator();
+            
+            // Conditional content based on active tab
+            match self.active_view {
+                EditorView::SceneEditor => {
+                    ui.heading("3D Scene Viewport");
+                    let _ = self.draw_3d_viewport(ui);
+                }
+                EditorView::AnimationEditor => {
+                    self.draw_animation_editor(ui);
+                }
+            }
         });
 
         // New Scene Dialog
@@ -3292,7 +4454,7 @@ impl eframe::App for EditorApp {
                                         self.status = "FBX files must be converted to OBJ using Blender. File → Export → Wavefront (.obj)".into();
                                     } else {
                                         let file_path = file.clone();
-                                        if let Err(e) = self.import_model_from_path(&file_path) {
+                                        if let Err(e) = self.import_model_from_path(ctx, &file_path) {
                                             self.status = format!("Import error: {}", e);
                                         }
                                         self.show_import_model_dialog = false;

@@ -323,12 +323,20 @@ pub fn merge_fbx_meshes(scene: &ModelScene) -> Mesh {
 pub fn merge_model_meshes(scene: &ModelScene) -> Mesh {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
+    
+    // Collect texture info from first mesh that has it
+    let mut albedo_texture: Option<String> = None;
 
     // Merge static meshes
     for mesh in &scene.meshes {
         let base_idx = vertices.len() as u32;
         vertices.extend_from_slice(&mesh.vertices);
         indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+        
+        // Preserve first available texture reference
+        if albedo_texture.is_none() && mesh.albedo_texture.is_some() {
+            albedo_texture = mesh.albedo_texture.clone();
+        }
     }
 
     // Merge skinned meshes (without bone data for now)
@@ -336,6 +344,11 @@ pub fn merge_model_meshes(scene: &ModelScene) -> Mesh {
         let base_idx = vertices.len() as u32;
         vertices.extend_from_slice(&skinned.mesh.vertices);
         indices.extend(skinned.mesh.indices.iter().map(|i| i + base_idx));
+        
+        // Preserve first available texture reference
+        if albedo_texture.is_none() && skinned.mesh.albedo_texture.is_some() {
+            albedo_texture = skinned.mesh.albedo_texture.clone();
+        }
     }
 
     let mut aabb_min = [0.0, 0.0, 0.0];
@@ -358,7 +371,7 @@ pub fn merge_model_meshes(scene: &ModelScene) -> Mesh {
         albedo: None,
         normal: None,
         metallic_roughness: None,
-        albedo_texture: None,
+        albedo_texture,  // Now preserves texture reference from merged meshes
         aabb_min,
         aabb_max,
         decoded_albedo: None,

@@ -115,7 +115,7 @@ pub fn load_gltf_with_animations(data: &[u8]) -> Result<ModelScene> {
     scene.textures = texture_data.clone();
     let texture_names: Vec<String> = texture_data.iter().map(|t| t.name.clone()).collect();
     
-    let mat_tex_indices = extract_materials_manual(&gltf);
+    let materials = extract_materials_manual(&gltf);
     let tex_img_indices = extract_texture_source_indices(&gltf);
     
     // Re-extract meshes with material info
@@ -125,7 +125,7 @@ pub fn load_gltf_with_animations(data: &[u8]) -> Result<ModelScene> {
         for mesh in meshes {
             if let Some(primitives) = mesh.get("primitives").and_then(|p| p.as_array()) {
                 for primitive in primitives {
-                    if let Ok(mut mesh_data) = extract_primitive_mesh_manual(&gltf, primitive, &buffers, &texture_names, &mat_tex_indices, &tex_img_indices) {
+                    if let Ok(mut mesh_data) = extract_primitive_mesh_manual(&gltf, primitive, &buffers, &texture_names, &materials, &tex_img_indices) {
                         // Check for skinning data
                         let attributes = primitive.get("attributes");
                         let has_joints = attributes.and_then(|a| a.get("JOINTS_0")).is_some();
@@ -133,6 +133,11 @@ pub fn load_gltf_with_animations(data: &[u8]) -> Result<ModelScene> {
                         
                         if has_joints && has_weights {
                             if let Ok((bone_indices, bone_weights)) = extract_skin_data_manual(&gltf, primitive, &buffers) {
+                                // Populate Vertex data for high-res editor rendering
+                                for (i, v) in mesh_data.vertices.iter_mut().enumerate() {
+                                    if let Some(bi) = bone_indices.get(i) { v.bone_indices = *bi; }
+                                    if let Some(bw) = bone_weights.get(i) { v.bone_weights = *bw; }
+                                }
                                 scene.skinned_meshes.push(SkinnedMesh {
                                     mesh: mesh_data,
                                     bone_indices,
@@ -296,21 +301,42 @@ fn extract_images_manual(gltf: &Value, buffers: &[Vec<u8>]) -> Vec<EmbeddedTextu
     textures
 }
 
-fn extract_materials_manual(gltf: &Value) -> Vec<Option<usize>> {
-    let mut mat_texture_indices = Vec::new();
+/// Material data extracted from glTF
+struct MaterialData {
+    texture_idx: Option<usize>,
+    base_color: [f32; 4],
+}
+
+fn extract_materials_manual(gltf: &Value) -> Vec<MaterialData> {
+    let mut materials = Vec::new();
     
     if let Some(material_list) = gltf.get("materials").and_then(|m| m.as_array()) {
         for material in material_list {
-            let tex_idx = material.get("pbrMetallicRoughness")
+            let pbr = material.get("pbrMetallicRoughness");
+            
+            let tex_idx = pbr
                 .and_then(|p| p.get("baseColorTexture"))
                 .and_then(|t| t.get("index"))
                 .and_then(|i| i.as_u64())
                 .map(|i| i as usize);
-            mat_texture_indices.push(tex_idx);
+            
+            // Extract baseColorFactor (default is [1.0, 1.0, 1.0, 1.0])
+            let base_color = if let Some(factor) = pbr.and_then(|p| p.get("baseColorFactor")).and_then(|f| f.as_array()) {
+                [
+                    factor.get(0).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
+                    factor.get(1).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
+                    factor.get(2).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
+                    factor.get(3).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
+                ]
+            } else {
+                [1.0, 1.0, 1.0, 1.0]
+            };
+            
+            materials.push(MaterialData { texture_idx: tex_idx, base_color });
         }
     }
     
-    mat_texture_indices
+    materials
 }
 
 fn extract_texture_source_indices(gltf: &Value) -> Vec<usize> {
@@ -649,7 +675,7 @@ fn extract_primitive_mesh_manual(
     primitive: &Value, 
     buffers: &[Vec<u8>],
     texture_names: &[String],
-    mat_tex_indices: &[Option<usize>],
+    materials: &[MaterialData],
     tex_img_indices: &[usize]
 ) -> Result<Mesh> {
     let attributes = primitive.get("attributes").ok_or_else(|| anyhow!("No attributes"))?;
@@ -672,6 +698,18 @@ fn extract_primitive_mesh_manual(
         Vec::new()
     };
     
+    // Get material for this primitive
+    let material_idx = primitive.get("material").and_then(|m| m.as_u64()).map(|m| m as usize);
+    
+    // Get base color from material (default white)
+    let base_color = if let Some(mat_idx) = material_idx {
+        materials.get(mat_idx)
+            .map(|m| [m.base_color[0], m.base_color[1], m.base_color[2]])
+            .unwrap_or([1.0, 1.0, 1.0])
+    } else {
+        [1.0, 1.0, 1.0]
+    };
+    
     let vertex_count = positions.len();
     let mut vertices = Vec::with_capacity(vertex_count);
     
@@ -684,7 +722,7 @@ fn extract_primitive_mesh_manual(
             position: position.to_array(),
             normal: normal.to_array(),
             uv,
-            color: [1.0, 1.0, 1.0],
+            color: base_color,  // Apply material base color to vertex
             tangent: [1.0, 0.0, 0.0, 1.0],
             bone_indices: [0, 0, 0, 0],
             bone_weights: [1.0, 0.0, 0.0, 0.0],
@@ -699,12 +737,11 @@ fn extract_primitive_mesh_manual(
     
     let (aabb_min, aabb_max) = compute_aabb(&vertices);
     
-    let material_idx = primitive.get("material").and_then(|m| m.as_u64()).map(|m| m as usize);
+    // Get texture reference if material has one
     let mut albedo_texture = None;
-    
     if let Some(mat_idx) = material_idx {
-        if mat_idx < mat_tex_indices.len() {
-            if let Some(tex_idx) = mat_tex_indices[mat_idx] {
+        if let Some(mat) = materials.get(mat_idx) {
+            if let Some(tex_idx) = mat.texture_idx {
                 if tex_idx < tex_img_indices.len() {
                     let img_idx = tex_img_indices[tex_idx];
                     if img_idx < texture_names.len() {

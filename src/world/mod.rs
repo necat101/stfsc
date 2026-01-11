@@ -473,6 +473,12 @@ pub enum SceneUpdate {
         id: u32,
         clip_index: usize,
     },
+    /// Preview animation at specific time (for editor scrubbing)
+    PreviewAnimationAt {
+        id: u32,
+        clip_index: usize,
+        time: f32,
+    },
     /// Attach an entity to a parent
     AttachEntity {
         id: u32,
@@ -1206,6 +1212,18 @@ impl GameWorld {
                     }
                 }
 
+                SceneUpdate::PreviewAnimationAt { id, clip_index, time } => {
+                    if let Some(entity) = self.find_by_editor_id(id) {
+                        if let Ok(mut animator) = self.ecs.get::<&mut Animator>(entity) {
+                            animator.play(clip_index);
+                            animator.set_time(time);
+                            // Set playing to false to stop automatic time updates during scrubbing
+                            animator.playing = false; 
+                            info!("Scrubbing animation clip {} on entity {} to time {}", clip_index, id, time);
+                        }
+                    }
+                }
+
                 SceneUpdate::AttachEntity { id, parent_id } => {
                     if let Some(entity) = self.find_by_editor_id(id) {
                         let parent = parent_id.and_then(|pid| self.find_by_editor_id(pid));
@@ -1348,10 +1366,18 @@ impl GameWorld {
                                 if let Some(tex_name) = &mesh.albedo_texture {
                                     for texture in &model_scene.textures {
                                         if &texture.name == tex_name {
-                                            // Embed the raw texture bytes into the mesh
                                             mesh.albedo = Some(texture.data.clone());
                                             break;
                                         }
+                                    }
+                                }
+                                
+                                // Fallback: if no texture was found by name but textures exist, use the first one
+                                if mesh.albedo.is_none() && !model_scene.textures.is_empty() {
+                                    let first_texture = &model_scene.textures[0];
+                                    mesh.albedo = Some(first_texture.data.clone());
+                                    if mesh.albedo_texture.is_none() {
+                                        mesh.albedo_texture = Some(first_texture.name.clone());
                                     }
                                 }
 

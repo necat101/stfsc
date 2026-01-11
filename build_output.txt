@@ -1,14 +1,60 @@
     Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/stfsc-main)
-error: unexpected closing delimiter: `}`
-   --> src/world/gltf_loader.rs:327:1
-    |
-277 | fn extract_images_manual(gltf: &Value, buffers: &[Vec<u8>]) -> Vec<EmbeddedTexture> {
-    |                                                                                     - this opening brace...
-...
-324 | }
-    | - ...matches this closing brace
-...
-327 | }
-    | ^ unexpected closing delimiter
+warning: unused imports: `AnimationClip`, `Mesh`, `Skeleton`, and `Vertex`
+  --> src/bin/editor.rs:8:29
+   |
+8  |     LightType, SceneUpdate, Mesh, Vertex, LAYER_ENVIRONMENT, LAYER_PROP, LAYER_CHARACTER, LAYER_VEHICLE, LAYER_DEFAULT,
+   |                             ^^^^  ^^^^^^
+9  |     animation::{EditorKeyframe, KeyframeChannel, KeyframeValue, KeyframeInterpolation},
+10 |     fbx_loader::{ModelScene, AnimationClip, Skeleton},
+   |                              ^^^^^^^^^^^^^  ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
 
-error: could not compile `stfsc_engine` (lib) due to 1 previous error
+warning: variable does not need to be mutable
+    --> src/bin/editor.rs:1974:41
+     |
+1974 | ...                   let mut world_pos;
+     |                           ----^^^^^^^^^
+     |                           |
+     |                           help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+    --> src/bin/editor.rs:1975:41
+     |
+1975 | ...                   let mut world_normal;
+     |                           ----^^^^^^^^^^^^
+     |                           |
+     |                           help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/bin/editor.rs:2031:41
+     |
+2031 | ...                   let mut world_pos;
+     |                           ----^^^^^^^^^
+     |                           |
+     |                           help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/bin/editor.rs:2032:41
+     |
+2032 | ...                   let mut world_normal;
+     |                           ----^^^^^^^^^^^^
+     |                           |
+     |                           help: remove this `mut`
+
+warning: field `timeline_scroll` is never read
+   --> src/bin/editor.rs:632:5
+    |
+616 | struct AnimationEditorState {
+    |        -------------------- field in this struct
+...
+632 |     timeline_scroll: f32,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `AnimationEditorState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `stfsc_engine` (bin "editor") generated 6 warnings (run `cargo fix --bin "editor"` to apply 5 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 50.64s

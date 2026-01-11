@@ -143,6 +143,11 @@ impl Animator {
         }
     }
 
+    /// Set the playback time directly (for editor scrubbing)
+    pub fn set_time(&mut self, time: f32) {
+        self.time = time;
+    }
+
     /// Crossfade to a new animation resource over a duration
     pub fn crossfade_to(&mut self, resource: AnimResource, duration: f32) {
         // Simple check to avoid redundant crossfades
@@ -2373,6 +2378,16 @@ pub struct AnimatorConfig {
     pub clip_names: Vec<String>,
     /// Metadata: Animation clip durations
     pub clip_durations: Vec<f32>,
+    /// Metadata: Bone names for hierarchy display
+    pub bone_names: Vec<String>,
+    /// Metadata: Bone parent indices
+    pub bone_parents: Vec<Option<usize>>,
+    /// Metadata: Local bind pose transforms
+    pub bone_transforms: Vec<Mat4>,
+    /// Editor keyframes for custom animation editing
+    pub editor_keyframes: Vec<EditorKeyframe>,
+    /// Custom clip metadata for editor-created animations
+    pub editor_clips: Vec<EditorClipInfo>,
 }
 
 impl AnimatorConfig {
@@ -2392,6 +2407,11 @@ impl AnimatorConfig {
             speed: 1.0,
             clip_names: Vec::new(),
             clip_durations: Vec::new(),
+            bone_names: Vec::new(),
+            bone_parents: Vec::new(),
+            bone_transforms: Vec::new(),
+            editor_keyframes: Vec::new(),
+            editor_clips: Vec::new(),
         }
     }
 
@@ -2430,6 +2450,50 @@ impl AnimatorConfig {
     pub fn add_trigger(&mut self, name: &str) {
         self.parameters.push((name.to_string(), AnimParamConfig::Trigger));
     }
+}
+
+/// Editor-side keyframe representation (serializable)
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct EditorKeyframe {
+    /// Time in seconds
+    pub time: f32,
+    /// Bone index this keyframe affects
+    pub bone_index: usize,
+    /// Channel (Position, Rotation, Scale)
+    pub channel: KeyframeChannel,
+    /// Value based on channel type
+    pub value: KeyframeValue,
+    /// Interpolation type
+    pub interpolation: KeyframeInterpolation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum KeyframeChannel {
+    PositionX, PositionY, PositionZ,
+    RotationX, RotationY, RotationZ, RotationW,
+    ScaleX, ScaleY, ScaleZ,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum KeyframeValue {
+    Float(f32),
+    Vec3([f32; 3]),
+    Quat([f32; 4]),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum KeyframeInterpolation {
+    #[default]
+    Linear,
+    Step,
+    Bezier,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct EditorClipInfo {
+    pub name: String,
+    pub duration: f32,
+    pub loop_mode: bool,
 }
 
 #[cfg(test)]
