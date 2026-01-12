@@ -239,6 +239,30 @@ impl PhysicsWorld {
         body_handle
     }
 
+    pub fn set_rigid_body_transform(
+        &mut self,
+        handle: RigidBodyHandle,
+        position: Option<[f32; 3]>,
+        rotation: Option<[f32; 4]>,
+    ) {
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            let mut next_pos = *body.translation();
+            let mut next_rot = *body.rotation();
+
+            if let Some(p) = position {
+                next_pos = vector![p[0], p[1], p[2]];
+            }
+            if let Some(r) = rotation {
+                // nalgebra/rapier uses [w, x, y, z] for Quaternion::new
+                next_rot = nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
+                    r[3], r[0], r[1], r[2],
+                ));
+            }
+
+            body.set_position(Isometry::from_parts(next_pos.into(), next_rot), true);
+        }
+    }
+
     pub fn remove_rigid_body(&mut self, handle: RigidBodyHandle) {
         self.rigid_body_set.remove(
             handle,

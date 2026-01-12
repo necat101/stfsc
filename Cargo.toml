@@ -23,6 +23,7 @@ raw-window-handle = "0.5"
 
 # Math & Physics
 glam = { version = "0.24", features = ["bytemuck", "serde"] }
+nalgebra = "0.32"
 rapier3d = { version = "0.18", features = ["simd-stable", "parallel"] }
 
 # Asset Management & Serialization

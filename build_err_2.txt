@@ -1,0 +1,53 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/stfsc-main)
+warning: unused variable: `near_plane`
+    --> src/bin/editor.rs:2208:33
+     |
+2208 | ...                   let near_plane = 0.5; // Near plane distance for clipping
+     |                           ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_near_plane`
+     |
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: method `project_with_depth` is never used
+   --> src/bin/editor.rs:159:8
+    |
+94  | impl Camera3D {
+    | ------------- method in this implementation
+...
+159 |     fn project_with_depth(&self, world: Vec3, size: egui::Vec2) -> Option<(egui::Pos2, f32)> {
+    |        ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: struct `ClippedVertex` is never constructed
+   --> src/bin/editor.rs:192:8
+    |
+192 | struct ClippedVertex {
+    |        ^^^^^^^^^^^^^
+
+warning: method `lerp` is never used
+   --> src/bin/editor.rs:200:8
+    |
+199 | impl ClippedVertex {
+    | ------------------ method in this implementation
+200 |     fn lerp(&self, other: &ClippedVertex, t: f32) -> ClippedVertex {
+    |        ^^^^
+
+warning: function `clip_triangle_near_plane` is never used
+   --> src/bin/editor.rs:215:4
+    |
+215 | fn clip_triangle_near_plane(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `timeline_scroll` is never read
+   --> src/bin/editor.rs:763:5
+    |
+747 | struct AnimationEditorState {
+    |        -------------------- field in this struct
+...
+763 |     timeline_scroll: f32,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `AnimationEditorState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: `stfsc_engine` (bin "editor") generated 6 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 24.16s

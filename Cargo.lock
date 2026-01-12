@@ -3628,6 +3628,7 @@ dependencies = [
  "jni",
  "ktx2",
  "log",
+ "nalgebra",
  "ndk 0.7.0",
  "ndk-context",
  "openxr",

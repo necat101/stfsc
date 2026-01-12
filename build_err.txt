@@ -1,0 +1,45 @@
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/stfsc-main)
+error[E0425]: cannot find value `pos` in this scope
+    --> src/bin/editor.rs:2474:24
+     |
+2474 |                     if pos.y > 0.0 {
+     |                        ^^^ not found in this scope
+
+error[E0425]: cannot find value `pos` in this scope
+    --> src/bin/editor.rs:2475:52
+     |
+2475 |                         let shadow_pos = Vec3::new(pos.x, 0.0, pos.z);
+     |                                                    ^^^ not found in this scope
+
+error[E0425]: cannot find value `pos` in this scope
+    --> src/bin/editor.rs:2475:64
+     |
+2475 |                         let shadow_pos = Vec3::new(pos.x, 0.0, pos.z);
+     |                                                                ^^^ not found in this scope
+
+error[E0425]: cannot find value `half` in this scope
+    --> src/bin/editor.rs:2479:48
+     |
+2479 | ...                   let shadow_size = (half.x.max(half.z) * 150.0 / (pos.y + 2.0)).clamp(5.0, 50.0);
+     |                                          ^^^^ not found in this scope
+
+error[E0425]: cannot find value `half` in this scope
+    --> src/bin/editor.rs:2479:59
+     |
+2479 | ...                   let shadow_size = (half.x.max(half.z) * 150.0 / (pos.y + 2.0)).clamp(5.0, 50.0);
+     |                                                     ^^^^ not found in this scope
+
+error[E0425]: cannot find value `pos` in this scope
+    --> src/bin/editor.rs:2479:78
+     |
+2479 | ...                   let shadow_size = (half.x.max(half.z) * 150.0 / (pos.y + 2.0)).clamp(5.0, 50.0);
+     |                                                                        ^^^ not found in this scope
+
+error[E0425]: cannot find value `pos` in this scope
+    --> src/bin/editor.rs:2480:108
+     |
+2480 | ...                   let shadow_color = egui::Color32::from_rgba_unmultiplied(20, 30, 40, (100.0 / (pos.y * 0.5 + 1.0)) as u8);
+     |                                                                                                      ^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `stfsc_engine` (bin "editor") due to 7 previous errors

@@ -118,39 +118,52 @@ pub fn load_gltf_with_animations(data: &[u8]) -> Result<ModelScene> {
     let materials = extract_materials_manual(&gltf);
     let tex_img_indices = extract_texture_source_indices(&gltf);
     
-    // Re-extract meshes with material info
+    // Re-extract meshes with material info via scene hierarchy traversal
     scene.meshes.clear();
     scene.skinned_meshes.clear();
-    if let Some(meshes) = gltf.get("meshes").and_then(|m| m.as_array()) {
-        for mesh in meshes {
-            if let Some(primitives) = mesh.get("primitives").and_then(|p| p.as_array()) {
-                for primitive in primitives {
-                    if let Ok(mut mesh_data) = extract_primitive_mesh_manual(&gltf, primitive, &buffers, &texture_names, &materials, &tex_img_indices) {
-                        // Check for skinning data
-                        let attributes = primitive.get("attributes");
-                        let has_joints = attributes.and_then(|a| a.get("JOINTS_0")).is_some();
-                        let has_weights = attributes.and_then(|a| a.get("WEIGHTS_0")).is_some();
-                        
-                        if has_joints && has_weights {
-                            if let Ok((bone_indices, bone_weights)) = extract_skin_data_manual(&gltf, primitive, &buffers) {
-                                // Populate Vertex data for high-res editor rendering
-                                for (i, v) in mesh_data.vertices.iter_mut().enumerate() {
-                                    if let Some(bi) = bone_indices.get(i) { v.bone_indices = *bi; }
-                                    if let Some(bw) = bone_weights.get(i) { v.bone_weights = *bw; }
-                                }
-                                scene.skinned_meshes.push(SkinnedMesh {
-                                    mesh: mesh_data,
-                                    bone_indices,
-                                    bone_weights,
-                                });
-                            }
-                        } else {
-                            scene.meshes.push(mesh_data);
+    
+    let scene_idx = gltf.get("scene").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
+    let mut root_nodes = Vec::new();
+    
+    if let Some(scenes) = gltf.get("scenes").and_then(|s| s.as_array()) {
+        if let Some(default_scene) = scenes.get(scene_idx) {
+            if let Some(roots) = default_scene.get("nodes").and_then(|r| r.as_array()) {
+                root_nodes = roots.iter().filter_map(|v| v.as_u64()).map(|v| v as usize).collect();
+            }
+        }
+    }
+    
+    // If no scene roots found, try to find orphan nodes (nodes with no parents)
+    if root_nodes.is_empty() {
+        if let Some(nodes) = gltf.get("nodes").and_then(|n| n.as_array()) {
+            for i in 0..nodes.len() {
+                let mut is_child = false;
+                for other_node in nodes {
+                    if let Some(children) = other_node.get("children").and_then(|c| c.as_array()) {
+                        if children.iter().any(|c| c.as_u64() == Some(i as u64)) {
+                            is_child = true;
+                            break;
                         }
                     }
                 }
+                if !is_child {
+                    root_nodes.push(i);
+                }
             }
         }
+    }
+
+    for root_idx in root_nodes {
+        traverse_gltf_nodes(
+            &gltf,
+            root_idx,
+            Mat4::IDENTITY,
+            &buffers,
+            &texture_names,
+            &materials,
+            &tex_img_indices,
+            &mut scene,
+        )?;
     }
     
     log::info!(
@@ -170,6 +183,85 @@ pub fn load_gltf_file(path: &str) -> Result<ModelScene> {
     let data = std::fs::read(path)
         .with_context(|| format!("Failed to read glTF file: {}", path))?;
     load_gltf_with_animations(&data)
+}
+
+fn traverse_gltf_nodes(
+    gltf: &Value,
+    node_idx: usize,
+    parent_transform: Mat4,
+    buffers: &[Vec<u8>],
+    texture_names: &[String],
+    materials: &[MaterialData],
+    tex_img_indices: &[usize],
+    scene: &mut ModelScene,
+) -> Result<()> {
+    let nodes = gltf.get("nodes").and_then(|n| n.as_array()).ok_or_else(|| anyhow!("No nodes"))?;
+    let node = nodes.get(node_idx).ok_or_else(|| anyhow!("Node not found"))?;
+    
+    let local_transform = get_node_transform(Some(node));
+    let world_transform = parent_transform * local_transform;
+    
+    if let Some(mesh_idx) = node.get("mesh").and_then(|m| m.as_u64()) {
+        if let Some(meshes) = gltf.get("meshes").and_then(|m| m.as_array()) {
+            if let Some(mesh) = meshes.get(mesh_idx as usize) {
+                if let Some(primitives) = mesh.get("primitives").and_then(|p| p.as_array()) {
+                    for primitive in primitives {
+                        if let Ok(mut mesh_data) = extract_primitive_mesh_manual(gltf, primitive, buffers, texture_names, materials, tex_img_indices) {
+                            // Check for skinning data
+                            let attributes = primitive.get("attributes");
+                            let has_joints = attributes.and_then(|a| a.get("JOINTS_0")).is_some();
+                            let has_weights = attributes.and_then(|a| a.get("WEIGHTS_0")).is_some();
+                            
+                            if has_joints && has_weights {
+                                if let Ok((bone_indices, bone_weights)) = extract_skin_data_manual(gltf, primitive, buffers) {
+                                    // Populate Vertex data for high-res editor rendering
+                                    for (i, v) in mesh_data.vertices.iter_mut().enumerate() {
+                                        if let Some(bi) = bone_indices.get(i) { v.bone_indices = *bi; }
+                                        if let Some(bw) = bone_weights.get(i) { v.bone_weights = *bw; }
+                                    }
+                                    scene.skinned_meshes.push(SkinnedMesh {
+                                        mesh: mesh_data,
+                                        bone_indices,
+                                        bone_weights,
+                                    });
+                                }
+                            } else {
+                                // Static mesh - bake node transform for editor viewport
+                                bake_mesh_transform(&mut mesh_data, world_transform);
+                                scene.meshes.push(mesh_data);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Recurse to children
+    if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
+        for child_val in children {
+            if let Some(child_idx) = child_val.as_u64() {
+                traverse_gltf_nodes(gltf, child_idx as usize, world_transform, buffers, texture_names, materials, tex_img_indices, scene)?;
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+fn bake_mesh_transform(mesh: &mut Mesh, transform: Mat4) {
+    for v in &mut mesh.vertices {
+        let pos = Vec3::from(v.position);
+        let norm = Vec3::from(v.normal);
+        
+        v.position = transform.transform_point3(pos).to_array();
+        // Transform normal using the transform matrix (assuming uniform scale for simplicity)
+        v.normal = transform.transform_vector3(norm).normalize().to_array();
+    }
+    
+    let (min, max) = compute_aabb(&mesh.vertices);
+    mesh.aabb_min = min;
+    mesh.aabb_max = max;
 }
 
 // --- GLB Parser ---

@@ -9,6 +9,7 @@ use stfsc_engine::world::{
     animation::{EditorKeyframe, KeyframeChannel, KeyframeValue, KeyframeInterpolation},
     fbx_loader::ModelScene,
 };
+use stfsc_engine::graphics::occlusion::{Frustum, AABB};
 use glam::{Mat4, Vec3 as GVec3, Quat as GQuat};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -83,6 +84,17 @@ impl Vec3 {
     }
 }
 
+/// Pre-processed vertex for optimized software rendering
+#[derive(Clone, Copy)]
+struct ProcessedVertex {
+    pos: egui::Pos2,
+    color: egui::Color32,
+    uv: egui::Pos2,
+    depth: f32,
+    world_pos: GVec3,
+    is_valid: bool,
+}
+
 #[derive(Clone, Copy)]
 struct Camera3D {
     target: Vec3,
@@ -132,7 +144,7 @@ impl Camera3D {
         let scale = (self.fov.to_radians() * 0.5).tan();
         let ndc_x = x / (z * scale * aspect);
         let ndc_y = y / (z * scale);
-        if ndc_x.abs() > 2.0 || ndc_y.abs() > 2.0 {
+        if ndc_x.abs() > 1.5 || ndc_y.abs() > 1.5 {
             return None;
         }
         Some(egui::pos2(
@@ -154,7 +166,24 @@ impl Camera3D {
             .normalize();
         (self.get_position(), dir)
     }
+    
+    /// Project a world point to screen coordinates, returning depth (view-space Z) as well
+    fn get_view_proj(&self, aspect: f32) -> Mat4 {
+        let cam_pos = self.get_position();
+        let cam_pos_g = GVec3::new(cam_pos.x, cam_pos.y, cam_pos.z);
+        let fwd = self.get_forward();
+        let fwd_g = GVec3::new(fwd.x, fwd.y, fwd.z);
+        let right = self.get_right();
+        let right_g = GVec3::new(right.x, right.y, right.z);
+        let up_g = right_g.cross(fwd_g);
+        
+        let view = Mat4::look_at_rh(cam_pos_g, cam_pos_g + fwd_g, up_g);
+        let proj = Mat4::perspective_rh(self.fov.to_radians(), aspect, 0.1, 1000.0);
+        proj * view
+    }
 }
+    
+
 
 // ============================================================================
 // PRIMITIVES LIBRARY (Unity-style)
@@ -390,9 +419,9 @@ impl Scene {
         s.entities.push(SceneEntity {
             id: 1,
             name: "Ground".into(),
-            position: [0.0, -1.1, 0.0],  // Lowered to match main.rs floor exactly
+            position: [0.0, -1.1, 0.0],  // Lowered to match main.rs floor exactly (top at -0.1)
             rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [100.0, 2.0, 100.0],  // Match thickness with main.rs floor
+            scale: [200.0, 2.0, 200.0],  // Match size with main.rs floor (200x200)
             entity_type: EntityType::Ground,
             material: m.clone(),
             script: None,
@@ -639,8 +668,8 @@ struct AnimationEditorState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 enum RenderQuality {
     #[default]
-    Low,  // Wireframe
     High, // Solid meshes + textures
+    Low,  // Wireframe
 }
 
 impl Default for AnimationEditorState {
@@ -838,7 +867,7 @@ impl EditorApp {
             active_view: EditorView::SceneEditor,
             animation_editor_state: AnimationEditorState::default(),
             // Rendering Quality
-            render_quality: RenderQuality::Low,
+            render_quality: RenderQuality::High,
             model_cache: {
                 let mut cache = HashMap::new();
                 for ptype in PrimitiveType::all() {
@@ -985,6 +1014,7 @@ impl EditorApp {
                         primitive,
                         position: entity.position,
                         rotation: entity.rotation,
+                        scale: entity.scale,
                         color,
                         albedo_texture: entity.material.albedo_texture.clone(),
                         collision_enabled: entity.collision_enabled,
@@ -1132,8 +1162,15 @@ impl EditorApp {
                 
                 if let Some(p) = loaded_path {
                     // Update to the working path for future sessions
-                    entity.material.albedo_texture = Some(p);
-                } else {
+                entity.material.albedo_texture = Some(p);
+                
+                // Pre-cache texture for editor software renderer
+                if let Some(data) = &entity.material.albedo_texture_data {
+                    let tex_name = std::path::Path::new(entity.material.albedo_texture.as_ref().unwrap())
+                        .file_name().unwrap_or_default().to_string_lossy().to_string();
+                    self.load_egui_texture(ctx, &tex_name, data);
+                }
+            } else {
                     eprintln!("Warning: Could not load texture at '{}'", texture_path);
                 }
             }
@@ -1223,24 +1260,9 @@ impl EditorApp {
         };
 
         // Load textures into egui
-        for tex in &model_scene.textures {
-            if !self.egui_textures.contains_key(&tex.name) {
-                if let Ok(img) = image::load_from_memory(&tex.data) {
-                    let rgba = img.to_rgba8();
-                    let pixels = rgba.as_flat_samples();
-                    let color_img = egui::ColorImage::from_rgba_unmultiplied(
-                        [img.width() as usize, img.height() as usize],
-                        pixels.as_slice(),
-                    );
-                    let handle = ctx.load_texture(
-                        &tex.name,
-                        color_img,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    self.egui_textures.insert(tex.name.clone(), handle);
-                }
-            }
-        }
+    for tex in &model_scene.textures {
+        self.load_egui_texture(ctx, &tex.name, &tex.data);
+    }
 
         let arc_model = Arc::new(model_scene);
         self.model_cache.insert(path.to_string(), arc_model.clone());
@@ -1431,6 +1453,28 @@ impl EditorApp {
             false
         } else {
             true
+        }
+    }
+
+    /// Decode and load a texture into egui's texture manager
+    fn load_egui_texture(&mut self, ctx: &egui::Context, name: &str, data: &[u8]) {
+        if self.egui_textures.contains_key(name) {
+            return;
+        }
+
+        if let Ok(img) = image::load_from_memory(data) {
+            let rgba = img.to_rgba8();
+            let pixels = rgba.as_flat_samples();
+            let color_img = egui::ColorImage::from_rgba_unmultiplied(
+                [img.width() as usize, img.height() as usize],
+                pixels.as_slice(),
+            );
+            let handle = ctx.load_texture(
+                name,
+                color_img,
+                egui::TextureOptions::LINEAR,
+            );
+            self.egui_textures.insert(name.to_string(), handle);
         }
     }
 
@@ -1867,7 +1911,7 @@ impl EditorApp {
 
         // Zoom
         let scroll = ui.input(|i| i.scroll_delta.y);
-        self.camera.distance = (self.camera.distance - scroll * 1.5).clamp(2.0, 500.0);
+        self.camera.distance = (self.camera.distance - scroll * 1.5).clamp(0.1, 1000.0);
 
         // Background - Unity-style sky for High mode, dark for Low mode
         if self.render_quality == RenderQuality::High {
@@ -1917,27 +1961,54 @@ impl EditorApp {
         }
 
         // Professional fading grid - colors adjusted for background
-        let grid_size = 100.0;
-        let grid_step = 5.0;
+        let grid_size = 500.0; // Increased for "infinite" feel
+        let grid_step = 10.0;
+        let sub_step = 2.0;
         let cam_dist = self.camera.distance;
-        let base_alpha = (120.0 / (cam_dist * 0.05).max(1.0)).clamp(30.0, 180.0);
+        // Fade grid faster at distance
+        let base_alpha = (200.0 / (cam_dist * 0.1).max(1.0)).clamp(10.0, 150.0);
         
         // Grid colors based on mode (darker for bright sky, lighter for dark)
         let (major_color, minor_color) = if self.render_quality == RenderQuality::High {
             // Dark grid on bright sky (like Unity)
-            ([60, 80, 100], [80, 100, 120])
+            ([40, 60, 80], [100, 110, 120])
         } else {
             // Light grid on dark background
             ([140, 150, 170], [100, 110, 130])
         };
         
-        for i in -20..=20 {
+        // Render sub-grid for High Quality
+        if self.render_quality == RenderQuality::High {
+            for i in -100..=100 {
+                let val = i as f32 * sub_step;
+                if val.abs() > grid_size { continue; }
+                if i % 5 == 0 { continue; } // Skip major lines
+                
+                // Exponential edge fade for smoother horizon
+                let dist_ratio = val.abs() / grid_size;
+                let edge_fade = (1.0 - dist_ratio * dist_ratio).max(0.0);
+                let alpha = (base_alpha * 0.25 * edge_fade) as u8;
+                let stroke = egui::Stroke::new(0.3, egui::Color32::from_rgba_unmultiplied(minor_color[0], minor_color[1], minor_color[2], alpha));
+                
+                // X
+                if let (Some(p1), Some(p2)) = (self.camera.project(Vec3::new(val, 0.0, -grid_size), available), self.camera.project(Vec3::new(val, 0.0, grid_size), available)) {
+                    painter.line_segment([egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)], stroke);
+                }
+                // Z
+                if let (Some(p1), Some(p2)) = (self.camera.project(Vec3::new(-grid_size, 0.0, val), available), self.camera.project(Vec3::new(grid_size, 0.0, val), available)) {
+                    painter.line_segment([egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)], stroke);
+                }
+            }
+        }
+
+        for i in -50..=50 {
             let val = i as f32 * grid_step;
             if val.abs() > grid_size { continue; }
             let is_major = i % 5 == 0;
             
             // Dist alpha - fade at edges
-            let edge_fade = 1.0 - (val.abs() / grid_size);
+            let dist_ratio = val.abs() / grid_size;
+            let edge_fade = (1.0 - dist_ratio * dist_ratio).max(0.0);
             let alpha = (base_alpha * edge_fade) as u8;
             
             // X-lines
@@ -2001,13 +2072,20 @@ impl EditorApp {
             let render_quality = self.render_quality;
             
             // Parallel: Compute all entity render data (projections, colors, etc.)
-            let entity_renders: Vec<_> = scene.entities.par_iter().map(|entity| {
+            let white_pixel_uv = egui::pos2(0.0, 0.0);
+            let cam_pos = camera.get_position();
+            let cam_pos_g = GVec3::new(cam_pos.x, cam_pos.y, cam_pos.z);
+            let cam_fwd = {
+                let fwd = camera.get_forward();
+                GVec3::new(fwd.x, fwd.y, fwd.z)
+            };
+            
+            // Extract frustum once for culling
+            let vp = camera.get_view_proj(available.x / available.y);
+            let frustum = Frustum::from_view_proj(vp);
+
+            let mut entity_renders: Vec<_> = scene.entities.par_iter().map(|entity| {
                 let pos = Vec3::new(entity.position[0], entity.position[1], entity.position[2]);
-                let half = Vec3::new(
-                    entity.scale[0] * 0.5,
-                    entity.scale[1] * 0.5,
-                    entity.scale[2] * 0.5,
-                );
                 let is_selected = selected_id == Some(entity.id);
                 
                 let base_color = [
@@ -2015,8 +2093,225 @@ impl EditorApp {
                     (entity.material.albedo_color[1] * 200.0) as u8,
                     (entity.material.albedo_color[2] * 200.0) as u8,
                 ];
+
+                // Standard projection for icons/centers
+                let center_proj = camera.project(pos, available)
+                    .map(|p| egui::pos2(rect.min.x + p.x, rect.min.y + p.y));
                 
-                // Box corners
+                let mut high_res_meshes = Vec::new();
+
+                // 1. Frustum Culling at Entity Level
+                // 1. Precise Frustum Culling at Entity Level
+                let entity_scale = GVec3::from(entity.scale);
+                let entity_pos = GVec3::from(entity.position);
+                
+                let mesh_path = match &entity.entity_type {
+                    EntityType::Mesh { path } => Some(path.clone()),
+                    EntityType::Primitive(ptype) => Some(format!("primitive://{}", ptype.name().to_lowercase())),
+                    EntityType::Ground => Some("primitive://cube".to_string()),
+                    EntityType::Vehicle => Some("primitive://cube".to_string()),
+                    EntityType::Building { .. } => Some("primitive://cube".to_string()),
+                    EntityType::CrowdAgent { .. } => Some("primitive://capsule".to_string()),
+                    _ => None,
+                };
+
+                let entity_aabb = if let Some(path) = &mesh_path {
+                    if let Some(model) = model_cache.get(path) {
+                        // Use accurate mesh AABB if available
+                        let mut min = GVec3::splat(f32::MAX);
+                        let mut max = GVec3::splat(f32::MIN);
+                        for mesh in model.meshes.iter().chain(model.skinned_meshes.iter().map(|s| &s.mesh)) {
+                            min = min.min(GVec3::from(mesh.aabb_min));
+                            max = max.max(GVec3::from(mesh.aabb_max));
+                        }
+                        let center = (min + max) * 0.5;
+                        let extent = (max - min) * 0.5;
+                        let world_center = entity_pos + GQuat::from_array(entity.rotation) * (center * entity_scale);
+                        let world_extent = entity_scale * extent * 1.2; // Extra padding for rotation
+                        AABB::from_center_extents(world_center, world_extent)
+                    } else {
+                        AABB::from_center_extents(entity_pos, entity_scale * 1.5)
+                    }
+                } else {
+                    AABB::from_center_extents(entity_pos, entity_scale * 1.5) // Conservative bounds
+                };
+                let is_visible = frustum.intersects_aabb(&entity_aabb);
+
+                if render_quality == RenderQuality::High && is_visible {
+                    let mesh_path = match &entity.entity_type {
+                        EntityType::Mesh { path } => Some(path.clone()),
+                        EntityType::Primitive(ptype) => Some(format!("primitive://{}", ptype.name().to_lowercase())),
+                        EntityType::Ground => Some("primitive://cube".to_string()),
+                        EntityType::Vehicle => Some("primitive://cube".to_string()),
+                        EntityType::Building { .. } => Some("primitive://cube".to_string()),
+                        EntityType::CrowdAgent { .. } => Some("primitive://capsule".to_string()),
+                        _ => None,
+                    };
+
+                    if let Some(path) = mesh_path {
+                        if let Some(model) = model_cache.get(&path) {
+                            let transform = Mat4::from_scale_rotation_translation(
+                                entity_scale,
+                                GQuat::from_array(entity.rotation),
+                                entity_pos,
+                            );
+                            
+                            let pose = Self::compute_animated_pose(entity, model_cache, anim_state);
+                            let mat_color = GVec3::new(
+                                entity.material.albedo_color[0],
+                                entity.material.albedo_color[1],
+                                entity.material.albedo_color[2],
+                            );
+                            
+                            // Balanced lighting - slightly angled for depth perception
+                            let light_dir = GVec3::new(0.4, 0.8, 0.3).normalize();
+                            
+                            // Process all meshes (regular and skinned)
+                            let all_meshes: Vec<&stfsc_engine::world::Mesh> = model.meshes.iter()
+                                .chain(model.skinned_meshes.iter().map(|s| &s.mesh))
+                                .collect();
+                            
+                            for mesh in all_meshes {
+                                // 2. Vertex Pre-processing Pass (Parallel within mesh)
+                                let processed_verts: Vec<ProcessedVertex> = mesh.vertices.par_iter().map(|v| {
+                                    // Transform
+                                    let (world_pos, world_normal) = if let Some((_, skinning_matrices)) = &pose {
+                                        let mut skinned_pos = GVec3::ZERO;
+                                        let mut skinned_norm = GVec3::ZERO;
+                                        for i in 0..4 {
+                                            let weight = v.bone_weights[i];
+                                            if weight > 0.0 {
+                                                let bone_idx = v.bone_indices[i] as usize;
+                                                if let Some(mat) = skinning_matrices.get(bone_idx) {
+                                                    skinned_pos += mat.transform_point3(GVec3::from(v.position)) * weight;
+                                                    skinned_norm += mat.transform_vector3(GVec3::from(v.normal)) * weight;
+                                                }
+                                            }
+                                        }
+                                        (transform.transform_point3(skinned_pos), transform.transform_vector3(skinned_norm).normalize())
+                                    } else {
+                                        (transform.transform_point3(GVec3::from(v.position)), transform.transform_vector3(GVec3::from(v.normal)).normalize())
+                                    };
+
+                                    let depth = (world_pos - cam_pos_g).dot(cam_fwd);
+                                    let mut screen_pos = egui::Pos2::ZERO;
+                                    let mut is_valid = depth > 0.1; // Reduced near plane rejection for completeness
+
+                                    if is_valid {
+                                        if let Some(p) = camera.project(Vec3::new(world_pos.x, world_pos.y, world_pos.z), available) {
+                                            screen_pos = egui::pos2(rect.min.x + p.x, rect.min.y + p.y);
+                                        } else {
+                                            is_valid = false;
+                                        }
+                                    }
+
+                                    // Shade
+                                    let mut color = egui::Color32::BLACK;
+                                    if is_valid {
+                                        let view_dir = (cam_pos_g - world_pos).normalize();
+                                        // Bright, balanced ambient lighting
+                                        let ambient = 0.35;
+                                        let diffuse = world_normal.dot(light_dir).max(0.0) * 0.65;
+                                        let half_dir = (light_dir + view_dir).normalize();
+                                        let specular = world_normal.dot(half_dir).max(0.0).powf(24.0) * 0.2;
+                                        let base_col = mat_color * GVec3::from(v.color);
+                                        let mut shaded = base_col * (diffuse + ambient) + GVec3::splat(specular);
+                                        
+                                        if is_selected { shaded = shaded.lerp(GVec3::new(1.0, 0.85, 0.4), 0.25); }
+
+                                        // Apply fog
+                                        let fog_color = GVec3::new(0.50, 0.65, 0.85);
+                                        let fog_dist = (depth - 20.0).max(0.0) * 0.002;
+                                        let fog_factor = (1.0f32 - (-fog_dist).exp()).clamp(0.0f32, 1.0f32);
+                                        shaded = shaded.lerp(fog_color, fog_factor);
+
+                                        color = egui::Color32::from_rgb(
+                                            (shaded.x.clamp(0.0, 1.0) * 255.0) as u8,
+                                            (shaded.y.clamp(0.0, 1.0) * 255.0) as u8,
+                                            (shaded.z.clamp(0.0, 1.0) * 255.0) as u8,
+                                        );
+                                    }
+
+                                    ProcessedVertex {
+                                        pos: screen_pos,
+                                        color,
+                                        uv: egui::pos2(v.uv[0], v.uv[1]),
+                                        depth,
+                                        world_pos,
+                                        is_valid,
+                                    }
+                                }).collect();
+
+                                // 3. Triangle Collection & Sorting pass (Parallel with stable indices)
+                                let num_tris = mesh.indices.len() / 3;
+                                let valid_tris: Vec<(usize, [usize; 3], f32)> = (0..num_tris).into_par_iter().filter_map(|tri_idx| {
+                                    let base = tri_idx * 3;
+                                    if base + 2 >= mesh.indices.len() { return None; }
+                                    let indices = [mesh.indices[base] as usize, mesh.indices[base + 1] as usize, mesh.indices[base + 2] as usize];
+                                    let v0 = &processed_verts[indices[0]];
+                                    let v1 = &processed_verts[indices[1]];
+                                    let v2 = &processed_verts[indices[2]];
+
+                                    if !v0.is_valid || !v1.is_valid || !v2.is_valid { return None; }
+
+                                    // Backface culling
+                                    let face_normal = (v1.world_pos - v0.world_pos).cross(v2.world_pos - v0.world_pos);
+                                    if face_normal.dot(v0.world_pos - cam_pos_g) > 0.0 { return None; }
+
+                                    // Rejection of degenerate or extreme triangles
+                                    let area = ((v1.pos.x - v0.pos.x) * (v2.pos.y - v0.pos.y) - (v2.pos.x - v0.pos.x) * (v1.pos.y - v0.pos.y)).abs() * 0.5;
+                                    if area < 0.01 { return None; }
+
+                                    let avg_depth = (v0.depth + v1.depth + v2.depth) / 3.0;
+                                    Some((tri_idx, indices, avg_depth))
+                                }).collect();
+
+                                // Stable sort by depth (far to near), preserves original order for equal depths
+                                let mut valid_tris = valid_tris;
+                                valid_tris.sort_by(|a, b| {
+                                    match b.2.partial_cmp(&a.2) {
+                                        Some(std::cmp::Ordering::Equal) | None => a.0.cmp(&b.0),
+                                        Some(ord) => ord,
+                                    }
+                                });
+
+                                // 4. Final Egui Mesh Construction
+                                // Calculate average depth for this sub-mesh BEFORE consuming valid_tris
+                                let mesh_avg_depth = if !valid_tris.is_empty() {
+                                    valid_tris.iter().map(|(_, _, d)| *d).sum::<f32>() / valid_tris.len() as f32
+                                } else {
+                                    0.0
+                                };
+                                
+                                let mut egui_vertices = Vec::with_capacity(valid_tris.len() * 3);
+                                let mut egui_indices = Vec::with_capacity(valid_tris.len() * 3);
+                                let has_texture = mesh.albedo_texture.is_some() || entity.material.albedo_texture.is_some();
+
+                                for (_, indices, _) in valid_tris {
+                                    let base_idx = egui_vertices.len() as u32;
+                                    for &idx in &indices {
+                                        let v = &processed_verts[idx];
+                                        egui_vertices.push(egui::epaint::Vertex {
+                                            pos: v.pos,
+                                            uv: if has_texture { v.uv } else { white_pixel_uv },
+                                            color: v.color,
+                                        });
+                                    }
+                                    egui_indices.push(base_idx);
+                                    egui_indices.push(base_idx + 1);
+                                    egui_indices.push(base_idx + 2);
+                                }
+
+                                if !egui_indices.is_empty() {
+                                    high_res_meshes.push((egui_vertices, egui_indices, mesh.albedo_texture.clone(), mesh_avg_depth));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Culling for icons/lines (project corners for bounding box culling)
+                let half = Vec3::new(entity.scale[0] * 0.5, entity.scale[1] * 0.5, entity.scale[2] * 0.5);
                 let corners = [
                     Vec3::new(pos.x - half.x, pos.y - half.y, pos.z - half.z),
                     Vec3::new(pos.x + half.x, pos.y - half.y, pos.z - half.z),
@@ -2027,249 +2322,104 @@ impl EditorApp {
                     Vec3::new(pos.x + half.x, pos.y + half.y, pos.z + half.z),
                     Vec3::new(pos.x - half.x, pos.y + half.y, pos.z + half.z),
                 ];
-                
-                // Project all 8 corners + center in parallel (within this entity)
                 let proj: Vec<Option<egui::Pos2>> = corners.iter().map(|c| {
                     camera.project(*c, available).map(|p| egui::pos2(rect.min.x + p.x, rect.min.y + p.y))
                 }).collect();
                 
-                let center_proj = camera.project(pos, available)
-                    .map(|p| egui::pos2(rect.min.x + p.x, rect.min.y + p.y));
-                
-                let mut high_res_meshes = Vec::new();
-                if render_quality == RenderQuality::High {
-                    let mesh_path = match &entity.entity_type {
-                        EntityType::Mesh { path } => Some(path.clone()),
-                        EntityType::Primitive(ptype) => Some(format!("primitive://{}", ptype.name().to_lowercase())),
-                        _ => None,
-                    };
-
-                    if let Some(path) = mesh_path {
-                        if let Some(model) = model_cache.get(&path) {
-                            let transform = Mat4::from_scale_rotation_translation(
-                                GVec3::from(entity.scale),
-                                GQuat::from_array(entity.rotation),
-                                GVec3::from(entity.position),
-                            );
-                            
-                            let pose = Self::compute_animated_pose(entity, model_cache, anim_state);
-                            
-                            // Get material base color for this entity
-                            let mat_color = GVec3::new(
-                                entity.material.albedo_color[0],
-                                entity.material.albedo_color[1],
-                                entity.material.albedo_color[2],
-                            );
-
-                            for mesh in &model.meshes {
-                                let mut egui_vertices = Vec::with_capacity(mesh.vertices.len());
-                                for v in &mesh.vertices {
-                                    let world_pos;
-                                    let world_normal;
-                                    if let Some((_, skinning_matrices)) = &pose {
-                                        let mut skinned_pos = GVec3::ZERO;
-                                        let mut skinned_norm = GVec3::ZERO;
-                                        for i in 0..4 {
-                                            let weight = v.bone_weights[i];
-                                            if weight > 0.0 {
-                                                let bone_idx = v.bone_indices[i] as usize;
-                                                if let Some(mat) = skinning_matrices.get(bone_idx) {
-                                                    skinned_pos += mat.transform_point3(GVec3::from(v.position)) * weight;
-                                                    skinned_norm += mat.transform_vector3(GVec3::from(v.normal)) * weight;
-                                                }
-                                            }
-                                        }
-                                        world_pos = transform.transform_point3(skinned_pos);
-                                        world_normal = transform.transform_vector3(skinned_norm).normalize();
-                                    } else {
-                                        world_pos = transform.transform_point3(GVec3::from(v.position));
-                                        world_normal = transform.transform_vector3(GVec3::from(v.normal)).normalize();
-                                    }
-
-                                    // Professional Shaded Rendering
-                                    let light_dir = GVec3::new(0.6, 1.0, 0.4).normalize();
-                                    let cam_pos = camera.get_position();
-                                    let view_dir = (GVec3::new(cam_pos.x, cam_pos.y, cam_pos.z) - world_pos).normalize();
-                                    
-                                    // Ambient + Diffuse
-                                    let ambient = 0.15;
-                                    let diffuse = world_normal.dot(light_dir).max(0.0) * 0.75;
-                                    
-                                    // Specular (Blinn-Phong)
-                                    let half_dir = (light_dir + view_dir).normalize();
-                                    let specular = world_normal.dot(half_dir).max(0.0).powf(24.0) * 0.25;
-                                    
-                                    // Use material color blended with vertex color (for textured models)
-                                    let base_color = mat_color * GVec3::from(v.color);
-                                    let mut v_color = base_color * (diffuse + ambient) + GVec3::splat(specular);
-                                    if is_selected {
-                                        v_color = v_color.lerp(GVec3::new(1.0, 0.85, 0.4), 0.25);
-                                    }
-                                    
-                                    let color = egui::Color32::from_rgb(
-                                        (v_color.x.clamp(0.0, 1.0) * 255.0) as u8,
-                                        (v_color.y.clamp(0.0, 1.0) * 255.0) as u8,
-                                        (v_color.z.clamp(0.0, 1.0) * 255.0) as u8,
-                                    );
-
-                                    if let Some(p) = camera.project(Vec3::new(world_pos.x, world_pos.y, world_pos.z), available) {
-                                        egui_vertices.push(egui::epaint::Vertex {
-                                            pos: egui::pos2(rect.min.x + p.x, rect.min.y + p.y),
-                                            uv: egui::pos2(v.uv[0], v.uv[1]),
-                                            color,
-                                        });
-                                    } else {
-                                        // Mark vertex as invalid with a flag position
-                                        egui_vertices.push(egui::epaint::Vertex {
-                                            pos: egui::pos2(f32::NEG_INFINITY, f32::NEG_INFINITY),
-                                            uv: egui::pos2(v.uv[0], v.uv[1]),
-                                            color,
-                                        });
-                                    }
-                                }
-                                
-                                // Filter triangles: only include if all 3 vertices are valid
-                                let mut valid_indices = Vec::new();
-                                for tri in mesh.indices.chunks(3) {
-                                    if tri.len() == 3 {
-                                        let i0 = tri[0] as usize;
-                                        let i1 = tri[1] as usize;
-                                        let i2 = tri[2] as usize;
-                                        if i0 < egui_vertices.len() && i1 < egui_vertices.len() && i2 < egui_vertices.len() {
-                                            let v0 = &egui_vertices[i0];
-                                            let v1 = &egui_vertices[i1];
-                                            let v2 = &egui_vertices[i2];
-                                            // Check if all vertices are valid (not at infinity)
-                                            if v0.pos.x.is_finite() && v1.pos.x.is_finite() && v2.pos.x.is_finite() {
-                                                valid_indices.push(tri[0]);
-                                                valid_indices.push(tri[1]);
-                                                valid_indices.push(tri[2]);
-                                            }
-                                        }
-                                    }
-                                }
-                                
-                                if !valid_indices.is_empty() {
-                                    high_res_meshes.push((egui_vertices, valid_indices, mesh.albedo_texture.clone()));
-                                }
-                            }
-                            // Same for skinned meshes
-                            for skinned in &model.skinned_meshes {
-                                let mut egui_vertices = Vec::with_capacity(skinned.mesh.vertices.len());
-                                for v in &skinned.mesh.vertices {
-                                    let world_pos;
-                                    let world_normal;
-                                    if let Some((_, skinning_matrices)) = &pose {
-                                        let mut skinned_pos = GVec3::ZERO;
-                                        let mut skinned_norm = GVec3::ZERO;
-                                        for i in 0..4 {
-                                            let weight = v.bone_weights[i];
-                                            if weight > 0.0 {
-                                                let bone_idx = v.bone_indices[i] as usize;
-                                                if let Some(mat) = skinning_matrices.get(bone_idx) {
-                                                    skinned_pos += mat.transform_point3(GVec3::from(v.position)) * weight;
-                                                    skinned_norm += mat.transform_vector3(GVec3::from(v.normal)) * weight;
-                                                }
-                                            }
-                                        }
-                                        world_pos = transform.transform_point3(skinned_pos);
-                                        world_normal = transform.transform_vector3(skinned_norm).normalize();
-                                    } else {
-                                        world_pos = transform.transform_point3(GVec3::from(v.position));
-                                        world_normal = transform.transform_vector3(GVec3::from(v.normal)).normalize();
-                                    }
-
-                                    // Professional Shaded Rendering
-                                    let light_dir = GVec3::new(0.6, 1.0, 0.4).normalize();
-                                    let cam_pos = camera.get_position();
-                                    let view_dir = (GVec3::new(cam_pos.x, cam_pos.y, cam_pos.z) - world_pos).normalize();
-                                    
-                                    // Ambient + Diffuse
-                                    let ambient = 0.15;
-                                    let diffuse = world_normal.dot(light_dir).max(0.0) * 0.75;
-                                    
-                                    // Specular (Blinn-Phong)
-                                    let half_dir = (light_dir + view_dir).normalize();
-                                    let specular = world_normal.dot(half_dir).max(0.0).powf(24.0) * 0.25;
-                                    
-                                    let mut v_color = mat_color * GVec3::from(v.color) * (diffuse + ambient) + GVec3::splat(specular);
-                                    if is_selected {
-                                        v_color = v_color.lerp(GVec3::new(1.0, 0.85, 0.4), 0.25);
-                                    }
-                                    
-                                    let color = egui::Color32::from_rgb(
-                                        (v_color.x.clamp(0.0, 1.0) * 255.0) as u8,
-                                        (v_color.y.clamp(0.0, 1.0) * 255.0) as u8,
-                                        (v_color.z.clamp(0.0, 1.0) * 255.0) as u8,
-                                    );
-
-                                    if let Some(p) = camera.project(Vec3::new(world_pos.x, world_pos.y, world_pos.z), available) {
-                                        egui_vertices.push(egui::epaint::Vertex {
-                                            pos: egui::pos2(rect.min.x + p.x, rect.min.y + p.y),
-                                            uv: egui::pos2(v.uv[0], v.uv[1]),
-                                            color,
-                                        });
-                                    } else {
-                                        egui_vertices.push(egui::epaint::Vertex {
-                                            pos: egui::pos2(f32::NEG_INFINITY, f32::NEG_INFINITY),
-                                            uv: egui::pos2(v.uv[0], v.uv[1]),
-                                            color,
-                                        });
-                                    }
-                                }
-                                
-                                // Filter triangles: only include if all 3 vertices are valid
-                                let mut valid_indices = Vec::new();
-                                for tri in skinned.mesh.indices.chunks(3) {
-                                    if tri.len() == 3 {
-                                        let i0 = tri[0] as usize;
-                                        let i1 = tri[1] as usize;
-                                        let i2 = tri[2] as usize;
-                                        if i0 < egui_vertices.len() && i1 < egui_vertices.len() && i2 < egui_vertices.len() {
-                                            let v0 = &egui_vertices[i0];
-                                            let v1 = &egui_vertices[i1];
-                                            let v2 = &egui_vertices[i2];
-                                            if v0.pos.x.is_finite() && v1.pos.x.is_finite() && v2.pos.x.is_finite() {
-                                                valid_indices.push(tri[0]);
-                                                valid_indices.push(tri[1]);
-                                                valid_indices.push(tri[2]);
-                                            }
-                                        }
-                                    }
-                                }
-                                
-                                if !valid_indices.is_empty() {
-                                    high_res_meshes.push((egui_vertices, valid_indices, skinned.mesh.albedo_texture.clone()));
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                (entity.id, is_selected, base_color, proj, center_proj, high_res_meshes)
+                let dist_to_cam = (entity_pos - cam_pos_g).length();
+                (entity.id, is_selected, base_color, proj, center_proj, high_res_meshes, dist_to_cam, pos, Vec3::new(half.x, half.y, half.z), entity.material.albedo_texture.clone())
             }).collect();
             
-            // Sequential: Draw using pre-computed projections
-            for (id, is_selected, base_color, proj, center_proj, high_res_meshes) in entity_renders {
+            // Sort entities by distance from camera (far to near)
+            entity_renders.sort_by(|a, b| b.6.partial_cmp(&a.6).unwrap_or(std::cmp::Ordering::Equal));
+            
+            // Sequential: Draw using pre-computed projections (already sorted far-to-near)
+            for (id, is_selected, base_color, proj, center_proj, high_res_meshes, _dist, pos, half, entity_albedo) in entity_renders {
                 let base = egui::Color32::from_rgb(base_color[0], base_color[1], base_color[2]);
                 let wire_color = if is_selected { egui::Color32::GOLD } else { base };
                 let stroke = egui::Stroke::new(if is_selected { 2.5 } else { 1.0 }, wire_color);
                 
                 // Draw wireframe/Solid - Low = ALWAYS wireframe, High = solid meshes if available
                 if self.render_quality == RenderQuality::High && !high_res_meshes.is_empty() {
-                    // High Quality: Render solid lit meshes with textures
-                    for (egui_vertices, indices, texture_name) in high_res_meshes {
-                        let mut egui_mesh = egui::Mesh::default();
-                        egui_mesh.vertices = egui_vertices;
-                        egui_mesh.indices = indices;
+                    // Sort sub-meshes by depth (far to near) for correct occlusion
+                    let mut high_res_meshes = high_res_meshes;
+                    high_res_meshes.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+                    
+                    // High Quality: Render solid lit triangles with smooth Gouraud shading and textures
+                    for (egui_vertices, indices, texture_name, _depth) in high_res_meshes {
+                        let mut mesh = egui::Mesh::default();
+                        mesh.vertices = egui_vertices;
+                        mesh.indices = indices;
                         
-                        if let Some(name) = texture_name {
+                        // Apply texture if available
+                        let mut final_texture = texture_name;
+                        if final_texture.is_none() {
+                            if let Some(entity_tex) = &entity_albedo {
+                                // Try to get the filename of the entity texture
+                                let tex_name = std::path::Path::new(entity_tex)
+                                    .file_name().unwrap_or_default().to_string_lossy().to_string();
+                                final_texture = Some(tex_name);
+                            }
+                        }
+
+                        if let Some(name) = final_texture {
                             if let Some(handle) = self.egui_textures.get(&name) {
-                                egui_mesh.texture_id = handle.id();
+                                mesh.texture_id = handle.id();
                             }
                         }
                         
-                        painter.add(egui::Shape::mesh(egui_mesh));
+                        painter.add(egui::Shape::mesh(mesh));
+                    }
+                    
+                    // Realistic Mesh Projection Shadows for High Quality
+                    // Project the entire mesh silhouette onto the ground plane (Y=0)
+                    let shadow_dist = pos.y;
+                    let shadow_size = half.x.max(half.z) * 2.0;
+
+                    // Optimization: Skip shadows for small or far objects
+                    if shadow_dist > 0.0 && shadow_dist < 50.0 && shadow_size > 0.1 {
+                        let shadow_alpha = (60.0 / (shadow_dist * 0.5 + 1.0)).clamp(5.0, 40.0) as u8;
+                        
+                        let shadow_pos = Vec3::new(pos.x, 0.0, pos.z);
+                        if let Some(sp) = camera.project(shadow_pos, available) {
+                            let sp = egui::pos2(rect.min.x + sp.x, rect.min.y + sp.y);
+                            
+                            // Transform the extents to screen space to get an ellipse
+                            // Use actual half-extents for more accurate shadow sizing
+                            let extent_x = Vec3::new(pos.x + half.x, 0.0, pos.z);
+                            let extent_z = Vec3::new(pos.x, 0.0, pos.z + half.z);
+                            
+                            if let (Some(px), Some(pz)) = (camera.project(extent_x, available), camera.project(extent_z, available)) {
+                                let dx = px.x - (sp.x - rect.min.x);
+                                let dy = px.y - (sp.y - rect.min.y);
+                                let radius_x = (dx * dx + dy * dy).sqrt();
+                                
+                                let dzx = pz.x - (sp.x - rect.min.x);
+                                let dzy = pz.y - (sp.y - rect.min.y);
+                                let radius_z = (dzx * dzx + dzy * dzy).sqrt();
+
+                                // Draw a soft blob shadow using multiple approximated ellipses for "softness"
+                                // Optimized: Fewer steps and lower poly count for shadows
+                                for i in 0..2 {
+                                    let t = 1.0 - (i as f32 / 2.0);
+                                    let alpha = (shadow_alpha as f32 * t * t) as u8;
+                                    let s_color = egui::Color32::from_rgba_unmultiplied(5, 10, 15, alpha);
+                                    
+                                    // Approximate ellipse with a 8-sided polygon for faster results
+                                    let mut points = Vec::with_capacity(8);
+                                    let rad_x = radius_x * (1.0 + i as f32 * 0.6);
+                                    let rad_z = radius_z * (1.0 + i as f32 * 0.6);
+                                    for j in 0..8 {
+                                        let angle = (j as f32 / 8.0) * std::f32::consts::TAU;
+                                        points.push(egui::pos2(
+                                            sp.x + angle.cos() * rad_x,
+                                            sp.y + angle.sin() * rad_z,
+                                        ));
+                                    }
+                                    painter.add(egui::Shape::convex_polygon(points, s_color, egui::Stroke::NONE));
+                                }
+                            }
+                        }
                     }
                     
                     // Also draw a subtle wireframe overlay on selected objects for clarity
@@ -2298,22 +2448,21 @@ impl EditorApp {
                 }
                 
                 // Center dot + click detection
-                // Low mode = outline only, High mode = filled center
+                // High mode = NO dots (solid meshes only), Low mode = outline circles
                 if let Some(c) = center_proj {
                     let size = (8.0 + 400.0 / self.camera.distance).clamp(4.0, 25.0);
                     
-                    if self.render_quality == RenderQuality::High {
-                        // High: filled center dot
-                        painter.circle_filled(c, size, base.linear_multiply(0.6));
-                    } else {
+                    if self.render_quality == RenderQuality::Low {
                         // Low: outline only - transparent with stroke
                         painter.circle_stroke(c, size, egui::Stroke::new(1.5, wire_color));
                     }
+                    // High: No center dot - only solid mesh rendering
                     
                     if is_selected {
                         painter.circle_stroke(c, size + 2.0, egui::Stroke::new(2.0, egui::Color32::GOLD));
                     }
                     
+                    // Click detection hitbox (invisible in High mode)
                     if response.clicked() {
                         if (self.last_mouse.x - response.interact_pointer_pos().unwrap_or(self.last_mouse).x).abs() < 2.0 {
                             if let Some(click) = response.interact_pointer_pos() {
@@ -2450,9 +2599,11 @@ impl EditorApp {
                                 
                                 // Deploy to engine
                                 if self.is_connected {
-                                    let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::Move {
+                                    let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::UpdateTransform {
                                         id: selected_id,
-                                        position: new_pos,
+                                        position: Some(new_pos),
+                                        rotation: None,
+                                        scale: None,
                                     }));
                                 }
                             }
@@ -3857,6 +4008,7 @@ impl eframe::App for EditorApp {
             let mut delete_id: Option<u32> = None;
             let mut deploy_id: Option<u32> = None;
             let mut inspector_dirty = false; // Track if any inspector field changed
+            let mut texture_to_cache: Option<(String, Vec<u8>)> = None;
             
             // Capture entity state when selection changes (for undo tracking)
             if self.selected_entity_id != self.last_selected_id {
@@ -4242,18 +4394,31 @@ impl eframe::App for EditorApp {
                         
                         ui.add_space(8.0);
                         ui.label("📍 Transform");
+                        let mut transform_dirty = false;
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
-                                if ui.add(egui::DragValue::new(&mut entity.position[0]).speed(0.1).prefix("X:")).changed() { inspector_dirty = true; }
-                                if ui.add(egui::DragValue::new(&mut entity.position[1]).speed(0.1).prefix("Y:")).changed() { inspector_dirty = true; }
-                                if ui.add(egui::DragValue::new(&mut entity.position[2]).speed(0.1).prefix("Z:")).changed() { inspector_dirty = true; }
+                                if ui.add(egui::DragValue::new(&mut entity.position[0]).speed(0.1).prefix("X:")).changed() { transform_dirty = true; }
+                                if ui.add(egui::DragValue::new(&mut entity.position[1]).speed(0.1).prefix("Y:")).changed() { transform_dirty = true; }
+                                if ui.add(egui::DragValue::new(&mut entity.position[2]).speed(0.1).prefix("Z:")).changed() { transform_dirty = true; }
                             });
                             ui.horizontal(|ui| {
-                                if ui.add(egui::DragValue::new(&mut entity.scale[0]).speed(0.1).prefix("X:")).changed() { inspector_dirty = true; }
-                                if ui.add(egui::DragValue::new(&mut entity.scale[1]).speed(0.1).prefix("Y:")).changed() { inspector_dirty = true; }
-                                if ui.add(egui::DragValue::new(&mut entity.scale[2]).speed(0.1).prefix("Z:")).changed() { inspector_dirty = true; }
+                                if ui.add(egui::DragValue::new(&mut entity.scale[0]).speed(0.1).prefix("X:")).changed() { transform_dirty = true; }
+                                if ui.add(egui::DragValue::new(&mut entity.scale[1]).speed(0.1).prefix("Y:")).changed() { transform_dirty = true; }
+                                if ui.add(egui::DragValue::new(&mut entity.scale[2]).speed(0.1).prefix("Z:")).changed() { transform_dirty = true; }
                             });
                         });
+                        
+                        if transform_dirty {
+                            inspector_dirty = true;
+                            if self.is_connected {
+                                let _ = command_tx.send(AppCommand::Send(SceneUpdate::UpdateTransform {
+                                    id: entity.id,
+                                    position: Some(entity.position),
+                                    rotation: Some(entity.rotation),
+                                    scale: Some(entity.scale),
+                                }));
+                            }
+                        }
                         
                         ui.add_space(8.0);
                         ui.label("🎨 Material");
@@ -4321,6 +4486,10 @@ impl eframe::App for EditorApp {
                                                 
                                                 // Upload immediately if connected
                                                 let texture_id = filename.to_string_lossy().to_string();
+                                                
+                                                // Buffer for editor's rendering cache (apply after scene borrow ends)
+                                                texture_to_cache = Some((texture_id.clone(), bytes.clone()));
+                                                
                                                 let _ = command_tx.send(AppCommand::Send(SceneUpdate::UploadTexture {
                                                     id: texture_id.clone(),
                                                     data: bytes,
@@ -4380,7 +4549,22 @@ impl eframe::App for EditorApp {
                             }
                             EntityType::Building { height } => {
                                 ui.label("🏢 Building");
-                                ui.add(egui::Slider::new(height, 2.0..=50.0).text("Height"));
+                                if ui.add(egui::Slider::new(height, 2.0..=50.0).text("Height")).changed() {
+                                    // Update Y-scale to match height
+                                    entity.scale[1] = *height;
+                                    // Also adjust Y-position to keep base at ground level (assuming pivot at center)
+                                    // Default building position is h/2.0
+                                    entity.position[1] = *height / 2.0;
+                                    
+                                    if self.is_connected {
+                                        let _ = command_tx.send(AppCommand::Send(SceneUpdate::UpdateTransform {
+                                            id: entity.id,
+                                            position: Some(entity.position),
+                                            rotation: Some(entity.rotation),
+                                            scale: Some(entity.scale),
+                                        }));
+                                    }
+                                }
                             }
                             EntityType::AudioSource { sound_id, volume, looping, max_distance, audio_data } => {
                                 ui.label("🔊 Audio Source");
@@ -4510,7 +4694,7 @@ impl eframe::App for EditorApp {
                                         EntityType::CrowdAgent { .. } => 4, _ => 0
                                     };
                                     let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::Spawn {
-                                        id: e.id, primitive, position: e.position, rotation: e.rotation, color,
+                                        id: e.id, primitive, position: e.position, rotation: e.rotation, scale: e.scale, color,
                                         albedo_texture: e.material.albedo_texture.clone(),
                                         collision_enabled: e.collision_enabled,
                                         layer: e.layer,
@@ -4550,6 +4734,11 @@ impl eframe::App for EditorApp {
             // Apply inspector dirty tracking
             if inspector_dirty {
                 self.scene_dirty = true;
+            }
+            
+            // Finally, apply texture cache update after side panel borrow ends
+            if let Some((name, data)) = texture_to_cache {
+                self.load_egui_texture(ctx, &name, &data);
             }
         });
 

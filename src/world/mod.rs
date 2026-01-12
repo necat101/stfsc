@@ -411,6 +411,7 @@ pub enum SceneUpdate {
         primitive: u8,
         position: [f32; 3],
         rotation: [f32; 4],
+        scale: [f32; 3],
         color: [f32; 3],
         albedo_texture: Option<String>,  // Texture ID for custom albedo texture
         collision_enabled: bool,
@@ -424,9 +425,11 @@ pub enum SceneUpdate {
         position: [f32; 3],
         rotation: [f32; 4],
     },
-    Move {
+    UpdateTransform {
         id: u32,
-        position: [f32; 3],
+        position: Option<[f32; 3]>,
+        rotation: Option<[f32; 4]>,
+        scale: Option<[f32; 3]>,
     },
     DeleteEntity {
         id: u32,
@@ -795,6 +798,7 @@ impl GameWorld {
                     primitive,
                     position,
                     rotation,
+                    scale,
                     color,
                     albedo_texture,
                     collision_enabled,
@@ -806,12 +810,12 @@ impl GameWorld {
                         Transform {
                             position: glam::Vec3::from(position),
                             rotation: glam::Quat::from_array(rotation),
-                            scale: glam::Vec3::ONE,
+                            scale: glam::Vec3::from(scale),
                         },
                         LocalTransform {
                             position: glam::Vec3::from(position),
                             rotation: glam::Quat::from_array(rotation),
-                            scale: glam::Vec3::ONE,
+                            scale: glam::Vec3::from(scale),
                         },
                         MeshHandle(primitive as usize), // Use requested primitive
                         Material {
@@ -827,13 +831,13 @@ impl GameWorld {
                         if collision_enabled {
                             // Use is_static to control gravity. Planes (3) are always static.
                             let is_dynamic = !is_static && primitive != 3;
-                            self.attach_physics_to_entity(entity, physics, primitive, position, rotation, [1.0, 1.0, 1.0], is_dynamic, layer);
+                            self.attach_physics_to_entity(entity, physics, primitive, position, rotation, scale, is_dynamic, layer);
                         }
                     }
 
                     info!(
-                        "Spawned entity with EditorEntityId({}) using MeshHandle({}) (collision: {}, static: {})",
-                        id, primitive, collision_enabled, is_static
+                        "Spawned entity with EditorEntityId({}) using MeshHandle({}) (scale: {:?}, collision: {}, static: {})",
+                        id, primitive, scale, collision_enabled, is_static
                     );
                 }
                 SceneUpdate::SpawnMesh {
@@ -864,14 +868,35 @@ impl GameWorld {
                     ));
                     info!("Spawned mesh with EditorEntityId({})", id);
                 }
-                SceneUpdate::Move { id, position } => {
+                SceneUpdate::UpdateTransform { id, position, rotation, scale } => {
                     // Find entity by EditorEntityId and update transform
-                    for (_entity, (editor_id, transform)) in
+                    for (entity, (editor_id, transform)) in
                         self.ecs.query_mut::<(&EditorEntityId, &mut Transform)>()
                     {
                         if editor_id.0 == id {
-                            transform.position = glam::Vec3::from(position);
-                            info!("Moved entity {} to {:?}", id, position);
+                            if let Some(pos) = position {
+                                transform.position = glam::Vec3::from(pos);
+                            }
+                            if let Some(rot) = rotation {
+                                transform.rotation = glam::Quat::from_array(rot);
+                            }
+                            if let Some(s) = scale {
+                                transform.scale = glam::Vec3::from(s);
+                            }
+                            
+                            // Update LocalTransform too
+                            if let Ok(mut local) = self.ecs.get::<&mut LocalTransform>(entity) {
+                                if let Some(pos) = position { local.position = glam::Vec3::from(pos); }
+                                if let Some(rot) = rotation { local.rotation = glam::Quat::from_array(rot); }
+                                if let Some(s) = scale { local.scale = glam::Vec3::from(s); }
+                            }
+
+                            // Update physics if it exists
+                            if let Ok(rb_handle) = self.ecs.get::<&RigidBodyHandle>(entity) {
+                                physics.set_rigid_body_transform(rb_handle.0, position, rotation);
+                            }
+
+                            info!("Updated transform for entity {} (pos: {:?}, rot: {:?}, scale: {:?})", id, position, rotation, scale);
                             break;
                         }
                     }
