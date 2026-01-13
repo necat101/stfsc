@@ -152,6 +152,30 @@ impl Camera3D {
             size.y * 0.5 - ndc_y * size.y * 0.5,
         ))
     }
+    /// Project without culling off-screen points - used for mesh rendering where triangles may span view boundaries
+    fn project_unclamped(&self, world: Vec3, size: egui::Vec2) -> (egui::Pos2, bool) {
+        let cam = self.get_position();
+        let fwd = self.get_forward();
+        let right = self.get_right();
+        let up = right.cross(&fwd);
+        let rel = world.sub(&cam);
+        let z = rel.dot(&fwd);
+        if z < 0.01 {
+            // Behind camera - return invalid
+            return (egui::Pos2::ZERO, false);
+        }
+        let x = rel.dot(&right);
+        let y = rel.dot(&up);
+        let aspect = size.x / size.y;
+        let scale = (self.fov.to_radians() * 0.5).tan();
+        let ndc_x = x / (z * scale * aspect);
+        let ndc_y = y / (z * scale);
+        // Don't reject based on NDC bounds - allow off-screen vertices
+        (egui::pos2(
+            size.x * 0.5 + ndc_x * size.x * 0.5,
+            size.y * 0.5 - ndc_y * size.y * 0.5,
+        ), true)
+    }
     fn get_ray(&self, screen_pos: egui::Pos2, size: egui::Vec2) -> (Vec3, Vec3) {
         let aspect = size.x / size.y;
         let scale = (self.fov.to_radians() * 0.5).tan();
@@ -2087,6 +2111,8 @@ impl EditorApp {
             let mut entity_renders: Vec<_> = scene.entities.par_iter().map(|entity| {
                 let pos = Vec3::new(entity.position[0], entity.position[1], entity.position[2]);
                 let is_selected = selected_id == Some(entity.id);
+                // Ground and Plane entities should be double-sided (no backface culling)
+                let is_double_sided = matches!(&entity.entity_type, EntityType::Ground | EntityType::Primitive(PrimitiveType::Plane));
                 
                 let base_color = [
                     (entity.material.albedo_color[0] * 200.0) as u8,
@@ -2138,18 +2164,9 @@ impl EditorApp {
                 let is_visible = frustum.intersects_aabb(&entity_aabb);
 
                 if render_quality == RenderQuality::High && is_visible {
-                    let mesh_path = match &entity.entity_type {
-                        EntityType::Mesh { path } => Some(path.clone()),
-                        EntityType::Primitive(ptype) => Some(format!("primitive://{}", ptype.name().to_lowercase())),
-                        EntityType::Ground => Some("primitive://cube".to_string()),
-                        EntityType::Vehicle => Some("primitive://cube".to_string()),
-                        EntityType::Building { .. } => Some("primitive://cube".to_string()),
-                        EntityType::CrowdAgent { .. } => Some("primitive://capsule".to_string()),
-                        _ => None,
-                    };
-
-                    if let Some(path) = mesh_path {
-                        if let Some(model) = model_cache.get(&path) {
+                    // Reuse mesh_path from frustum culling above
+                    if let Some(ref path) = mesh_path {
+                        if let Some(model) = model_cache.get(path) {
                             let transform = Mat4::from_scale_rotation_translation(
                                 entity_scale,
                                 GQuat::from_array(entity.rotation),
@@ -2194,16 +2211,12 @@ impl EditorApp {
                                     };
 
                                     let depth = (world_pos - cam_pos_g).dot(cam_fwd);
-                                    let mut screen_pos = egui::Pos2::ZERO;
-                                    let mut is_valid = depth > 0.1; // Reduced near plane rejection for completeness
-
-                                    if is_valid {
-                                        if let Some(p) = camera.project(Vec3::new(world_pos.x, world_pos.y, world_pos.z), available) {
-                                            screen_pos = egui::pos2(rect.min.x + p.x, rect.min.y + p.y);
-                                        } else {
-                                            is_valid = false;
-                                        }
-                                    }
+                                    // Project vertex to screen space
+                                    // Use project_unclamped for large geometry where vertices may be off-screen
+                                    let (proj_pos, proj_valid) = camera.project_unclamped(Vec3::new(world_pos.x, world_pos.y, world_pos.z), available);
+                                    let screen_pos = egui::pos2(rect.min.x + proj_pos.x, rect.min.y + proj_pos.y);
+                                    // Vertex is valid if projection succeeded AND depth is positive
+                                    let is_valid = proj_valid && depth > 0.1;
 
                                     // Shade
                                     let mut color = egui::Color32::BLACK;
@@ -2252,15 +2265,15 @@ impl EditorApp {
                                     let v1 = &processed_verts[indices[1]];
                                     let v2 = &processed_verts[indices[2]];
 
+                                    // Basic vertex validity check - require all vertices to be in front of camera
                                     if !v0.is_valid || !v1.is_valid || !v2.is_valid { return None; }
 
-                                    // Backface culling
-                                    let face_normal = (v1.world_pos - v0.world_pos).cross(v2.world_pos - v0.world_pos);
-                                    if face_normal.dot(v0.world_pos - cam_pos_g) > 0.0 { return None; }
+                                    // NO BACKFACE CULLING - matches client's vk::CullModeFlags::NONE
+                                    // The GPU hardware doesn't cull backfaces, so neither should the editor
 
-                                    // Rejection of degenerate or extreme triangles
+                                    // Only reject truly degenerate triangles (zero area)
                                     let area = ((v1.pos.x - v0.pos.x) * (v2.pos.y - v0.pos.y) - (v2.pos.x - v0.pos.x) * (v1.pos.y - v0.pos.y)).abs() * 0.5;
-                                    if area < 0.01 { return None; }
+                                    if area < 0.001 { return None; }
 
                                     let avg_depth = (v0.depth + v1.depth + v2.depth) / 3.0;
                                     Some((tri_idx, indices, avg_depth))
