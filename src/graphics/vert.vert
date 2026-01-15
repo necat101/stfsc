@@ -33,7 +33,8 @@ layout(push_constant) uniform PushConstants {
     mat4 viewProj;
     mat4 prevViewProj;
     mat4 lightSpace;
-    vec4 cameraPos; // xyz = camera position, w unused
+    vec4 cameraPos; // xyz = camera position, w = ambient
+    vec4 lightDir;  // xyz = light direction, w unused
 } viewData;
 
 void main() {

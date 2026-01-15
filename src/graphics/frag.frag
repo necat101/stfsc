@@ -20,6 +20,14 @@ layout(set = 1, binding = 1) uniform sampler2D normalMap;
 layout(set = 1, binding = 2) uniform sampler2D metallicRoughnessMap;
 layout(set = 0, binding = 0) uniform sampler2D shadowMap;
 
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    mat4 prevViewProj;
+    mat4 lightSpace;
+    vec4 cameraPos; // xyz = pos, w = ambient
+    vec4 lightDir;  // xyz = dir, w = unused
+} pushConstants;
+
 // Dynamic Lighting - Maximum lights for mobile VR
 const int MAX_LIGHTS = 256;
 
@@ -69,30 +77,49 @@ float ShadowCalculation(vec4 fragPosLightSpace) {
     edgeFalloff *= smoothstep(0.0, edgeMargin, 1.0 - projCoords.y);
         
     float closestDepth = texture(shadowMap, projCoords.xy).r; 
+    
+    // If shadow map is nearly zero (cleared to far plane in Reversed-Z)
+    // or nearly 1.0 (empty in non-reversed), it might be uninitialized/empty for editor
+    // In Reversed-Z, 0.0 is FAR. If everything is 0.0, we are "behind" shadow.
+    // Let's assume if the sample is exactly 0.0, it's an empty shadow map.
+    if (closestDepth < 0.0001) {
+        return 0.0;
+    }
+
     float currentDepth = projCoords.z;
     vec3 normal = normalize(inNormal);
-    // Light direction - nearly vertical with slight offset (matches main.rs light_offset_xz)
-    vec3 lightDir = normalize(vec3(0.05, 1.0, 0.05));
-    // Slope-scaled bias: more bias for surfaces at an angle to the light
-    // Increased base bias significantly to combat z-fighting on large ground planes
-    float slopeBias = 1.0 - abs(dot(normal, lightDir));
-    float bias = max(0.001 + 0.005 * slopeBias, 0.001); // Reduced bias: normal offset does the work
+    vec3 lightDir = normalize(pushConstants.lightDir.xyz);
     
-    // PCF (Percentage Closer Filtering)
+    float slopeBias = 1.0 - abs(dot(normal, lightDir));
+    float bias = max(0.0005 + 0.001 * slopeBias, 0.0005); 
+    
+    // PCF
     float shadow = 0.0;
     vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
-    for(int x = -1; x <= 1; ++x) {
-        for(int y = -1; y <= 1; ++y) {
+    for(int x = -1; x <= 1; ++x)
+    {
+        for(int y = -1; y <= 1; ++y)
+        {
             float pcfDepth = texture(shadowMap, projCoords.xy + vec2(x, y) * texelSize).r; 
-            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
+            shadow += currentDepth > pcfDepth + bias ? 1.0 : 0.0;        
         }    
     }
     shadow /= 9.0;
     
-    // Apply edge falloff to shadow - artifacts at edges fade out smoothly
-    shadow *= edgeFalloff;
+    return shadow; 
+}
+
+// Function to calculate directional light manually (used as fallback)
+vec3 calculateDirectionalLight(vec3 normal, vec3 viewDir, vec3 lightDir, vec3 albedo, float ambientFactor) {
+    float diff = max(dot(normal, lightDir), 0.0);
+    vec3 diffuse = diff * albedo;
+    vec3 ambient = ambientFactor * albedo;
     
-    return shadow;
+    // Simple specular
+    vec3 halfDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(normal, halfDir), 0.0), 32.0) * 0.3;
+    
+    return diffuse + ambient + spec;
 }
 
 // PBR Functions
@@ -285,6 +312,7 @@ void main() {
     
     // Accumulate lighting from all dynamic lights
     vec3 Lo = vec3(0.0);
+    vec3 ambient = lightData.ambient.xyz * albedo;
     
     // Process dynamic lights
     int numLights = min(lightData.numLights, MAX_LIGHTS);
@@ -297,10 +325,9 @@ void main() {
         );
     }
     
-    // Fallback: If no dynamic lights, use hardcoded directional light
-    // This maintains backwards compatibility with existing scenes
+    // Fallback: If no dynamic lights, use push constant light matching editor
     if (numLights == 0) {
-        vec3 L = normalize(vec3(20.0, 50.0, 20.0));
+        vec3 L = normalize(pushConstants.lightDir.xyz);
         vec3 H = normalize(V + L);
         float NdotL = max(dot(N, L), 0.0);
         
@@ -317,24 +344,18 @@ void main() {
         vec3 specular = numerator / denominator;
         
         // Shadow (only for fallback directional light)
-        // Use normal-offset shadow coordinates for much higher acne resistance
-        float shadow = ShadowCalculation(inNormalOffsetShadowPos);
+        float shadowFactor = ShadowCalculation(inNormalOffsetShadowPos);
+        float shadow = 1.0 - (shadowFactor * 0.8); // 0.2 min light
         
-        Lo = (kD * albedo / PI + specular) * vec3(3.0) * NdotL * (1.0 - shadow);
+        Lo = (kD * albedo / PI + specular) * vec3(2.5) * NdotL * shadow;
+        ambient = (pushConstants.cameraPos.w * 0.8) * albedo; // Use ambient from push constants
     } else {
         // For dynamic lights, apply shadow to first directional light if present
         if (lightData.lights[0].position_type.w == float(LIGHT_DIRECTIONAL)) {
-            float shadow = ShadowCalculation(inNormalOffsetShadowPos);
-            // Reduce first light's contribution by shadow amount
-            // (simplified - proper implementation would track per-light shadows)
-            Lo *= (1.0 - shadow);
+            float shadowFactor = ShadowCalculation(inNormalOffsetShadowPos);
+            float shadow = 1.0 - shadowFactor; 
+            Lo *= shadow;
         }
-    }
-    
-    // Ambient lighting
-    vec3 ambient = lightData.ambient.xyz * albedo;
-    if (numLights == 0) {
-        ambient = vec3(0.15) * albedo; // Fallback ambient
     }
     
     vec3 color = ambient + Lo;

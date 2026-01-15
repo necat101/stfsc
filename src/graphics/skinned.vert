@@ -35,8 +35,8 @@ layout(std430, set = 0, binding = 1) readonly buffer InstanceBuffer {
     InstanceData instances[];
 } instanceData;
 
-// Set 0 Binding 2: Bone Matrices (max 128 bones per skeleton)
-layout(std140, set = 0, binding = 2) uniform BoneMatrices {
+// Set 0 Binding 3: Bone Matrices (max 128 bones per skeleton)
+layout(std140, set = 0, binding = 3) uniform BoneMatrices {
     mat4 bones[128];
 } boneData;
 

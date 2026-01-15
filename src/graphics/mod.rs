@@ -55,6 +55,8 @@ pub struct GraphicsContext {
     pub render_pass: vk::RenderPass,
     pub pipeline_layout: vk::PipelineLayout,
     pub pipeline: vk::Pipeline,
+    pub skinned_pipeline_layout: vk::PipelineLayout,
+    pub skinned_pipeline: vk::Pipeline,
     pub depth_format: vk::Format,
     pub global_set_layout: vk::DescriptorSetLayout,
     pub material_set_layout: vk::DescriptorSetLayout,
@@ -342,6 +344,13 @@ impl GraphicsContext {
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT)
                 .build(),
+            // Bone Matrices for skeletal animation
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .build(),
         ];
         let global_layout_info =
             vk::DescriptorSetLayoutCreateInfo::builder().bindings(&global_bindings);
@@ -462,9 +471,9 @@ impl GraphicsContext {
 
         // 9. Create Pipeline Layout
         let push_constant_ranges = [vk::PushConstantRange::builder()
-            .stage_flags(vk::ShaderStageFlags::VERTEX)
+            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
             .offset(0)
-            .size(std::mem::size_of::<glam::Mat4>() as u32 * 3 + 16) // ViewProj, PrevViewProj, LightSpace + CameraPos (vec4)
+            .size(192 + 32) // ViewProj, PrevViewProj, LightSpace + CameraPos (vec4) + LightDir (vec4)
             .build()];
         let set_layouts = [global_set_layout, material_set_layout];
         let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::builder()
@@ -474,6 +483,8 @@ impl GraphicsContext {
             unsafe { device.create_pipeline_layout(&pipeline_layout_create_info, None)? };
 
         let pipeline = Self::create_graphics_pipeline_internal(&device, pipeline_layout, render_pass)?;
+        let skinned_pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_create_info, None)? };
+        let skinned_pipeline = Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
 
         Ok(Self {
             entry,
@@ -488,6 +499,8 @@ impl GraphicsContext {
             render_pass,
             pipeline_layout,
             pipeline,
+            skinned_pipeline_layout,
+            skinned_pipeline,
             depth_format,
             global_set_layout,
             material_set_layout,
@@ -653,6 +666,7 @@ impl GraphicsContext {
             vk::DescriptorSetLayoutBinding::builder().binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
             vk::DescriptorSetLayoutBinding::builder().binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX).build(),
             vk::DescriptorSetLayoutBinding::builder().binding(2).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
+            vk::DescriptorSetLayoutBinding::builder().binding(3).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX).build(),
         ];
         let global_set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::builder().bindings(&global_bindings), None)? };
         let material_bindings = [
@@ -664,7 +678,7 @@ impl GraphicsContext {
         let descriptor_pool = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::builder().pool_sizes(&[vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 300 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 100 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 10 }]).max_sets(100), None)? };
 
         // 10. Pipeline Layout
-        let push_constant_ranges = [vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::VERTEX).offset(0).size(192 + 16).build()];
+        let push_constant_ranges = [vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT).offset(0).size(192 + 32).build()];
         let pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&push_constant_ranges).set_layouts(&[global_set_layout, material_set_layout]), None)? };
 
         // 11. Shadow Resources
@@ -681,9 +695,12 @@ impl GraphicsContext {
         let render_finished_semaphore = unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? };
 
         let pipeline = Self::create_graphics_pipeline_internal(&device, pipeline_layout, render_pass)?;
+        let skinned_pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&push_constant_ranges).set_layouts(&[global_set_layout, material_set_layout]), None)? };
+        let skinned_pipeline = Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
 
         Ok(Self {
-            entry, instance, physical_device, device, queue_family_index, queue, command_pool, command_buffer, fence, render_pass, pipeline_layout, pipeline,
+            entry, instance, physical_device, device, queue_family_index, queue, command_pool, command_buffer, fence, render_pass, 
+            pipeline_layout, pipeline, skinned_pipeline_layout, skinned_pipeline,
             depth_format, global_set_layout, material_set_layout, descriptor_pool,
             shadow_render_pass, shadow_pipeline_layout, shadow_pipeline, shadow_depth_image, shadow_depth_memory, shadow_depth_view, shadow_framebuffer, shadow_sampler, shadow_extent,
             queue_mutex: std::sync::Mutex::new(()),
@@ -783,6 +800,7 @@ impl GraphicsContext {
             vk::DescriptorSetLayoutBinding::builder().binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
             vk::DescriptorSetLayoutBinding::builder().binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX).build(),
             vk::DescriptorSetLayoutBinding::builder().binding(2).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
+            vk::DescriptorSetLayoutBinding::builder().binding(3).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX).build(),
         ];
         let global_set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::builder().bindings(&global_bindings), None)? };
         let material_bindings = [
@@ -794,8 +812,10 @@ impl GraphicsContext {
         let descriptor_pool = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::builder().pool_sizes(&[vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 300 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 100 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 10 }]).max_sets(100), None)? };
 
         // 7. Pipeline Layout
-        let push_constant_ranges = [vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::VERTEX).offset(0).size(192 + 16).build()];
+        let push_constant_ranges = [vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT).offset(0).size(192 + 32).build()];
         let pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&push_constant_ranges).set_layouts(&[global_set_layout, material_set_layout]), None)? };
+        
+        let skinned_pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&push_constant_ranges).set_layouts(&[global_set_layout, material_set_layout]), None)? };
 
         // 8. Shadow Resources (minimal for headless)
         let shadow_extent = vk::Extent2D { width: 1024, height: 1024 };
@@ -807,9 +827,11 @@ impl GraphicsContext {
         let shadow_sampler = unsafe { device.create_sampler(&vk::SamplerCreateInfo::builder().mag_filter(vk::Filter::LINEAR).min_filter(vk::Filter::LINEAR).address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER).address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER).address_mode_w(vk::SamplerAddressMode::CLAMP_TO_BORDER).border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE).build(), None)? };
 
         let pipeline = Self::create_graphics_pipeline_internal(&device, pipeline_layout, render_pass)?;
+        let skinned_pipeline = Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
 
         Ok(Self {
-            entry, instance, physical_device, device, queue_family_index, queue, command_pool, command_buffer, fence, render_pass, pipeline_layout, pipeline,
+            entry, instance, physical_device, device, queue_family_index, queue, command_pool, command_buffer, fence, render_pass, 
+            pipeline_layout, pipeline, skinned_pipeline_layout, skinned_pipeline,
             depth_format, global_set_layout, material_set_layout, descriptor_pool,
             shadow_render_pass, shadow_pipeline_layout, shadow_pipeline, shadow_depth_image, shadow_depth_memory, shadow_depth_view, shadow_framebuffer, shadow_sampler, shadow_extent,
             queue_mutex: std::sync::Mutex::new(()),
@@ -899,6 +921,88 @@ impl GraphicsContext {
             .attachments(&color_blend_attachments);
         // Reversed-Z depth buffer: near=1.0, far=0.0 for better precision
         // This dramatically reduces z-fighting for large open worlds
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::builder()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::GREATER);
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state = vk::PipelineDynamicStateCreateInfo::builder()
+            .dynamic_states(&dynamic_states);
+
+        let pipeline_info = vk::GraphicsPipelineCreateInfo::builder()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input_info)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .color_blend_state(&color_blending)
+            .depth_stencil_state(&depth_stencil)
+            .dynamic_state(&dynamic_state)
+            .layout(pipeline_layout)
+            .render_pass(render_pass)
+            .subpass(0);
+
+        let pipeline = unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info.build()], None).map_err(|e| e.1).unwrap()[0] };
+        unsafe { device.destroy_shader_module(vert_module, None); device.destroy_shader_module(frag_module, None); }
+        Ok(pipeline)
+    }
+
+    fn create_skinned_pipeline_internal(
+        device: &Device,
+        pipeline_layout: vk::PipelineLayout,
+        render_pass: vk::RenderPass,
+    ) -> Result<vk::Pipeline> {
+        let vert_code = include_bytes!(concat!(env!("OUT_DIR"), "/skinned.vert.spv"));
+        let frag_code = include_bytes!(concat!(env!("OUT_DIR"), "/frag.frag.spv"));
+
+        let vert_module = unsafe {
+            let code = ash::util::read_spv(&mut std::io::Cursor::new(&vert_code[..]))?;
+            device.create_shader_module(&vk::ShaderModuleCreateInfo::builder().code(&code), None)?
+        };
+        let frag_module = unsafe {
+            let code = ash::util::read_spv(&mut std::io::Cursor::new(&frag_code[..]))?;
+            device.create_shader_module(&vk::ShaderModuleCreateInfo::builder().code(&code), None)?
+        };
+
+        let main_function_name = CString::new("main")?;
+        let shader_stages = [
+            vk::PipelineShaderStageCreateInfo::builder().stage(vk::ShaderStageFlags::VERTEX).module(vert_module).name(&main_function_name).build(),
+            vk::PipelineShaderStageCreateInfo::builder().stage(vk::ShaderStageFlags::FRAGMENT).module(frag_module).name(&main_function_name).build(),
+        ];
+
+        let vertex_binding_descriptions = [vk::VertexInputBindingDescription { binding: 0, stride: std::mem::size_of::<crate::world::Vertex>() as u32, input_rate: vk::VertexInputRate::VERTEX }];
+        let vertex_attribute_descriptions = [
+            vk::VertexInputAttributeDescription { location: 0, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 0 },
+            vk::VertexInputAttributeDescription { location: 1, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 12 },
+            vk::VertexInputAttributeDescription { location: 2, binding: 0, format: vk::Format::R32G32_SFLOAT, offset: 24 },
+            vk::VertexInputAttributeDescription { location: 3, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 32 },
+            vk::VertexInputAttributeDescription { location: 4, binding: 0, format: vk::Format::R32G32B32A32_SFLOAT, offset: 44 },
+            vk::VertexInputAttributeDescription { location: 5, binding: 0, format: vk::Format::R32G32B32A32_UINT, offset: 60 },
+            vk::VertexInputAttributeDescription { location: 6, binding: 0, format: vk::Format::R32G32B32A32_SFLOAT, offset: 76 },
+        ];
+
+        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
+            .vertex_binding_descriptions(&vertex_binding_descriptions)
+            .vertex_attribute_descriptions(&vertex_attribute_descriptions);
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::builder()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+        let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
+            .viewport_count(1)
+            .scissor_count(1);
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::builder()
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::CLOCKWISE);
+        let multisampling = vk::PipelineMultisampleStateCreateInfo::builder()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        let color_blend_attachments = [
+            vk::PipelineColorBlendAttachmentState::builder().color_write_mask(vk::ColorComponentFlags::RGBA).blend_enable(false).build(),
+            vk::PipelineColorBlendAttachmentState::builder().color_write_mask(vk::ColorComponentFlags::RGBA).blend_enable(false).build(),
+        ];
+        let color_blending = vk::PipelineColorBlendStateCreateInfo::builder()
+            .attachments(&color_blend_attachments);
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::builder()
             .depth_test_enable(true)
             .depth_write_enable(true)
@@ -1826,6 +1930,7 @@ impl GraphicsContext {
         shadow_sampler: vk::Sampler,
         instance_buffer: vk::Buffer,
         light_buffer: vk::Buffer,
+        bone_buffer: vk::Buffer,
     ) -> Result<vk::DescriptorSet> {
         let layouts = [self.global_set_layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::builder()
@@ -1846,6 +1951,11 @@ impl GraphicsContext {
 
         let light_buffer_info = vk::DescriptorBufferInfo::builder()
             .buffer(light_buffer)
+            .offset(0)
+            .range(vk::WHOLE_SIZE);
+
+        let bone_buffer_info = vk::DescriptorBufferInfo::builder()
+            .buffer(bone_buffer)
             .offset(0)
             .range(vk::WHOLE_SIZE);
 
@@ -1870,6 +1980,13 @@ impl GraphicsContext {
                 .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .buffer_info(std::slice::from_ref(&light_buffer_info))
+                .build(),
+            vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(3)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(std::slice::from_ref(&bone_buffer_info))
                 .build(),
         ];
 

@@ -10,6 +10,9 @@ use stfsc_engine::world::{
     fbx_loader::ModelScene,
 };
 use stfsc_engine::graphics::occlusion::{Frustum, AABB};
+use stfsc_engine::graphics::{GraphicsContext, Texture};
+use stfsc_engine::graphics::viewport_renderer::{ViewportRenderer, ViewportMeshHandle, ViewportMeshInstance, ViewportRenderParams};
+use ash::vk;
 use glam::{Mat4, Vec3 as GVec3, Quat as GQuat};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -91,6 +94,7 @@ struct ProcessedVertex {
     color: egui::Color32,
     uv: egui::Pos2,
     depth: f32,
+    #[allow(dead_code)]
     world_pos: GVec3,
     is_valid: bool,
 }
@@ -192,7 +196,41 @@ impl Camera3D {
     }
     
     /// Project a world point to screen coordinates, returning depth (view-space Z) as well
+    /// Uses EXACT same projection matrix as the client (main.rs lines 1085-1093)
     fn get_view_proj(&self, aspect: f32) -> Mat4 {
+        let cam_pos = self.get_position();
+        let cam_pos_g = GVec3::new(cam_pos.x, cam_pos.y, cam_pos.z);
+        let fwd = self.get_forward();
+        let fwd_g = GVec3::new(fwd.x, fwd.y, fwd.z);
+        let right = self.get_right();
+        let right_g = GVec3::new(right.x, right.y, right.z);
+        let up_g = right_g.cross(fwd_g);
+        
+        // View matrix using look_at_rh (same as client)
+        let view = Mat4::look_at_rh(cam_pos_g, cam_pos_g + fwd_g, up_g);
+        
+        // Projection matrix - MUST match client EXACTLY (main.rs lines 1085-1093)
+        // Reversed-Z infinite far plane with Vulkan Y-flip
+        let fov = self.fov.to_radians();
+        let near = 0.1;
+        let f = 1.0 / (fov / 2.0).tan();
+        
+        // Manual construction matching client exactly:
+        // - Y is negated for Vulkan coordinate system
+        // - Reversed-Z: depth goes from 1 (near) to 0 (far)
+        // - Infinite far plane
+        let proj = Mat4::from_cols(
+            glam::Vec4::new(f / aspect, 0.0, 0.0, 0.0),
+            glam::Vec4::new(0.0, -f, 0.0, 0.0),  // Y-flip for Vulkan
+            glam::Vec4::new(0.0, 0.0, 0.0, -1.0),  // Reversed-Z infinite
+            glam::Vec4::new(0.0, 0.0, near, 0.0),
+        );
+        
+        proj * view
+    }
+    
+    /// Get standard (non-reversed-Z) projection for software rendering
+    fn _get_view_proj_standard(&self, aspect: f32) -> Mat4 {
         let cam_pos = self.get_position();
         let cam_pos_g = GVec3::new(cam_pos.x, cam_pos.y, cam_pos.z);
         let fwd = self.get_forward();
@@ -682,6 +720,7 @@ struct AnimationEditorState {
     /// Timeline zoom level
     timeline_zoom: f32,
     /// Timeline scroll offset
+    #[allow(dead_code)]
     timeline_scroll: f32,
     /// Auto-key mode (automatically create keyframes on transform change)
     auto_key: bool,
@@ -716,6 +755,12 @@ impl Default for AnimationEditorState {
 // ============================================================================
 // EDITOR
 // ============================================================================
+#[derive(Clone, Default)]
+struct GpuModelHandles {
+    static_meshes: Vec<ViewportMeshHandle>,
+    skinned_meshes: Vec<ViewportMeshHandle>,
+}
+
 struct EditorApp {
     ip: String,
     status: String,
@@ -785,6 +830,23 @@ struct EditorApp {
     
     // Interaction
     gizmo_axis: Option<usize>, // 0=X, 1=Y, 2=Z
+    
+    // GPU Viewport Rendering (hardware accelerated)
+    viewport_graphics: Option<Arc<GraphicsContext>>,
+    viewport_renderer: Option<ViewportRenderer>,
+    gpu_mesh_cache: HashMap<String, GpuModelHandles>,
+    viewport_texture: Option<egui::TextureHandle>,
+    last_viewport_size: (u32, u32),
+    use_gpu_viewport: bool, // Fallback flag if Vulkan init fails
+    last_gpu_render_time: std::time::Instant, // For frame throttling
+    gpu_frame_interval_ms: u64, // Target interval between GPU renders (33ms = 30fps)
+    
+    // GPU Cache for materials and textures
+    gpu_texture_cache: HashMap<String, Texture>,
+    gpu_material_cache: HashMap<String, vk::DescriptorSet>,
+    resolution_scale: f32, // 0.1 to 1.0 (default 0.75 or 0.5 for performance)
+    sharpening_amount: f32, // 0.0 to 1.0 (Contrast Adaptive Sharpening)
+    default_pbr: Option<(Texture, Texture, Texture)>, // (albedo, normal, mr)
 }
 
 impl EditorApp {
@@ -911,6 +973,33 @@ impl EditorApp {
             },
             egui_textures: HashMap::new(),
             gizmo_axis: None,
+            // GPU Viewport Rendering (hardware accelerated)
+            viewport_graphics: {
+                // Try to initialize headless Vulkan for GPU-accelerated viewport
+                match GraphicsContext::new_headless() {
+                    Ok(ctx) => {
+                        println!("GPU Viewport: Vulkan initialized successfully");
+                        Some(Arc::new(ctx))
+                    }
+                    Err(e) => {
+                        println!("GPU Viewport: Vulkan init failed ({}), using software fallback", e);
+                        None
+                    }
+                }
+            },
+            viewport_renderer: None, // Created lazily when we have graphics and size
+            gpu_mesh_cache: HashMap::new(),
+            viewport_texture: None,
+            last_viewport_size: (0, 0),
+            use_gpu_viewport: true, // Will be set false if init completely fails
+            last_gpu_render_time: std::time::Instant::now(),
+            gpu_frame_interval_ms: 33, // 30fps target (can be lowered to 16 for 60fps)
+            
+            gpu_texture_cache: HashMap::new(),
+            gpu_material_cache: HashMap::new(),
+            resolution_scale: 0.5, // 0.5x resolution by default for smoothness
+            sharpening_amount: 0.0, // Default to disabled for performance
+            default_pbr: None,
         }
     }
 
@@ -1793,6 +1882,298 @@ impl EditorApp {
         }
     }
 
+    /// Try to render viewport using GPU acceleration.
+    /// Returns true if GPU render succeeded (caller should display texture).
+    /// Returns false to fall back to software rendering.
+    fn try_gpu_render(&mut self, ctx: &egui::Context, _rect: egui::Rect, size: egui::Vec2) -> Option<egui::TextureHandle> {
+        // Only use GPU for High quality mode
+        if self.render_quality != RenderQuality::High || !self.use_gpu_viewport {
+            return None;
+        }
+        
+        let Some(graphics) = self.viewport_graphics.clone() else {
+            return None;
+        };
+        
+        let width_scaled = (size.x * self.resolution_scale) as u32;
+        let height_scaled = (size.y * self.resolution_scale) as u32;
+        
+        if width_scaled == 0 || height_scaled == 0 {
+            return None;
+        }
+        
+        // Initialize default PBR textures if needed (for material DS creation)
+        if self.default_pbr.is_none() {
+            if let Ok(defaults) = graphics.create_default_pbr_textures() {
+                self.default_pbr = Some(defaults);
+            }
+        }
+        
+        // FRAME THROTTLING: Skip GPU render if we updated recently
+        // This reduces GPU→CPU copy overhead significantly
+        let elapsed = self.last_gpu_render_time.elapsed().as_millis() as u64;
+        if elapsed < self.gpu_frame_interval_ms {
+            // Return cached texture if available (no new render needed)
+            if let Some(tex) = &self.viewport_texture {
+                return Some(tex.clone());
+            }
+        }
+        
+        // Create or resize viewport renderer
+        if self.viewport_renderer.is_none() {
+            match ViewportRenderer::new(graphics.clone(), width_scaled, height_scaled) {
+                Ok(renderer) => {
+                    self.viewport_renderer = Some(renderer);
+                    self.last_viewport_size = (width_scaled, height_scaled);
+                }
+                Err(e) => {
+                    println!("GPU Viewport: Failed to create renderer: {}", e);
+                    self.use_gpu_viewport = false;
+                    return None;
+                }
+            }
+        }
+        
+        // Resize if needed (using scaled dimensions)
+        if self.last_viewport_size != (width_scaled, height_scaled) {
+            if let Some(renderer) = &mut self.viewport_renderer {
+                if let Err(e) = renderer.resize(width_scaled, height_scaled) {
+                    println!("GPU Viewport: Resize failed: {}", e);
+                    return None;
+                }
+                self.last_viewport_size = (width_scaled, height_scaled);
+            }
+        }
+        
+        let Some(renderer) = &mut self.viewport_renderer else {
+            return None;
+        };
+        
+        // Sync meshes to GPU cache (upload any new meshes from model_cache)
+        for (path, model) in &self.model_cache {
+            if !self.gpu_mesh_cache.contains_key(path) {
+                let mut handles = GpuModelHandles::default();
+                
+                // 1. Regular meshes
+                for mesh in &model.meshes {
+                    match renderer.upload_mesh(mesh) {
+                        Ok(handle) => handles.static_meshes.push(handle),
+                        Err(e) => println!("GPU Mesh: Failed to upload submesh in '{}': {}", path, e),
+                    }
+                }
+                
+                // 2. Skinned meshes
+                for skinned in &model.skinned_meshes {
+                    match renderer.upload_mesh(&skinned.mesh) {
+                        Ok(handle) => handles.skinned_meshes.push(handle),
+                        Err(e) => println!("GPU Mesh: Failed to upload skinned submesh in '{}': {}", path, e),
+                    }
+                }
+                
+                if !handles.static_meshes.is_empty() || !handles.skinned_meshes.is_empty() {
+                    println!("GPU Model: Uploaded '{}' ({} static, {} skinned)", path, handles.static_meshes.len(), handles.skinned_meshes.len());
+                    self.gpu_mesh_cache.insert(path.clone(), handles);
+                }
+            }
+        }
+        
+        // Set camera parameters
+        let aspect = size.x / size.y;
+        let view_proj = self.camera.get_view_proj(aspect);
+        let cam_pos = self.camera.get_position();
+        
+        // Calculate shadow matrix (directional light matching client)
+        let light_dir = GVec3::new(0.4, 0.8, 0.3).normalize();
+        let shadow_center = GVec3::new(cam_pos.x, 0.0, cam_pos.z);
+        let light_pos = shadow_center + light_dir * 100.0;
+        let shadow_proj = glam::Mat4::orthographic_rh(-100.0, 100.0, -100.0, 100.0, 0.1, 200.0);
+        let light_view_proj = shadow_proj * glam::Mat4::look_at_rh(light_pos, shadow_center, glam::Vec3::Y);
+
+        renderer.set_render_params(ViewportRenderParams {
+            view_proj,
+            light_view_proj,
+            camera_pos: GVec3::new(cam_pos.x, cam_pos.y, cam_pos.z),
+            light_dir,
+            ambient: 0.35,
+        });
+        renderer.set_sharpening(self.sharpening_amount);
+        
+        // Queue scene entities for rendering
+        renderer.clear_queue();
+        if let Some(scene) = &self.current_scene {
+            for entity in &scene.entities {
+                let mesh_path = match &entity.entity_type {
+                    EntityType::Mesh { path } => Some(path.clone()),
+                    EntityType::Primitive(ptype) => Some(format!("primitive://{}", ptype.name().to_lowercase())),
+                    EntityType::Ground => Some("primitive://cube".to_string()),
+                    EntityType::Vehicle => Some("primitive://cube".to_string()),
+                    EntityType::Building { .. } => Some("primitive://cube".to_string()),
+                    EntityType::CrowdAgent { .. } => Some("primitive://capsule".to_string()),
+                    _ => None,
+                };
+                
+                if let Some(path) = mesh_path {
+                    if let Some(model_handles) = self.gpu_mesh_cache.get(&path) {
+                        let mut model_matrix = Mat4::from_scale_rotation_translation(
+                            GVec3::from(entity.scale),
+                            GQuat::from_array(entity.rotation),
+                            GVec3::from(entity.position),
+                        );
+                        
+                        // Apply visual offset for Base-Origin normalization (matches engine physics behavior)
+                        if let Some(model) = self.model_cache.get(&path) {
+                            let mut min_y = 0.0f32;
+                            let mut first = true;
+                            for mesh in model.meshes.iter().chain(model.skinned_meshes.iter().map(|s| &s.mesh)) {
+                                if first || mesh.aabb_min[1] < min_y {
+                                    min_y = mesh.aabb_min[1];
+                                    first = false;
+                                }
+                            }
+                            if !first && min_y.abs() > 0.001 {
+                                model_matrix = model_matrix * Mat4::from_translation(GVec3::new(0.0, -min_y, 0.0));
+                            }
+                        }
+                        
+                        let color = GVec3::new(
+                            entity.material.albedo_color[0],
+                            entity.material.albedo_color[1],
+                            entity.material.albedo_color[2],
+                        );
+
+                        // Check for animator config for skeletal animation
+                        let joints = if entity.animator_config.is_some() {
+                            EditorApp::compute_animated_pose(entity, &self.model_cache, &self.animation_editor_state)
+                                .map(|(_, skin)| skin)
+                        } else {
+                            None
+                        };
+                        
+                        // Handle material descriptor set
+                        let material_descriptor_set = if let Some(tex_name) = &entity.material.albedo_texture {
+                            if let Some(ds) = self.gpu_material_cache.get(tex_name) {
+                                Some(*ds)
+                            } else {
+                                // Try to upload texture and create DS
+                                if let Some(tex_data) = &entity.material.albedo_texture_data {
+                                    match graphics.create_texture_from_bytes(tex_data) {
+                                        Ok(albedo) => {
+                                            if let Some((_, def_normal, def_mr)) = &self.default_pbr {
+                                                match graphics.create_material_descriptor_set(&albedo, def_normal, def_mr) {
+                                                    Ok(ds) => {
+                                                        self.gpu_texture_cache.insert(tex_name.clone(), albedo);
+                                                        self.gpu_material_cache.insert(tex_name.clone(), ds);
+                                                        Some(ds)
+                                                    }
+                                                    Err(e) => {
+                                                        println!("GPU Viewport: Failed to create material DS for '{}': {}", tex_name, e);
+                                                        None
+                                                    }
+                                                }
+                                            } else { None }
+                                        }
+                                        Err(e) => {
+                                            println!("GPU Viewport: Failed to upload texture '{}': {}", tex_name, e);
+                                            None
+                                        }
+                                    }
+                                } else { None }
+                            }
+                        } else {
+                            None
+                        };
+                        
+                        // Queue static meshes
+                        for &handle in &model_handles.static_meshes {
+                            renderer.queue_mesh(ViewportMeshInstance {
+                                handle,
+                                model_matrix,
+                                color,
+                                material_descriptor_set,
+                                joints: None,
+                            });
+                        }
+
+                        // Queue skinned meshes
+                        for &handle in &model_handles.skinned_meshes {
+                            renderer.queue_mesh(ViewportMeshInstance {
+                                handle,
+                                model_matrix,
+                                color,
+                                material_descriptor_set,
+                                joints: joints.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Debug: Print queue stats once (first frame only via static flag)
+        static PRINTED_QUEUE_STATS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !PRINTED_QUEUE_STATS.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            if let Some(scene) = &self.current_scene {
+                println!("GPU Queue: {} entities in scene, {} queued for render", 
+                    scene.entities.len(), renderer.pending_instance_count());
+            }
+        }
+        
+        // Get render dimensions before borrowing renderer for readback
+        let render_w = renderer.width as usize;
+        let render_h = renderer.height as usize;
+        
+        match renderer.render_and_readback() {
+            Ok(pixels) => {
+                // Sharpening is now handled on the GPU inside the renderer
+                
+                // Update throttle timer
+                self.last_gpu_render_time = std::time::Instant::now();
+                
+                // Debug: Check if pixels contain any non-gray content
+                static DEBUG_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !DEBUG_ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    // Sample a few pixels to check content
+                    let mid = pixels.len() / 2;
+                    if pixels.len() > mid + 4 {
+                        println!("GPU Viewport: First pixel RGBA: {:?}", &pixels[0..4]);
+                        println!("GPU Viewport: Mid pixel RGBA: {:?}", &pixels[mid..mid+4]);
+                        println!("GPU Viewport: Pixels total: {} ({}x{})", pixels.len(), render_w, render_h);
+                    }
+                }
+                
+                // Convert to egui texture (use actual render dimensions, not viewport dimensions)
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [render_w, render_h],
+                    pixels,
+                );
+                
+                // Create or update texture handle
+                if let Some(existing) = &self.viewport_texture {
+                    // Update existing texture
+                    let tex_id = existing.id();
+                    ctx.tex_manager().write().set(
+                        tex_id,
+                        egui::epaint::ImageDelta::full(image, egui::TextureOptions::LINEAR),
+                    );
+                    Some(existing.clone())
+                } else {
+                    // Create new texture
+                    let handle = ctx.load_texture(
+                        "gpu_viewport",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.viewport_texture = Some(handle.clone());
+                    Some(handle)
+                }
+            }
+            Err(e) => {
+                println!("GPU Viewport: Render failed: {}", e);
+                None
+            }
+        }
+    }
+
     fn draw_3d_viewport(&mut self, ui: &mut egui::Ui) -> egui::Rect {
         let available = ui.available_size();
         let (response, painter) = ui.allocate_painter(available, egui::Sense::click_and_drag());
@@ -1937,151 +2318,171 @@ impl EditorApp {
         let scroll = ui.input(|i| i.scroll_delta.y);
         self.camera.distance = (self.camera.distance - scroll * 1.5).clamp(0.1, 1000.0);
 
-        // Background - Unity-style sky for High mode, dark for Low mode
-        if self.render_quality == RenderQuality::High {
-            // Unity-style bright sky gradient (bottom = horizon light blue, top = sky blue)
-            let sky_horizon = egui::Color32::from_rgb(147, 180, 210);   // Light blue at horizon
-            let sky_zenith = egui::Color32::from_rgb(82, 127, 175);     // Deeper blue at top
-            
-            let steps = 16;
-            for i in 0..steps {
-                let t = i as f32 / steps as f32;
-                let h = rect.height();
-                let r = egui::Rect::from_min_max(
-                    egui::pos2(rect.min.x, rect.min.y + t * h),
-                    egui::pos2(rect.max.x, rect.min.y + (t + 1.0/steps as f32) * h),
-                );
-                // Inverse t: sky is brighter at top (t=0) in this loop runs top-to-bottom
-                let inv_t = 1.0 - t;
-                let color = egui::Color32::from_rgb(
-                    (sky_zenith.r() as f32 * inv_t + sky_horizon.r() as f32 * t) as u8,
-                    (sky_zenith.g() as f32 * inv_t + sky_horizon.g() as f32 * t) as u8,
-                    (sky_zenith.b() as f32 * inv_t + sky_horizon.b() as f32 * t) as u8,
-                );
-                painter.rect_filled(r, 0.0, color);
+        // Try GPU-accelerated rendering for High quality mode
+        let gpu_rendered = if self.render_quality == RenderQuality::High {
+            if let Some(texture) = self.try_gpu_render(ui.ctx(), rect, available) {
+                // GPU render succeeded - draw the texture as background
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                painter.image(texture.id(), rect, uv, egui::Color32::WHITE);
+                true
+            } else {
+                false
             }
         } else {
-            // Low Quality: Dark professional gradient
-            let bg_color_top = egui::Color32::from_rgb(20, 22, 26);
-            let bg_color_bottom = egui::Color32::from_rgb(45, 50, 60);
-            
-            painter.rect_filled(rect, 0.0, bg_color_top);
-            
-            let steps = 12;
-            for i in 0..steps {
-                let t = i as f32 / steps as f32;
-                let h = rect.height();
-                let r = egui::Rect::from_min_max(
-                    egui::pos2(rect.min.x, rect.min.y + t * h),
-                    egui::pos2(rect.max.x, rect.min.y + (t + 1.0/steps as f32) * h),
-                );
-                let color = egui::Color32::from_rgb(
-                    (bg_color_top.r() as f32 * (1.0 - t) + bg_color_bottom.r() as f32 * t) as u8,
-                    (bg_color_top.g() as f32 * (1.0 - t) + bg_color_bottom.g() as f32 * t) as u8,
-                    (bg_color_top.b() as f32 * (1.0 - t) + bg_color_bottom.b() as f32 * t) as u8,
-                );
-                painter.rect_filled(r, 0.0, color);
+            false
+        };
+
+        // Background - Unity-style sky for High mode, dark for Low mode
+        // Skip ALL background drawing if GPU already rendered (GPU includes sky in clear color)
+        if !gpu_rendered {
+            if self.render_quality == RenderQuality::High {
+                // Unity-style bright sky gradient (bottom = horizon light blue, top = sky blue)
+                let sky_horizon = egui::Color32::from_rgb(147, 180, 210);   // Light blue at horizon
+                let sky_zenith = egui::Color32::from_rgb(82, 127, 175);     // Deeper blue at top
+                
+                let steps = 16;
+                for i in 0..steps {
+                    let t = i as f32 / steps as f32;
+                    let h = rect.height();
+                    let r = egui::Rect::from_min_max(
+                        egui::pos2(rect.min.x, rect.min.y + t * h),
+                        egui::pos2(rect.max.x, rect.min.y + (t + 1.0/steps as f32) * h),
+                    );
+                    // Inverse t: sky is brighter at top (t=0) in this loop runs top-to-bottom
+                    let inv_t = 1.0 - t;
+                    let color = egui::Color32::from_rgb(
+                        (sky_zenith.r() as f32 * inv_t + sky_horizon.r() as f32 * t) as u8,
+                        (sky_zenith.g() as f32 * inv_t + sky_horizon.g() as f32 * t) as u8,
+                        (sky_zenith.b() as f32 * inv_t + sky_horizon.b() as f32 * t) as u8,
+                    );
+                    painter.rect_filled(r, 0.0, color);
+                }
+            } else {
+                // Low Quality: Dark professional gradient
+                let bg_color_top = egui::Color32::from_rgb(20, 22, 26);
+                let bg_color_bottom = egui::Color32::from_rgb(45, 50, 60);
+                
+                painter.rect_filled(rect, 0.0, bg_color_top);
+                
+                let steps = 12;
+                for i in 0..steps {
+                    let t = i as f32 / steps as f32;
+                    let h = rect.height();
+                    let r = egui::Rect::from_min_max(
+                        egui::pos2(rect.min.x, rect.min.y + t * h),
+                        egui::pos2(rect.max.x, rect.min.y + (t + 1.0/steps as f32) * h),
+                    );
+                    let color = egui::Color32::from_rgb(
+                        (bg_color_top.r() as f32 * (1.0 - t) + bg_color_bottom.r() as f32 * t) as u8,
+                        (bg_color_top.g() as f32 * (1.0 - t) + bg_color_bottom.g() as f32 * t) as u8,
+                        (bg_color_top.b() as f32 * (1.0 - t) + bg_color_bottom.b() as f32 * t) as u8,
+                    );
+                    painter.rect_filled(r, 0.0, color);
+                }
             }
         }
 
-        // Professional fading grid - colors adjusted for background
-        let grid_size = 500.0; // Increased for "infinite" feel
-        let grid_step = 10.0;
-        let sub_step = 2.0;
-        let cam_dist = self.camera.distance;
-        // Fade grid faster at distance
-        let base_alpha = (200.0 / (cam_dist * 0.1).max(1.0)).clamp(10.0, 150.0);
-        
-        // Grid colors based on mode (darker for bright sky, lighter for dark)
-        let (major_color, minor_color) = if self.render_quality == RenderQuality::High {
-            // Dark grid on bright sky (like Unity)
-            ([40, 60, 80], [100, 110, 120])
-        } else {
-            // Light grid on dark background
-            ([140, 150, 170], [100, 110, 130])
-        };
-        
-        // Render sub-grid for High Quality
-        if self.render_quality == RenderQuality::High {
-            for i in -100..=100 {
-                let val = i as f32 * sub_step;
+        // Professional fading grid and origin axes - ONLY for software rendering
+        // Skip when GPU successfully rendered (GPU has its own ground plane and grid)
+        if !gpu_rendered {
+            let grid_size = 500.0; // Increased for "infinite" feel
+            let grid_step = 10.0;
+            let sub_step = 2.0;
+            let cam_dist = self.camera.distance;
+            // Fade grid faster at distance
+            let base_alpha = (200.0 / (cam_dist * 0.1).max(1.0)).clamp(10.0, 150.0);
+            
+            // Grid colors based on mode (darker for bright sky, lighter for dark)
+            let (major_color, minor_color) = if self.render_quality == RenderQuality::High {
+                // Dark grid on bright sky (like Unity)
+                ([40, 60, 80], [100, 110, 120])
+            } else {
+                // Light grid on dark background
+                ([140, 150, 170], [100, 110, 130])
+            };
+            
+            // Render sub-grid for High Quality
+            if self.render_quality == RenderQuality::High {
+                for i in -100..=100 {
+                    let val = i as f32 * sub_step;
+                    if val.abs() > grid_size { continue; }
+                    if i % 5 == 0 { continue; } // Skip major lines
+                    
+                    // Exponential edge fade for smoother horizon
+                    let dist_ratio = val.abs() / grid_size;
+                    let edge_fade = (1.0 - dist_ratio * dist_ratio).max(0.0);
+                    let alpha = (base_alpha * 0.25 * edge_fade) as u8;
+                    let stroke = egui::Stroke::new(0.3, egui::Color32::from_rgba_unmultiplied(minor_color[0], minor_color[1], minor_color[2], alpha));
+                    
+                    // X
+                    if let (Some(p1), Some(p2)) = (self.camera.project(Vec3::new(val, 0.0, -grid_size), available), self.camera.project(Vec3::new(val, 0.0, grid_size), available)) {
+                        painter.line_segment([egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)], stroke);
+                    }
+                    // Z
+                    if let (Some(p1), Some(p2)) = (self.camera.project(Vec3::new(-grid_size, 0.0, val), available), self.camera.project(Vec3::new(grid_size, 0.0, val), available)) {
+                        painter.line_segment([egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)], stroke);
+                    }
+                }
+            }
+
+            for i in -50..=50 {
+                let val = i as f32 * grid_step;
                 if val.abs() > grid_size { continue; }
-                if i % 5 == 0 { continue; } // Skip major lines
+                let is_major = i % 5 == 0;
                 
-                // Exponential edge fade for smoother horizon
+                // Dist alpha - fade at edges
                 let dist_ratio = val.abs() / grid_size;
                 let edge_fade = (1.0 - dist_ratio * dist_ratio).max(0.0);
-                let alpha = (base_alpha * 0.25 * edge_fade) as u8;
-                let stroke = egui::Stroke::new(0.3, egui::Color32::from_rgba_unmultiplied(minor_color[0], minor_color[1], minor_color[2], alpha));
+                let alpha = (base_alpha * edge_fade) as u8;
                 
-                // X
-                if let (Some(p1), Some(p2)) = (self.camera.project(Vec3::new(val, 0.0, -grid_size), available), self.camera.project(Vec3::new(val, 0.0, grid_size), available)) {
-                    painter.line_segment([egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)], stroke);
-                }
-                // Z
-                if let (Some(p1), Some(p2)) = (self.camera.project(Vec3::new(-grid_size, 0.0, val), available), self.camera.project(Vec3::new(grid_size, 0.0, val), available)) {
-                    painter.line_segment([egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)], stroke);
-                }
-            }
-        }
-
-        for i in -50..=50 {
-            let val = i as f32 * grid_step;
-            if val.abs() > grid_size { continue; }
-            let is_major = i % 5 == 0;
-            
-            // Dist alpha - fade at edges
-            let dist_ratio = val.abs() / grid_size;
-            let edge_fade = (1.0 - dist_ratio * dist_ratio).max(0.0);
-            let alpha = (base_alpha * edge_fade) as u8;
-            
-            // X-lines
-            if let (Some(p1), Some(p2)) = (
-                self.camera.project(Vec3::new(val, 0.0, -grid_size), available),
-                self.camera.project(Vec3::new(val, 0.0, grid_size), available),
-            ) {
-                let stroke = if is_major { 
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(major_color[0], major_color[1], major_color[2], alpha))
-                } else {
-                    egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(minor_color[0], minor_color[1], minor_color[2], alpha / 2))
-                };
-                painter.line_segment(
-                    [egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)],
-                    stroke,
-                );
-            }
-            
-            // Z-lines
-            if let (Some(p1), Some(p2)) = (
-                self.camera.project(Vec3::new(-grid_size, 0.0, val), available),
-                self.camera.project(Vec3::new(grid_size, 0.0, val), available),
-            ) {
-                let stroke = if is_major { 
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(major_color[0], major_color[1], major_color[2], alpha))
-                } else {
-                    egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(minor_color[0], minor_color[1], minor_color[2], alpha / 2))
-                };
-                painter.line_segment(
-                    [egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)],
-                    stroke,
-                );
-            }
-        }
-
-        // Origin axes
-        let origin = Vec3::zero();
-        if let Some(o) = self.camera.project(origin, available) {
-            let o = egui::pos2(rect.min.x + o.x, rect.min.y + o.y);
-            for (axis, color) in [
-                (Vec3::new(5.0, 0.0, 0.0), egui::Color32::from_rgb(255, 60, 60)),
-                (Vec3::new(0.0, 5.0, 0.0), egui::Color32::from_rgb(60, 255, 60)),
-                (Vec3::new(0.0, 0.0, 5.0), egui::Color32::from_rgb(60, 60, 255)),
-            ] {
-                if let Some(p) = self.camera.project(axis, available) {
+                // X-lines
+                if let (Some(p1), Some(p2)) = (
+                    self.camera.project(Vec3::new(val, 0.0, -grid_size), available),
+                    self.camera.project(Vec3::new(val, 0.0, grid_size), available),
+                ) {
+                    let stroke = if is_major { 
+                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(major_color[0], major_color[1], major_color[2], alpha))
+                    } else {
+                        egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(minor_color[0], minor_color[1], minor_color[2], alpha / 2))
+                    };
                     painter.line_segment(
-                        [o, egui::pos2(rect.min.x + p.x, rect.min.y + p.y)],
-                        egui::Stroke::new(1.5, color),
+                        [egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)],
+                        stroke,
                     );
+                }
+                
+                // Z-lines
+                if let (Some(p1), Some(p2)) = (
+                    self.camera.project(Vec3::new(-grid_size, 0.0, val), available),
+                    self.camera.project(Vec3::new(grid_size, 0.0, val), available),
+                ) {
+                    let stroke = if is_major { 
+                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(major_color[0], major_color[1], major_color[2], alpha))
+                    } else {
+                        egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(minor_color[0], minor_color[1], minor_color[2], alpha / 2))
+                    };
+                    painter.line_segment(
+                        [egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)],
+                        stroke,
+                    );
+                }
+            }
+
+            // Origin axes
+            let origin = Vec3::zero();
+            if let Some(o) = self.camera.project(origin, available) {
+                let o = egui::pos2(rect.min.x + o.x, rect.min.y + o.y);
+                for (axis, color) in [
+                    (Vec3::new(5.0, 0.0, 0.0), egui::Color32::from_rgb(255, 60, 60)),
+                    (Vec3::new(0.0, 5.0, 0.0), egui::Color32::from_rgb(60, 255, 60)),
+                    (Vec3::new(0.0, 0.0, 5.0), egui::Color32::from_rgb(60, 60, 255)),
+                ] {
+                    if let Some(p) = self.camera.project(axis, available) {
+                        painter.line_segment(
+                            [o, egui::pos2(rect.min.x + p.x, rect.min.y + p.y)],
+                            egui::Stroke::new(1.5, color),
+                        );
+                    }
                 }
             }
         }
@@ -2112,7 +2513,7 @@ impl EditorApp {
                 let pos = Vec3::new(entity.position[0], entity.position[1], entity.position[2]);
                 let is_selected = selected_id == Some(entity.id);
                 // Ground and Plane entities should be double-sided (no backface culling)
-                let is_double_sided = matches!(&entity.entity_type, EntityType::Ground | EntityType::Primitive(PrimitiveType::Plane));
+                let _is_double_sided = matches!(&entity.entity_type, EntityType::Ground | EntityType::Primitive(PrimitiveType::Plane));
                 
                 let base_color = [
                     (entity.material.albedo_color[0] * 200.0) as u8,
@@ -2167,11 +2568,26 @@ impl EditorApp {
                     // Reuse mesh_path from frustum culling above
                     if let Some(ref path) = mesh_path {
                         if let Some(model) = model_cache.get(path) {
-                            let transform = Mat4::from_scale_rotation_translation(
+                            let mut transform = Mat4::from_scale_rotation_translation(
                                 entity_scale,
                                 GQuat::from_array(entity.rotation),
                                 entity_pos,
                             );
+                            
+                            // Apply visual offset for Base-Origin normalization
+                            if let Some(model) = model_cache.get(path) {
+                                let mut min_y = 0.0f32;
+                                let mut first = true;
+                                for mesh in model.meshes.iter().chain(model.skinned_meshes.iter().map(|s| &s.mesh)) {
+                                    if first || mesh.aabb_min[1] < min_y {
+                                        min_y = mesh.aabb_min[1];
+                                        first = false;
+                                    }
+                                }
+                                if !first && min_y.abs() > 0.001 {
+                                    transform = transform * Mat4::from_translation(GVec3::new(0.0, -min_y, 0.0));
+                                }
+                            }
                             
                             let pose = Self::compute_animated_pose(entity, model_cache, anim_state);
                             let mat_color = GVec3::new(
@@ -2340,20 +2756,28 @@ impl EditorApp {
                 }).collect();
                 
                 let dist_to_cam = (entity_pos - cam_pos_g).length();
-                (entity.id, is_selected, base_color, proj, center_proj, high_res_meshes, dist_to_cam, pos, Vec3::new(half.x, half.y, half.z), entity.material.albedo_texture.clone())
+                let is_light = matches!(&entity.entity_type, EntityType::Light { .. });
+                let is_camera = matches!(&entity.entity_type, EntityType::Camera);
+                (entity.id, is_selected, base_color, proj, center_proj, high_res_meshes, dist_to_cam, pos, Vec3::new(half.x, half.y, half.z), entity.material.albedo_texture.clone(), is_light, is_camera)
             }).collect();
             
             // Sort entities by distance from camera (far to near)
             entity_renders.sort_by(|a, b| b.6.partial_cmp(&a.6).unwrap_or(std::cmp::Ordering::Equal));
             
+            // Draw high-quality meshes (Always as fallback/overlay for now)
+            let use_gpu_viewport_rendering = self.render_quality == RenderQuality::High && self.use_gpu_viewport && self.viewport_texture.is_some();
+            
             // Sequential: Draw using pre-computed projections (already sorted far-to-near)
-            for (id, is_selected, base_color, proj, center_proj, high_res_meshes, _dist, pos, half, entity_albedo) in entity_renders {
+            for (id, is_selected, base_color, proj, center_proj, high_res_meshes, _dist, pos, half, entity_albedo, is_light, is_camera) in entity_renders {
                 let base = egui::Color32::from_rgb(base_color[0], base_color[1], base_color[2]);
                 let wire_color = if is_selected { egui::Color32::GOLD } else { base };
                 let stroke = egui::Stroke::new(if is_selected { 2.5 } else { 1.0 }, wire_color);
                 
                 // Draw wireframe/Solid - Low = ALWAYS wireframe, High = solid meshes if available
-                if self.render_quality == RenderQuality::High && !high_res_meshes.is_empty() {
+                // Always draw software meshes for now so we don't have an empty screen
+                // EXCEPT if GPU render already handled it (prevents doubling/artifacting)
+                let has_mesh = !high_res_meshes.is_empty();
+                if !gpu_rendered && self.render_quality == RenderQuality::High && has_mesh {
                     // Sort sub-meshes by depth (far to near) for correct occlusion
                     let mut high_res_meshes = high_res_meshes;
                     high_res_meshes.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
@@ -2461,18 +2885,71 @@ impl EditorApp {
                 }
                 
                 // Center dot + click detection
-                // High mode = NO dots (solid meshes only), Low mode = outline circles
+                // High mode = NO dots for objects with meshes, but keep them for lights/cameras
                 if let Some(c) = center_proj {
                     let size = (8.0 + 400.0 / self.camera.distance).clamp(4.0, 25.0);
                     
-                    if self.render_quality == RenderQuality::Low {
-                        // Low: outline only - transparent with stroke
+                    // Draw distinctive icons for special entity types
+                    if is_light {
+                        // Light icon: Diamond/Star shape with rays
+                        let light_color = egui::Color32::from_rgb(255, 220, 100);
+                        let s = size * 0.8;
+                        // Diamond
+                        let diamond = vec![
+                            egui::pos2(c.x, c.y - s),
+                            egui::pos2(c.x + s * 0.7, c.y),
+                            egui::pos2(c.x, c.y + s),
+                            egui::pos2(c.x - s * 0.7, c.y),
+                        ];
+                        painter.add(egui::Shape::convex_polygon(diamond, light_color, egui::Stroke::NONE));
+                        // Rays
+                        for i in 0..4 {
+                            let angle = (i as f32) * std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_4;
+                            let inner = s * 0.9;
+                            let outer = s * 1.4;
+                            painter.line_segment(
+                                [egui::pos2(c.x + angle.cos() * inner, c.y + angle.sin() * inner),
+                                 egui::pos2(c.x + angle.cos() * outer, c.y + angle.sin() * outer)],
+                                egui::Stroke::new(2.0, light_color),
+                            );
+                        }
+                        if is_selected {
+                            painter.circle_stroke(c, size + 4.0, egui::Stroke::new(2.5, egui::Color32::GOLD));
+                        }
+                    } else if is_camera {
+                        // Camera icon: Simple frustum/eye shape
+                        let cam_color = egui::Color32::from_rgb(100, 180, 255);
+                        let s = size * 0.7;
+                        // Camera body (square)
+                        let body = vec![
+                            egui::pos2(c.x - s, c.y - s * 0.6),
+                            egui::pos2(c.x + s * 0.3, c.y - s * 0.6),
+                            egui::pos2(c.x + s * 0.3, c.y + s * 0.6),
+                            egui::pos2(c.x - s, c.y + s * 0.6),
+                        ];
+                        painter.add(egui::Shape::convex_polygon(body, cam_color, egui::Stroke::NONE));
+                        // Lens (cone/triangle)
+                        let lens = vec![
+                            egui::pos2(c.x + s * 0.3, c.y - s * 0.4),
+                            egui::pos2(c.x + s, c.y),
+                            egui::pos2(c.x + s * 0.3, c.y + s * 0.4),
+                        ];
+                        painter.add(egui::Shape::convex_polygon(lens, cam_color, egui::Stroke::NONE));
+                        if is_selected {
+                            painter.circle_stroke(c, size + 4.0, egui::Stroke::new(2.5, egui::Color32::GOLD));
+                        }
+                    } else if self.render_quality == RenderQuality::Low || !use_gpu_viewport_rendering || !has_mesh {
+                        // Low/Fallback or No Mesh: colored outline circle
                         painter.circle_stroke(c, size, egui::Stroke::new(1.5, wire_color));
-                    }
-                    // High: No center dot - only solid mesh rendering
-                    
-                    if is_selected {
-                        painter.circle_stroke(c, size + 2.0, egui::Stroke::new(2.0, egui::Color32::GOLD));
+                        if is_selected {
+                            painter.circle_stroke(c, size + 2.0, egui::Stroke::new(2.0, egui::Color32::GOLD));
+                        }
+                    } else {
+                        // High + GPU + Has Mesh: Subtle dot to show it's interactable
+                        painter.circle_filled(c, 3.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 100));
+                        if is_selected {
+                             painter.circle_stroke(c, size, egui::Stroke::new(2.0, egui::Color32::GOLD));
+                        }
                     }
                     
                     // Click detection hitbox (invisible in High mode)
@@ -2651,11 +3128,28 @@ impl EditorApp {
             // Try to get animated pose first
             let animated_pose = Self::compute_animated_pose(entity, &self.model_cache, &self.animation_editor_state);
             
-            let entity_mat = Mat4::from_scale_rotation_translation(
+            let mut entity_mat = Mat4::from_scale_rotation_translation(
                 GVec3::from(entity.scale),
                 GQuat::from_array(entity.rotation),
                 GVec3::from(entity.position)
             );
+            
+            // Apply visual offset to skeleton as well
+            if let EntityType::Mesh { path } = &entity.entity_type {
+                if let Some(model) = self.model_cache.get(path) {
+                    let mut min_y = 0.0f32;
+                    let mut first = true;
+                    for mesh in model.meshes.iter().chain(model.skinned_meshes.iter().map(|s| &s.mesh)) {
+                        if first || mesh.aabb_min[1] < min_y {
+                            min_y = mesh.aabb_min[1];
+                            first = false;
+                        }
+                    }
+                    if !first && min_y.abs() > 0.001 {
+                        entity_mat = entity_mat * Mat4::from_translation(GVec3::new(0.0, -min_y, 0.0));
+                    }
+                }
+            }
             
             let globals = if let Some((global_transforms, _)) = animated_pose {
                 global_transforms
@@ -3587,6 +4081,11 @@ impl eframe::App for EditorApp {
                     ui.label("Rendering Quality");
                     ui.selectable_value(&mut self.render_quality, RenderQuality::Low, "Low (Wireframe)");
                     ui.selectable_value(&mut self.render_quality, RenderQuality::High, "High (Solid)");
+                    
+                    if self.render_quality == RenderQuality::High {
+                        ui.add(egui::Slider::new(&mut self.resolution_scale, 0.1..=1.0).text("Resolution Scale"));
+                        ui.add(egui::Slider::new(&mut self.sharpening_amount, 0.0..=1.0).text("Sharpening"));
+                    }
                     
                     ui.separator();
                     ui.label("Camera");

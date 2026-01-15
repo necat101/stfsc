@@ -1,15 +1,14 @@
-    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
-error[E0506]: cannot assign to `entity.material.albedo_texture` because it is borrowed
-   --> src/bin/editor.rs:803:25
+warning: unnecessary `unsafe` block
+   --> src/graphics/viewport_renderer.rs:695:33
     |
-787 |             if let Some(texture_path) = &entity.material.albedo_texture {
-    |                                         ------------------------------- `entity.material.albedo_texture` is borrowed here
+647 | ...   unsafe {
+    |       ------ because it's nested under this `unsafe` block
 ...
-803 |                         entity.material.albedo_texture = Some(p);
-    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `entity.material.albedo_texture` is assigned to here but it was already borrowed
-...
-810 |                     eprintln!("Warning: Could not load texture at '{}'", texture_path);
-    |                                                                          ------------ borrow later used here
+695 | ...                           unsaf...
+    |                               ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` on by default
 
-For more information about this error, try `rustc --explain E0506`.
-error: could not compile `stfsc_engine` (bin "editor") due to 1 previous error
+warning: `stfsc_engine` (lib) generated 1 warning
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/stfsc-main)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.10s

@@ -90,11 +90,20 @@ fn main() {
 
     unsafe { *light_ptr = LightUBO::default(); }
 
+    // Create Bone Matrices buffer
+    let bone_buffer_size = (128 * std::mem::size_of::<glam::Mat4>()) as u64;
+    let (bone_buffer, _bone_memory) = graphics_context.create_buffer(
+        bone_buffer_size,
+        vk::BufferUsageFlags::UNIFORM_BUFFER,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    ).expect("Failed to create bone buffer");
+
     let global_descriptor_set = graphics_context.create_global_descriptor_set(
         graphics_context.shadow_depth_view,
         graphics_context.shadow_sampler,
         instance_buffer,
         light_buffer,
+        bone_buffer,
     ).expect("Failed to create global descriptor set");
 
     let material_descriptor_set = graphics_context.create_material_descriptor_set(&albedo_tex, &normal_tex, &mr_tex).expect("Failed to create material descriptor set");

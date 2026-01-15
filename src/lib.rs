@@ -295,11 +295,25 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
     }
     info!("Created light buffer for {} lights", lighting::MAX_LIGHTS);
 
+    // Create Bone Matrices buffer
+    let (bone_buffer, _bone_memory) = match graphics_context.create_buffer(
+        (128 * std::mem::size_of::<glam::Mat4>()) as u64,
+        vk::BufferUsageFlags::UNIFORM_BUFFER,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    ) {
+        Ok(ret) => ret,
+        Err(e) => {
+            error!("Failed to create bone buffer: {:?}", e);
+            return;
+        }
+    };
+
     let global_descriptor_set = match graphics_context.create_global_descriptor_set(
         graphics_context.shadow_depth_view,
         graphics_context.shadow_sampler,
         instance_buffer,
         light_buffer,
+        bone_buffer,
     ) {
         Ok(set) => set,
         Err(e) => {
