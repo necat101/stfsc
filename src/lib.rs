@@ -2,6 +2,7 @@ pub mod audio;
 pub mod graphics;
 pub mod lighting;
 pub mod physics;
+pub mod project;
 pub mod resource_loader;
 pub mod ui;
 pub mod world;

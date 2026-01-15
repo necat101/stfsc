@@ -800,7 +800,14 @@ struct EditorApp {
     clipboard: Option<SceneEntity>,         // Copied entity for paste
     undo_stack: Vec<EditorAction>,          // History of actions for undo
     redo_stack: Vec<EditorAction>,          // Undone actions for redo
-    
+
+    // Project management
+    current_project: Option<stfsc_engine::project::Project>,
+    show_new_project_dialog: bool,
+    new_project_name: String,
+    new_project_dir: String,
+    show_project_settings: bool,
+
     // Model import
     show_import_model_dialog: bool,         // Show import model file browser
     import_model_files: Vec<String>,        // Cached list of model files for browser
@@ -1000,6 +1007,13 @@ impl EditorApp {
             resolution_scale: 0.5, // 0.5x resolution by default for smoothness
             sharpening_amount: 0.0, // Default to disabled for performance
             default_pbr: None,
+
+            // Project management
+            current_project: None,
+            show_new_project_dialog: false,
+            new_project_name: String::new(),
+            new_project_dir: String::new(),
+            show_project_settings: false,
         }
     }
 
@@ -1224,13 +1238,22 @@ impl EditorApp {
     /// Save the current scene to the specified path
     fn save_scene_to_path(&mut self, path: &str) -> Result<(), String> {
         if let Some(scene) = &self.current_scene {
+            // Resolve absolute path using project if available
+            let absolute_path = if let Some(proj) = &self.current_project {
+                proj.resolve_path(path)
+            } else {
+                std::path::PathBuf::from(path)
+            };
+
             // Ensure scenes directory exists
-            std::fs::create_dir_all("scenes").map_err(|e| e.to_string())?;
+            if let Some(parent) = absolute_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
             
             let json = serde_json::to_string_pretty(scene)
                 .map_err(|e| format!("Serialization error: {}", e))?;
             
-            std::fs::write(path, json)
+            std::fs::write(&absolute_path, json)
                 .map_err(|e| format!("Write error: {}", e))?;
             
             self.current_scene_path = Some(path.to_string());
@@ -1245,7 +1268,13 @@ impl EditorApp {
 
     /// Load a scene from the specified file path
     fn load_scene_from_path(&mut self, ctx: &egui::Context, path: &str) -> Result<(), String> {
-        let contents = std::fs::read_to_string(path)
+        let absolute_path = if let Some(proj) = &self.current_project {
+            proj.resolve_path(path)
+        } else {
+            std::path::PathBuf::from(path)
+        };
+
+        let contents = std::fs::read_to_string(&absolute_path)
             .map_err(|e| format!("Read error: {}", e))?;
         
         let mut scene: Scene = serde_json::from_str(&contents)
@@ -1258,11 +1287,15 @@ impl EditorApp {
                 // 1. As stored (absolute or relative to current project root)
                 // 2. Relative to the scene file being loaded
                 // 3. In the project's assets/textures folder
-                let paths_to_try = vec![
+                let mut paths_to_try = vec![
                     texture_path.clone(),
-                    format!("{}/{}", std::path::Path::new(path).parent().unwrap_or(std::path::Path::new(".")).display(), texture_path),
+                    format!("{}/{}", absolute_path.parent().unwrap_or(std::path::Path::new(".")).display(), texture_path),
                     format!("assets/textures/{}", std::path::Path::new(&texture_path).file_name().unwrap_or_default().to_string_lossy()),
                 ];
+                
+                if let Some(proj) = &self.current_project {
+                    paths_to_try.push(proj.root_path.join("assets/textures").join(std::path::Path::new(&texture_path).file_name().unwrap()).to_string_lossy().to_string());
+                }
                 
                 let mut loaded_path = None;
                 for p in paths_to_try {
@@ -1275,15 +1308,15 @@ impl EditorApp {
                 
                 if let Some(p) = loaded_path {
                     // Update to the working path for future sessions
-                entity.material.albedo_texture = Some(p);
-                
-                // Pre-cache texture for editor software renderer
-                if let Some(data) = &entity.material.albedo_texture_data {
-                    let tex_name = std::path::Path::new(entity.material.albedo_texture.as_ref().unwrap())
-                        .file_name().unwrap_or_default().to_string_lossy().to_string();
-                    self.load_egui_texture(ctx, &tex_name, data);
-                }
-            } else {
+                    entity.material.albedo_texture = Some(p);
+                    
+                    // Pre-cache texture for editor software renderer
+                    if let Some(data) = &entity.material.albedo_texture_data {
+                        let tex_name = std::path::Path::new(entity.material.albedo_texture.as_ref().unwrap())
+                            .file_name().unwrap_or_default().to_string_lossy().to_string();
+                        self.load_egui_texture(ctx, &tex_name, data);
+                    }
+                } else {
                     eprintln!("Warning: Could not load texture at '{}'", texture_path);
                 }
             }
@@ -1309,7 +1342,13 @@ impl EditorApp {
     /// Scan the scenes directory for .json files
     fn scan_scene_files(&mut self) {
         self.open_scene_files.clear();
-        if let Ok(entries) = std::fs::read_dir("scenes") {
+        let scenes_dir = if let Some(proj) = &self.current_project {
+            proj.root_path.join("scenes")
+        } else {
+            std::path::PathBuf::from("scenes")
+        };
+
+        if let Ok(entries) = std::fs::read_dir(scenes_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().map_or(false, |ext| ext == "json") {
@@ -1322,10 +1361,21 @@ impl EditorApp {
         self.open_scene_files.sort();
     }
 
-    /// Scan for 3D model files (OBJ, FBX) in common directories
-    fn scan_model_files() -> Vec<String> {
+    /// Scan for 3D model files (OBJ, FBX, GLB) in common directories
+    fn scan_model_files(&self) -> Vec<String> {
         let mut files = Vec::new();
-        let search_dirs = ["assets/models", "models", "assets", "."];
+        let mut search_dirs = vec![
+            std::path::PathBuf::from("assets/models"),
+            std::path::PathBuf::from("models"),
+            std::path::PathBuf::from("assets"),
+            std::path::PathBuf::from("."),
+        ];
+        
+        if let Some(proj) = &self.current_project {
+            search_dirs.insert(0, proj.root_path.join("assets/models"));
+            search_dirs.insert(1, proj.root_path.join("assets"));
+            search_dirs.insert(2, proj.root_path.clone());
+        }
         
         for dir in search_dirs {
             if let Ok(entries) = std::fs::read_dir(dir) {
@@ -1346,6 +1396,7 @@ impl EditorApp {
         }
         
         files.sort();
+        files.dedup();
         files
     }
     
@@ -4055,6 +4106,63 @@ impl eframe::App for EditorApp {
                         ui.close_menu();
                     }
                 });
+
+                ui.menu_button("Project", |ui| {
+                    if ui.button("📁 New Project...").clicked() {
+                        self.show_new_project_dialog = true;
+                        self.new_project_name = "New Project".into();
+                        self.new_project_dir = "projects".into();
+                        ui.close_menu();
+                    }
+                    if ui.button("📂 Open Project...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Open Project Folder")
+                            .pick_folder() 
+                        {
+                            match stfsc_engine::project::Project::load(path) {
+                                Ok(proj) => {
+                                    self.current_project = Some(proj);
+                                    let name = self.current_project.as_ref().unwrap().metadata.name.clone();
+                                    self.status = format!("Loaded Project: {}", name);
+                                    
+                                    // Refresh scenes and models
+                                    self.scan_scene_files();
+                                    self.scenes = self.open_scene_files.iter()
+                                        .map(|p| std::path::Path::new(p).file_stem().unwrap().to_string_lossy().to_string())
+                                        .collect();
+                                    
+                                    // Select and load the first scene if available
+                                    if !self.open_scene_files.is_empty() {
+                                        let first_scene_path = self.open_scene_files[0].clone();
+                                        if let Err(e) = self.load_scene_from_path(ctx, &first_scene_path) {
+                                            self.status = format!("Project loaded, but error loading scene: {}", e);
+                                        } else {
+                                            self.selected_scene_idx = Some(0);
+                                        }
+                                    }
+                                }
+                                Err(e) => self.status = format!("Error loading project: {}", e),
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if let Some(proj) = &mut self.current_project {
+                        ui.separator();
+                        if ui.button("⚙ Project Settings").clicked() {
+                            self.show_project_settings = true;
+                            ui.close_menu();
+                        }
+                        if ui.button("💾 Save Project").clicked() {
+                            if let Err(e) = proj.save() {
+                                self.status = format!("Error saving project: {}", e);
+                            } else {
+                                self.status = "Project saved".into();
+                            }
+                            ui.close_menu();
+                        }
+                    }
+                });
+
                 ui.menu_button("Edit", |ui| {
                     if ui
                         .add_enabled(
@@ -4480,6 +4588,7 @@ impl eframe::App for EditorApp {
                 egui::CollapsingHeader::new("📁 Scenes")
                     .default_open(true)
                     .show(ui, |ui| {
+                        let mut scene_to_load = None;
                         for (i, name) in self.scenes.iter().enumerate() {
                             if ui
                                 .selectable_label(
@@ -4488,9 +4597,20 @@ impl eframe::App for EditorApp {
                                 )
                                 .clicked()
                             {
-                                self.selected_scene_idx = Some(i);
-                                if name == "Test" {
-                                    self.current_scene = Some(Scene::create_test_scene());
+                                scene_to_load = Some((i, name.clone()));
+                            }
+                        }
+
+                        if let Some((i, name)) = scene_to_load {
+                            self.selected_scene_idx = Some(i);
+                            if name == "Test" {
+                                self.current_scene = Some(Scene::create_test_scene());
+                                self.current_scene_path = None;
+                            } else if i < self.open_scene_files.len() {
+                                // Load the scene from file
+                                let path = self.open_scene_files[i].clone();
+                                if let Err(e) = self.load_scene_from_path(ctx, &path) {
+                                    self.status = format!("Error loading scene: {}", e);
                                 }
                             }
                         }
@@ -5385,6 +5505,106 @@ impl eframe::App for EditorApp {
                 });
         }
 
+        // New Project Dialog
+        if self.show_new_project_dialog {
+            egui::Window::new("New Project")
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.text_edit_singleline(&mut self.new_project_name);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Directory:");
+                        ui.text_edit_singleline(&mut self.new_project_dir);
+                        if ui.button("...").clicked() {
+                           if let Some(path) = rfd::FileDialog::new()
+                                .pick_folder() 
+                            {
+                                self.new_project_dir = path.to_string_lossy().to_string();
+                            }
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("🚀 Create Project").clicked() && !self.new_project_name.is_empty() {
+                            let root = std::path::PathBuf::from(&self.new_project_dir).join(&self.new_project_name);
+                            let proj = stfsc_engine::project::Project::new(&self.new_project_name, root);
+                            if let Err(e) = proj.save() {
+                                self.status = format!("Error creating project: {}", e);
+                            } else {
+                                self.current_project = Some(proj);
+                                
+                                // Create and save a default test scene in the new project
+                                let mut test_scene = Scene::create_test_scene();
+                                test_scene.name = "Main".to_string();
+                                self.current_scene = Some(test_scene);
+                                
+                                // Ensure the path is relative to project root
+                                let scene_path = "scenes/main.json";
+                                if let Err(e) = self.save_scene_to_path(scene_path) {
+                                    self.status = format!("Project created, but failed to save default scene: {}", e);
+                                } else {
+                                    self.status = format!("Created Project: {}", self.new_project_name);
+                                }
+                                
+                                self.show_new_project_dialog = false;
+                                self.scan_scene_files();
+                                self.scenes = self.open_scene_files.iter()
+                                    .map(|p| std::path::Path::new(p).file_stem().unwrap().to_string_lossy().to_string())
+                                    .collect();
+                                
+                                // Select "Main" scene if it was created
+                                if let Some(idx) = self.scenes.iter().position(|s| s == "Main") {
+                                    self.selected_scene_idx = Some(idx);
+                                } else {
+                                    self.selected_scene_idx = if self.scenes.is_empty() { None } else { Some(0) };
+                                }
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_new_project_dialog = false;
+                        }
+                    });
+                });
+        }
+
+        // Project Settings Dialog
+        if self.show_project_settings {
+            if let Some(proj) = &mut self.current_project {
+                egui::Window::new("Project Settings")
+                    .collapsible(false)
+                    .show(ctx, |ui| {
+                        ui.heading(&proj.metadata.name);
+                        ui.separator();
+                        
+                        ui.horizontal(|ui| {
+                            ui.label("Target Platform:");
+                            egui::ComboBox::from_label("")
+                                .selected_text(proj.metadata.target_platform.name())
+                                .show_ui(ui, |ui| {
+                                    for platform in stfsc_engine::project::TargetPlatform::all() {
+                                        ui.selectable_value(&mut proj.metadata.target_platform, platform, platform.name());
+                                    }
+                                });
+                        });
+                        
+                        ui.separator();
+                        ui.heading("Procedural Generation Settings");
+                        ui.checkbox(&mut proj.metadata.procedural_gen.enabled, "Enable Procedural Gen");
+                        ui.add(egui::Slider::new(&mut proj.metadata.procedural_gen.seed, 0..=9999999).text("Seed"));
+                        ui.add(egui::Slider::new(&mut proj.metadata.procedural_gen.density, 0.0..=1.0).text("Density"));
+                        
+                        ui.add_space(8.0);
+                        if ui.button("Close").clicked() {
+                            self.show_project_settings = false;
+                        }
+                    });
+            } else {
+                self.show_project_settings = false;
+            }
+        }
+
         // Open Scene Dialog
         if self.show_open_scene_dialog {
             egui::Window::new("Open Scene")
@@ -5481,7 +5701,7 @@ impl eframe::App for EditorApp {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("🔄 Refresh").clicked() {
-                            self.import_model_files = Self::scan_model_files();
+                            self.import_model_files = self.scan_model_files();
                         }
                         if ui.button("Cancel").clicked() {
                             self.show_import_model_dialog = false;
