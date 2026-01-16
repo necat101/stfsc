@@ -807,6 +807,8 @@ struct EditorApp {
     new_project_name: String,
     new_project_dir: String,
     show_project_settings: bool,
+    project_settings_tab: usize, // 0=General, 1=Build, 2=Input, 3=Assets
+    recent_projects: stfsc_engine::project::RecentProjects,
 
     // Model import
     show_import_model_dialog: bool,         // Show import model file browser
@@ -846,7 +848,9 @@ struct EditorApp {
     last_viewport_size: (u32, u32),
     use_gpu_viewport: bool, // Fallback flag if Vulkan init fails
     last_gpu_render_time: std::time::Instant, // For frame throttling
-    gpu_frame_interval_ms: u64, // Target interval between GPU renders (33ms = 30fps)
+    gpu_frame_interval_ms: u64, // Target interval between GPU renders (16ms = 60fps when active)
+    viewport_idle_frames: u32, // Counts frames since last camera/scene interaction
+    last_camera_state: (f32, f32, f32), // (yaw, pitch, distance) for detecting movement
     
     // GPU Cache for materials and textures
     gpu_texture_cache: HashMap<String, Texture>,
@@ -1000,11 +1004,13 @@ impl EditorApp {
             last_viewport_size: (0, 0),
             use_gpu_viewport: true, // Will be set false if init completely fails
             last_gpu_render_time: std::time::Instant::now(),
-            gpu_frame_interval_ms: 33, // 30fps target (can be lowered to 16 for 60fps)
+            gpu_frame_interval_ms: 16, // 60fps target for smooth interaction
+            viewport_idle_frames: 0,
+            last_camera_state: (0.0, 0.0, 10.0),
             
             gpu_texture_cache: HashMap::new(),
             gpu_material_cache: HashMap::new(),
-            resolution_scale: 0.5, // 0.5x resolution by default for smoothness
+            resolution_scale: 0.5, // 0.5x for low-end hardware (adjustable in settings)
             sharpening_amount: 0.0, // Default to disabled for performance
             default_pbr: None,
 
@@ -1014,6 +1020,8 @@ impl EditorApp {
             new_project_name: String::new(),
             new_project_dir: String::new(),
             show_project_settings: false,
+            project_settings_tab: 0,
+            recent_projects: stfsc_engine::project::RecentProjects::load(),
         }
     }
 
@@ -1960,10 +1968,31 @@ impl EditorApp {
             }
         }
         
-        // FRAME THROTTLING: Skip GPU render if we updated recently
-        // This reduces GPU→CPU copy overhead significantly
+        // ADAPTIVE FRAME THROTTLING: Detect camera/scene changes to adjust refresh rate
+        // Fast (16ms/60fps) when interacting, slow (100ms/10fps) when idle
+        let current_camera_state = (self.camera.yaw, self.camera.pitch, self.camera.distance);
+        let scene_interacting = self.animation_editor_state.is_playing 
+            || self.gizmo_axis.is_some() 
+            || (current_camera_state.0 - self.last_camera_state.0).abs() > 0.001
+            || (current_camera_state.1 - self.last_camera_state.1).abs() > 0.001
+            || (current_camera_state.2 - self.last_camera_state.2).abs() > 0.01;
+
+        if scene_interacting {
+            self.viewport_idle_frames = 0;
+            self.last_camera_state = current_camera_state;
+        } else {
+            self.viewport_idle_frames = self.viewport_idle_frames.saturating_add(1);
+        }
+        
+        // Determine effective throttle interval based on idle state
+        let effective_interval = if self.viewport_idle_frames < 10 {
+            self.gpu_frame_interval_ms // Active: 16ms (60 FPS)
+        } else {
+            100 // Idle: 100ms (10 FPS) to save GPU bandwidth
+        };
+        
         let elapsed = self.last_gpu_render_time.elapsed().as_millis() as u64;
-        if elapsed < self.gpu_frame_interval_ms {
+        if elapsed < effective_interval {
             // Return cached texture if available (no new render needed)
             if let Some(tex) = &self.viewport_texture {
                 return Some(tex.clone());
@@ -2065,26 +2094,14 @@ impl EditorApp {
                 
                 if let Some(path) = mesh_path {
                     if let Some(model_handles) = self.gpu_mesh_cache.get(&path) {
-                        let mut model_matrix = Mat4::from_scale_rotation_translation(
+                        let model_matrix = Mat4::from_scale_rotation_translation(
                             GVec3::from(entity.scale),
                             GQuat::from_array(entity.rotation),
                             GVec3::from(entity.position),
                         );
                         
-                        // Apply visual offset for Base-Origin normalization (matches engine physics behavior)
-                        if let Some(model) = self.model_cache.get(&path) {
-                            let mut min_y = 0.0f32;
-                            let mut first = true;
-                            for mesh in model.meshes.iter().chain(model.skinned_meshes.iter().map(|s| &s.mesh)) {
-                                if first || mesh.aabb_min[1] < min_y {
-                                    min_y = mesh.aabb_min[1];
-                                    first = false;
-                                }
-                            }
-                            if !first && min_y.abs() > 0.001 {
-                                model_matrix = model_matrix * Mat4::from_translation(GVec3::new(0.0, -min_y, 0.0));
-                            }
-                        }
+                        // NOTE: Base-Origin offset removed to match client/deployed behavior.
+                        // The client uses raw model transforms without adjustment.
                         
                         let color = GVec3::new(
                             entity.material.albedo_color[0],
@@ -2192,11 +2209,11 @@ impl EditorApp {
                     }
                 }
                 
-                // Convert to egui texture (use actual render dimensions, not viewport dimensions)
-                let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [render_w, render_h],
-                    pixels,
-                );
+                // Convert to egui texture using direct Color32 copy (optimized path)
+                let image = egui::ColorImage {
+                    size: [render_w, render_h],
+                    pixels: pixels.to_vec(),
+                };
                 
                 // Create or update texture handle
                 if let Some(existing) = &self.viewport_texture {
@@ -2546,6 +2563,7 @@ impl EditorApp {
             let model_cache = &self.model_cache;
             let anim_state = &self.animation_editor_state;
             let render_quality = self.render_quality;
+            let skip_cpu_rendering = gpu_rendered; // If GPU rendered, skip expensive CPU mesh prep
             
             // Parallel: Compute all entity render data (projections, colors, etc.)
             let white_pixel_uv = egui::pos2(0.0, 0.0);
@@ -2595,15 +2613,9 @@ impl EditorApp {
 
                 let entity_aabb = if let Some(path) = &mesh_path {
                     if let Some(model) = model_cache.get(path) {
-                        // Use accurate mesh AABB if available
-                        let mut min = GVec3::splat(f32::MAX);
-                        let mut max = GVec3::splat(f32::MIN);
-                        for mesh in model.meshes.iter().chain(model.skinned_meshes.iter().map(|s| &s.mesh)) {
-                            min = min.min(GVec3::from(mesh.aabb_min));
-                            max = max.max(GVec3::from(mesh.aabb_max));
-                        }
-                        let center = (min + max) * 0.5;
-                        let extent = (max - min) * 0.5;
+                        // Use pre-calculated ModelScene AABB for speed
+                        let center = (model.aabb_min + model.aabb_max) * 0.5;
+                        let extent = (model.aabb_max - model.aabb_min) * 0.5;
                         let world_center = entity_pos + GQuat::from_array(entity.rotation) * (center * entity_scale);
                         let world_extent = entity_scale * extent * 1.2; // Extra padding for rotation
                         AABB::from_center_extents(world_center, world_extent)
@@ -2615,30 +2627,18 @@ impl EditorApp {
                 };
                 let is_visible = frustum.intersects_aabb(&entity_aabb);
 
-                if render_quality == RenderQuality::High && is_visible {
+                if render_quality == RenderQuality::High && is_visible && !skip_cpu_rendering {
                     // Reuse mesh_path from frustum culling above
                     if let Some(ref path) = mesh_path {
                         if let Some(model) = model_cache.get(path) {
-                            let mut transform = Mat4::from_scale_rotation_translation(
+                            let transform = Mat4::from_scale_rotation_translation(
                                 entity_scale,
                                 GQuat::from_array(entity.rotation),
                                 entity_pos,
                             );
                             
-                            // Apply visual offset for Base-Origin normalization
-                            if let Some(model) = model_cache.get(path) {
-                                let mut min_y = 0.0f32;
-                                let mut first = true;
-                                for mesh in model.meshes.iter().chain(model.skinned_meshes.iter().map(|s| &s.mesh)) {
-                                    if first || mesh.aabb_min[1] < min_y {
-                                        min_y = mesh.aabb_min[1];
-                                        first = false;
-                                    }
-                                }
-                                if !first && min_y.abs() > 0.001 {
-                                    transform = transform * Mat4::from_translation(GVec3::new(0.0, -min_y, 0.0));
-                                }
-                            }
+                            // NOTE: Base-Origin offset removed to match client/deployed behavior.
+                            // The client uses raw model transforms without adjustment.
                             
                             let pose = Self::compute_animated_pose(entity, model_cache, anim_state);
                             let mat_color = GVec3::new(
@@ -3179,28 +3179,14 @@ impl EditorApp {
             // Try to get animated pose first
             let animated_pose = Self::compute_animated_pose(entity, &self.model_cache, &self.animation_editor_state);
             
-            let mut entity_mat = Mat4::from_scale_rotation_translation(
+            let entity_mat = Mat4::from_scale_rotation_translation(
                 GVec3::from(entity.scale),
                 GQuat::from_array(entity.rotation),
                 GVec3::from(entity.position)
             );
             
-            // Apply visual offset to skeleton as well
-            if let EntityType::Mesh { path } = &entity.entity_type {
-                if let Some(model) = self.model_cache.get(path) {
-                    let mut min_y = 0.0f32;
-                    let mut first = true;
-                    for mesh in model.meshes.iter().chain(model.skinned_meshes.iter().map(|s| &s.mesh)) {
-                        if first || mesh.aabb_min[1] < min_y {
-                            min_y = mesh.aabb_min[1];
-                            first = false;
-                        }
-                    }
-                    if !first && min_y.abs() > 0.001 {
-                        entity_mat = entity_mat * Mat4::from_translation(GVec3::new(0.0, -min_y, 0.0));
-                    }
-                }
-            }
+            // NOTE: Base-Origin offset removed to match client/deployed behavior.
+            // The client uses raw model transforms without adjustment.
             
             let globals = if let Some((global_transforms, _)) = animated_pose {
                 global_transforms
@@ -4119,10 +4105,16 @@ impl eframe::App for EditorApp {
                             .set_title("Open Project Folder")
                             .pick_folder() 
                         {
-                            match stfsc_engine::project::Project::load(path) {
+                            match stfsc_engine::project::Project::load(path.clone()) {
                                 Ok(proj) => {
+                                    let name = proj.metadata.name.clone();
+                                    let path_str = path.to_string_lossy().to_string();
+                                    
+                                    // Add to recent projects
+                                    self.recent_projects.add(&name, &path_str);
+                                    let _ = self.recent_projects.save();
+                                    
                                     self.current_project = Some(proj);
-                                    let name = self.current_project.as_ref().unwrap().metadata.name.clone();
                                     self.status = format!("Loaded Project: {}", name);
                                     
                                     // Refresh scenes and models
@@ -4146,10 +4138,67 @@ impl eframe::App for EditorApp {
                         }
                         ui.close_menu();
                     }
+                    
+                    // Recent Projects submenu
+                    if !self.recent_projects.projects.is_empty() {
+                        ui.menu_button("📋 Recent Projects", |ui| {
+                            let projects_clone = self.recent_projects.projects.clone();
+                            for recent in &projects_clone {
+                                let label = format!("📁 {}", recent.name);
+                                if ui.button(&label).on_hover_text(&recent.path).clicked() {
+                                    let path = std::path::PathBuf::from(&recent.path);
+                                    match stfsc_engine::project::Project::load(path) {
+                                        Ok(proj) => {
+                                            let name = proj.metadata.name.clone();
+                                            self.recent_projects.add(&name, &recent.path);
+                                            let _ = self.recent_projects.save();
+                                            
+                                            self.current_project = Some(proj);
+                                            self.status = format!("Loaded Project: {}", name);
+                                            
+                                            self.scan_scene_files();
+                                            self.scenes = self.open_scene_files.iter()
+                                                .map(|p| std::path::Path::new(p).file_stem().unwrap().to_string_lossy().to_string())
+                                                .collect();
+                                            
+                                            if !self.open_scene_files.is_empty() {
+                                                let first_scene_path = self.open_scene_files[0].clone();
+                                                if let Err(e) = self.load_scene_from_path(ctx, &first_scene_path) {
+                                                    self.status = format!("Project loaded, but error loading scene: {}", e);
+                                                } else {
+                                                    self.selected_scene_idx = Some(0);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            self.status = format!("Error loading project: {}", e);
+                                            // Remove invalid project from recent list
+                                            self.recent_projects.remove(&recent.path);
+                                            let _ = self.recent_projects.save();
+                                        }
+                                    }
+                                    ui.close_menu();
+                                }
+                            }
+                            ui.separator();
+                            if ui.button("🗑 Clear Recent").clicked() {
+                                self.recent_projects.clear();
+                                let _ = self.recent_projects.save();
+                                ui.close_menu();
+                            }
+                        });
+                    }
+                    
                     if let Some(proj) = &mut self.current_project {
                         ui.separator();
                         if ui.button("⚙ Project Settings").clicked() {
                             self.show_project_settings = true;
+                            self.project_settings_tab = 0;
+                            ui.close_menu();
+                        }
+                        if ui.button("🔄 Refresh Assets").clicked() {
+                            proj.refresh_assets();
+                            self.status = format!("Refreshed {} assets", proj.assets.total_count());
                             ui.close_menu();
                         }
                         if ui.button("💾 Save Project").clicked() {
@@ -5529,10 +5578,15 @@ impl eframe::App for EditorApp {
                     ui.horizontal(|ui| {
                         if ui.button("🚀 Create Project").clicked() && !self.new_project_name.is_empty() {
                             let root = std::path::PathBuf::from(&self.new_project_dir).join(&self.new_project_name);
-                            let proj = stfsc_engine::project::Project::new(&self.new_project_name, root);
+                            let mut proj = stfsc_engine::project::Project::new(&self.new_project_name, root.clone());
                             if let Err(e) = proj.save() {
                                 self.status = format!("Error creating project: {}", e);
                             } else {
+                                // Add to recent projects
+                                let path_str = root.to_string_lossy().to_string();
+                                self.recent_projects.add(&self.new_project_name, &path_str);
+                                let _ = self.recent_projects.save();
+                                
                                 self.current_project = Some(proj);
                                 
                                 // Create and save a default test scene in the new project
@@ -5569,36 +5623,223 @@ impl eframe::App for EditorApp {
                 });
         }
 
-        // Project Settings Dialog
+        // Project Settings Dialog (Tabbed)
         if self.show_project_settings {
             if let Some(proj) = &mut self.current_project {
                 egui::Window::new("Project Settings")
                     .collapsible(false)
+                    .resizable(true)
+                    .min_width(500.0)
+                    .min_height(400.0)
                     .show(ctx, |ui| {
-                        ui.heading(&proj.metadata.name);
+                        ui.horizontal(|ui| {
+                            ui.heading(&proj.metadata.name);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(format!("v{}", proj.metadata.version));
+                            });
+                        });
                         ui.separator();
                         
+                        // Tab bar
                         ui.horizontal(|ui| {
-                            ui.label("Target Platform:");
-                            egui::ComboBox::from_label("")
-                                .selected_text(proj.metadata.target_platform.name())
-                                .show_ui(ui, |ui| {
-                                    for platform in stfsc_engine::project::TargetPlatform::all() {
-                                        ui.selectable_value(&mut proj.metadata.target_platform, platform, platform.name());
+                            if ui.selectable_label(self.project_settings_tab == 0, "📋 General").clicked() {
+                                self.project_settings_tab = 0;
+                            }
+                            if ui.selectable_label(self.project_settings_tab == 1, "🔧 Build").clicked() {
+                                self.project_settings_tab = 1;
+                            }
+                            if ui.selectable_label(self.project_settings_tab == 2, "🎮 Input").clicked() {
+                                self.project_settings_tab = 2;
+                            }
+                            if ui.selectable_label(self.project_settings_tab == 3, "📦 Assets").clicked() {
+                                self.project_settings_tab = 3;
+                            }
+                        });
+                        ui.separator();
+                        
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            match self.project_settings_tab {
+                                0 => {
+                                    // General Tab
+                                    ui.heading("Project Information");
+                                    ui.add_space(4.0);
+                                    
+                                    egui::Grid::new("general_grid").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+                                        ui.label("Name:");
+                                        ui.text_edit_singleline(&mut proj.metadata.name);
+                                        ui.end_row();
+                                        
+                                        ui.label("Description:");
+                                        ui.text_edit_multiline(&mut proj.metadata.description);
+                                        ui.end_row();
+                                        
+                                        ui.label("Author:");
+                                        ui.text_edit_singleline(&mut proj.metadata.author);
+                                        ui.end_row();
+                                        
+                                        ui.label("Target Platform:");
+                                        egui::ComboBox::from_id_source("target_platform")
+                                            .selected_text(proj.metadata.target_platform.name())
+                                            .show_ui(ui, |ui| {
+                                                for platform in stfsc_engine::project::TargetPlatform::all() {
+                                                    ui.selectable_value(&mut proj.metadata.target_platform, platform, platform.name());
+                                                }
+                                            });
+                                        ui.end_row();
+                                        
+                                        ui.label("Created:");
+                                        ui.label(&proj.metadata.created_at);
+                                        ui.end_row();
+                                        
+                                        ui.label("Modified:");
+                                        ui.label(&proj.metadata.modified_at);
+                                        ui.end_row();
+                                    });
+                                    
+                                    ui.add_space(12.0);
+                                    ui.heading("Procedural Generation");
+                                    ui.add_space(4.0);
+                                    ui.checkbox(&mut proj.metadata.procedural_gen.enabled, "Enable Procedural Generation");
+                                    if proj.metadata.procedural_gen.enabled {
+                                        ui.add(egui::Slider::new(&mut proj.metadata.procedural_gen.seed, 0..=9999999).text("Seed"));
+                                        ui.add(egui::Slider::new(&mut proj.metadata.procedural_gen.density, 0.0..=1.0).text("Density"));
                                     }
-                                });
+                                }
+                                1 => {
+                                    // Build Tab
+                                    ui.heading("Build Configuration");
+                                    ui.add_space(4.0);
+                                    ui.label(format!("Configuring for: {}", proj.metadata.target_platform.name()));
+                                    ui.add_space(8.0);
+                                    
+                                    let platform = proj.metadata.target_platform;
+                                    let config = proj.metadata.build_configs
+                                        .entry(platform)
+                                        .or_insert_with(|| platform.default_build_config());
+                                    
+                                    egui::Grid::new("build_grid").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+                                        ui.label("Optimization:");
+                                        egui::ComboBox::from_id_source("opt_level")
+                                            .selected_text(config.optimization_level.name())
+                                            .show_ui(ui, |ui| {
+                                                for opt in stfsc_engine::project::OptLevel::all() {
+                                                    ui.selectable_value(&mut config.optimization_level, opt, opt.name());
+                                                }
+                                            });
+                                        ui.end_row();
+                                        
+                                        ui.label("Graphics Quality:");
+                                        egui::ComboBox::from_id_source("gfx_quality")
+                                            .selected_text(config.graphics_quality.name())
+                                            .show_ui(ui, |ui| {
+                                                for q in stfsc_engine::project::GraphicsQuality::all() {
+                                                    ui.selectable_value(&mut config.graphics_quality, q, q.name());
+                                                }
+                                            });
+                                        ui.end_row();
+                                        
+                                        ui.label("Target FPS:");
+                                        egui::ComboBox::from_id_source("target_fps")
+                                            .selected_text(format!("{} Hz", config.target_fps))
+                                            .show_ui(ui, |ui| {
+                                                for fps in [72, 90, 120] {
+                                                    ui.selectable_value(&mut config.target_fps, fps, format!("{} Hz", fps));
+                                                }
+                                            });
+                                        ui.end_row();
+                                    });
+                                    
+                                    ui.add_space(12.0);
+                                    ui.heading("VR Features");
+                                    ui.add_space(4.0);
+                                    ui.checkbox(&mut config.enable_hand_tracking, "Hand Tracking");
+                                    ui.checkbox(&mut config.enable_passthrough, "Passthrough (Mixed Reality)");
+                                    ui.checkbox(&mut config.enable_face_tracking, "Face Tracking");
+                                }
+                                2 => {
+                                    // Input Tab
+                                    ui.heading("Input Mappings");
+                                    ui.add_space(4.0);
+                                    ui.label("Configure VR controller action bindings:");
+                                    ui.add_space(8.0);
+                                    
+                                    let actions: Vec<String> = proj.metadata.input_mappings.actions.keys().cloned().collect();
+                                    for action_name in actions {
+                                        ui.collapsing(&action_name, |ui| {
+                                            if let Some(bindings) = proj.metadata.input_mappings.actions.get_mut(&action_name) {
+                                                for (i, binding) in bindings.iter_mut().enumerate() {
+                                                    ui.horizontal(|ui| {
+                                                        ui.checkbox(&mut binding.enabled, "");
+                                                        ui.label(format!("Binding {}: {:?}", i + 1, binding.source));
+                                                        ui.add(egui::Slider::new(&mut binding.threshold, 0.0..=1.0).text("Threshold"));
+                                                    });
+                                                }
+                                            }
+                                        });
+                                    }
+                                    
+                                    ui.add_space(8.0);
+                                    if ui.button("↻ Reset to Defaults").clicked() {
+                                        proj.metadata.input_mappings = stfsc_engine::project::InputMappings::default_vr_mappings();
+                                    }
+                                }
+                                3 => {
+                                    // Assets Tab
+                                    ui.heading("Asset Manifest");
+                                    ui.add_space(4.0);
+                                    
+                                    ui.horizontal(|ui| {
+                                        ui.label(format!("Total Assets: {}", proj.assets.total_count()));
+                                        ui.label(format!("Total Size: {}", stfsc_engine::project::format_bytes(proj.assets.total_size())));
+                                        if ui.button("🔄 Refresh").clicked() {
+                                            proj.refresh_assets();
+                                        }
+                                    });
+                                    ui.add_space(8.0);
+                                    
+                                    let asset_categories = [
+                                        ("🎨 Models", &proj.assets.models),
+                                        ("🖼 Textures", &proj.assets.textures),
+                                        ("🔊 Audio", &proj.assets.audio),
+                                        ("🎬 Scenes", &proj.assets.scenes),
+                                        ("📜 Scripts", &proj.assets.scripts),
+                                        ("🖥 UI Layouts", &proj.assets.ui_layouts),
+                                    ];
+                                    
+                                    for (label, assets) in asset_categories {
+                                        ui.collapsing(format!("{} ({})", label, assets.len()), |ui| {
+                                            for asset in assets {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(&asset.path);
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        ui.label(stfsc_engine::project::format_bytes(asset.size));
+                                                    });
+                                                });
+                                            }
+                                            if assets.is_empty() {
+                                                ui.label("(none)");
+                                            }
+                                        });
+                                    }
+                                }
+                                _ => {}
+                            }
                         });
                         
-                        ui.separator();
-                        ui.heading("Procedural Generation Settings");
-                        ui.checkbox(&mut proj.metadata.procedural_gen.enabled, "Enable Procedural Gen");
-                        ui.add(egui::Slider::new(&mut proj.metadata.procedural_gen.seed, 0..=9999999).text("Seed"));
-                        ui.add(egui::Slider::new(&mut proj.metadata.procedural_gen.density, 0.0..=1.0).text("Density"));
-                        
                         ui.add_space(8.0);
-                        if ui.button("Close").clicked() {
-                            self.show_project_settings = false;
-                        }
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("💾 Save").clicked() {
+                                if let Err(e) = proj.save() {
+                                    self.status = format!("Error saving project: {}", e);
+                                } else {
+                                    self.status = "Project saved".into();
+                                }
+                            }
+                            if ui.button("Close").clicked() {
+                                self.show_project_settings = false;
+                            }
+                        });
                     });
             } else {
                 self.show_project_settings = false;

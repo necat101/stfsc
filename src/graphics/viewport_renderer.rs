@@ -12,6 +12,7 @@ use std::ffi::CString;
 
 use super::GraphicsContext;
 use crate::world::{Mesh, Vertex};
+use eframe::egui::Color32;
 
 /// Handle to a GPU-uploaded mesh in the viewport renderer
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -115,7 +116,12 @@ pub struct ViewportRenderer {
     pub height: u32,
     
     // Pixel buffer for egui texture upload
-    pixels: Vec<u8>,
+    pixels: Vec<Color32>,
+    
+    // Persistently mapped pointers
+    instance_mapped: *mut GpuInstanceData,
+    bone_mapped: *mut Mat4,
+    staging_mapped: [*mut u8; 2],
     
     // Reference to graphics context
     pub graphics: Arc<GraphicsContext>,
@@ -244,9 +250,16 @@ impl ViewportRenderer {
         // 9. Allocate pixel buffer
         // Initialize with opaque sky blue for debugging visibility
         let pixel_count = (width * height) as usize;
-        let mut pixels = Vec::with_capacity(pixel_count * 4);
+        let mut pixels = Vec::with_capacity(pixel_count);
         for _ in 0..pixel_count {
-            pixels.extend_from_slice(&[82, 127, 175, 255]); // Sky blue, fully opaque
+            pixels.push(Color32::from_rgba_unmultiplied(82, 127, 175, 255)); // Sky blue, fully opaque
+        }
+        
+        let mut staging_mapped = [std::ptr::null_mut(); 2];
+        for i in 0..2 {
+             staging_mapped[i] = unsafe { 
+                 device.map_memory(staging_memories[i], 0, buffer_size, vk::MemoryMapFlags::empty())? as *mut u8
+             };
         }
         
         // 10. Create instance buffer
@@ -257,6 +270,9 @@ impl ViewportRenderer {
             vk::BufferUsageFlags::STORAGE_BUFFER,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
+        let instance_mapped = unsafe {
+            device.map_memory(instance_memory, 0, instance_buffer_size, vk::MemoryMapFlags::empty())? as *mut GpuInstanceData
+        };
         
         // 11. Create light uniform buffer (dummy for binding)
         let (light_buffer, light_memory) = graphics.create_buffer(
@@ -272,6 +288,9 @@ impl ViewportRenderer {
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
+        let bone_mapped = unsafe {
+            device.map_memory(bone_memory, 0, 8192, vk::MemoryMapFlags::empty())? as *mut Mat4
+        };
         
         // 12. Create descriptor sets
         let global_descriptor_set = graphics.create_global_descriptor_set(
@@ -442,11 +461,14 @@ impl ViewportRenderer {
             default_material_ds,
             instance_buffer,
             instance_memory,
+            instance_mapped,
             max_instances,
             light_buffer,
             light_memory,
             bone_buffer,
             bone_memory,
+            bone_mapped,
+            staging_mapped,
             // GPU Sharpening fields
             sharpening_amount: 0.0,
             post_color_image,
@@ -724,6 +746,9 @@ impl ViewportRenderer {
             )?;
             self.staging_buffers[i] = buf;
             self.staging_memories[i] = mem;
+            self.staging_mapped[i] = unsafe {
+                device.map_memory(mem, 0, buffer_size, vk::MemoryMapFlags::empty())? as *mut u8
+            };
             
             let fence_info = vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
             self.fences[i] = unsafe { device.create_fence(&fence_info, None)? };
@@ -748,9 +773,9 @@ impl ViewportRenderer {
         self.height = new_height;
         // Initialize with opaque sky blue for debugging visibility
         let pixel_count = (new_width * new_height) as usize;
-        self.pixels = Vec::with_capacity(pixel_count * 4);
+        self.pixels = Vec::with_capacity(pixel_count);
         for _ in 0..pixel_count {
-            self.pixels.extend_from_slice(&[82, 127, 175, 255]); // Sky blue, fully opaque
+            self.pixels.push(Color32::from_rgba_unmultiplied(82, 127, 175, 255)); // Sky blue, fully opaque
         }
         self.readback_pending = [false, false];
         self.current_frame = 0;
@@ -782,6 +807,7 @@ impl ViewportRenderer {
             device.free_memory(self.post_color_memory, None);
 
             for i in 0..2 {
+                device.unmap_memory(self.staging_memories[i]);
                 device.destroy_buffer(self.staging_buffers[i], None);
                 device.free_memory(self.staging_memories[i], None);
                 device.destroy_fence(self.fences[i], None);
@@ -796,7 +822,7 @@ impl ViewportRenderer {
 
     /// Render the scene and copy to CPU-accessible buffer
     /// Uses double-buffered async readback for high performance
-    pub fn render_and_readback(&mut self) -> Result<&mut [u8]> {
+    pub fn render_and_readback(&mut self) -> Result<&[Color32]> {
         let device = &self.graphics.device;
         
         // 1. ASYNC READBACK: Check if previous frame's copy is ready (NON-BLOCKING)
@@ -809,11 +835,8 @@ impl ViewportRenderer {
                     // Fence signaled - GPU finished, safe to read
                     // DO NOT reset fence here - the next frame that reuses this index will wait/reset it
                     
-                    // Copy result to CPU pixel buffer
-                    let buffer_size = (self.width * self.height * 4) as u64;
-                    let data_ptr = device.map_memory(self.staging_memories[prev_frame], 0, buffer_size, vk::MemoryMapFlags::empty())?;
-                    std::ptr::copy_nonoverlapping(data_ptr as *const u8, self.pixels.as_mut_ptr(), self.pixels.len());
-                    device.unmap_memory(self.staging_memories[prev_frame]);
+                    // Copy result to CPU pixel buffer using persistent mapping
+                    std::ptr::copy_nonoverlapping(self.staging_mapped[prev_frame], self.pixels.as_mut_ptr() as *mut u8, self.pixels.len() * 4);
                     self.readback_pending[prev_frame] = false;
                 }
                 // If fence not ready, skip - we'll use stale pixels (still valid from last frame)
@@ -848,10 +871,7 @@ impl ViewportRenderer {
                 });
             }
             unsafe {
-                let buffer_size = (std::mem::size_of::<GpuInstanceData>() * instance_count) as u64;
-                let data_ptr = device.map_memory(self.instance_memory, 0, buffer_size, vk::MemoryMapFlags::empty())? as *mut GpuInstanceData;
-                std::ptr::copy_nonoverlapping(instance_data.as_ptr(), data_ptr, instance_count);
-                device.unmap_memory(self.instance_memory);
+                std::ptr::copy_nonoverlapping(instance_data.as_ptr(), self.instance_mapped, instance_count);
             }
         }
         
@@ -910,15 +930,11 @@ impl ViewportRenderer {
                             device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, current_layout, 0, &[global_ds], &[]);
                         }
 
-                        // 2. Bone Matrix Upload (Simple per-instance upload)
-                        // Note: In a complex scene this should be batched or use dynamic offsets, 
-                        // but for the viewport/animator editor, usually one skinned mesh is active.
+                        // 2. Bone Matrix Upload (Using persistent mapping)
                         if let Some(joints) = &instance.joints {
-                            let bone_data_size = (std::mem::size_of::<Mat4>() * joints.len().min(128)) as u64;
-                            if bone_data_size > 0 {
-                                let data_ptr = device.map_memory(self.bone_memory, 0, bone_data_size, vk::MemoryMapFlags::empty())?;
-                                std::ptr::copy_nonoverlapping(joints.as_ptr(), data_ptr as *mut Mat4, joints.len().min(128));
-                                device.unmap_memory(self.bone_memory);
+                            let bone_count = joints.len().min(128);
+                            if bone_count > 0 {
+                                std::ptr::copy_nonoverlapping(joints.as_ptr(), self.bone_mapped, bone_count);
                             }
                         }
 
@@ -1010,12 +1026,8 @@ impl ViewportRenderer {
                 device.wait_for_fences(&[self.fences[self.current_frame]], true, u64::MAX)?;
                 // DO NOT reset fence here - let the start of the next frame using this index do it
                 
-                // Read back immediately
-                let buffer_size = (self.width * self.height * 4) as u64;
-                let current_staging = self.staging_buffers[self.current_frame];
-                let data_ptr = device.map_memory(self.staging_memories[self.current_frame], 0, buffer_size, vk::MemoryMapFlags::empty())?;
-                std::ptr::copy_nonoverlapping(data_ptr as *const u8, self.pixels.as_mut_ptr(), self.pixels.len());
-                device.unmap_memory(self.staging_memories[self.current_frame]);
+                // Read back immediately using persistent mapping
+                std::ptr::copy_nonoverlapping(self.staging_mapped[self.current_frame], self.pixels.as_mut_ptr() as *mut u8, self.pixels.len() * 4);
                 let _ = current_staging; // silence warning
             }
             self.readback_pending[self.current_frame] = false;
@@ -1027,7 +1039,7 @@ impl ViewportRenderer {
         // Clear pending instances for next frame
         self.pending_instances.clear();
         
-        Ok(&mut self.pixels)
+        Ok(&self.pixels)
     }
     
     /// Helper to transition image layout within command buffer
@@ -1122,10 +1134,12 @@ impl Drop for ViewportRenderer {
             device.destroy_sampler(self.post_sampler, None);
 
             device.destroy_command_pool(self.command_pool, None);
+            device.unmap_memory(self.instance_memory);
             device.destroy_buffer(self.instance_buffer, None);
             device.free_memory(self.instance_memory, None);
             device.destroy_buffer(self.light_buffer, None);
             device.free_memory(self.light_memory, None);
+            device.unmap_memory(self.bone_memory);
             device.destroy_buffer(self.bone_buffer, None);
             device.free_memory(self.bone_memory, None);
 
