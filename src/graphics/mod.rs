@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use ash::{vk, Device, Entry, Instance};
+#[cfg(target_os = "android")]
+use ash::vk::Handle;  // For as_raw/from_raw methods on vk types
 use glam;
 #[cfg(target_os = "android")]
 use openxr as xr;
@@ -7,6 +9,7 @@ use std::ffi::CString;
 
 pub mod occlusion;
 pub mod texture_streaming;
+#[cfg(not(target_os = "android"))]
 pub mod viewport_renderer;
 
 #[derive(Clone, Copy, Debug)]

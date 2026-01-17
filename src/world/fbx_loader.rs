@@ -265,6 +265,8 @@ pub struct ModelScene {
     pub skeleton: Option<Skeleton>,
     pub animations: Vec<AnimationClip>,
     pub textures: Vec<EmbeddedTexture>,
+    pub aabb_min: glam::Vec3,
+    pub aabb_max: glam::Vec3,
 }
 
 impl ModelScene {
@@ -275,19 +277,49 @@ impl ModelScene {
             skeleton: None,
             animations: Vec::new(),
             textures: Vec::new(),
+            aabb_min: glam::Vec3::splat(f32::MAX),
+            aabb_max: glam::Vec3::splat(f32::MIN),
         }
     }
     
     /// Create a ModelScene from an OBJ file (uses tobj, no skinning)
     pub fn from_obj_bytes(data: &[u8]) -> Result<Self> {
         let mesh = crate::world::load_obj_from_bytes(data)?;
+        let aabb_min = glam::Vec3::from(mesh.aabb_min);
+        let aabb_max = glam::Vec3::from(mesh.aabb_max);
         Ok(Self {
             meshes: vec![mesh],
             skinned_meshes: Vec::new(),
             skeleton: None,
             animations: Vec::new(),
             textures: Vec::new(),
+            aabb_min,
+            aabb_max,
         })
+    }
+
+    /// Recompute the bounding box of the entire scene based on all meshes
+    pub fn recompute_aabb(&mut self) {
+        let mut min = glam::Vec3::splat(f32::MAX);
+        let mut max = glam::Vec3::splat(f32::MIN);
+        let has_meshes = !self.meshes.is_empty() || !self.skinned_meshes.is_empty();
+
+        for mesh in &self.meshes {
+            min = min.min(glam::Vec3::from(mesh.aabb_min));
+            max = max.max(glam::Vec3::from(mesh.aabb_max));
+        }
+        for skinned in &self.skinned_meshes {
+            min = min.min(glam::Vec3::from(skinned.mesh.aabb_min));
+            max = max.max(glam::Vec3::from(skinned.mesh.aabb_max));
+        }
+
+        if has_meshes {
+            self.aabb_min = min;
+            self.aabb_max = max;
+        } else {
+            self.aabb_min = glam::Vec3::ZERO;
+            self.aabb_max = glam::Vec3::ZERO;
+        }
     }
 }
 

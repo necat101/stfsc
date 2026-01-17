@@ -250,371 +250,14 @@ impl Camera3D {
 // ============================================================================
 // PRIMITIVES LIBRARY (Unity-style)
 // ============================================================================
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
-enum PrimitiveType {
-    Cube,
-    Sphere,
-    Cylinder,
-    Plane,
-    Capsule,
-    Cone,
-}
+use stfsc_engine::project::scene::{PrimitiveType, Material, SceneEntity, EntityType, LightType as LightTypeEditor, NamedUiLayout, Scene};
 
-impl PrimitiveType {
-    fn all() -> Vec<PrimitiveType> {
-        vec![
-            PrimitiveType::Cube,
-            PrimitiveType::Sphere,
-            PrimitiveType::Cylinder,
-            PrimitiveType::Plane,
-            PrimitiveType::Capsule,
-            PrimitiveType::Cone,
-        ]
-    }
-    fn name(&self) -> &str {
-        match self {
-            PrimitiveType::Cube => "Cube",
-            PrimitiveType::Sphere => "Sphere",
-            PrimitiveType::Cylinder => "Cylinder",
-            PrimitiveType::Plane => "Plane",
-            PrimitiveType::Capsule => "Capsule",
-            PrimitiveType::Cone => "Cone",
-        }
-    }
-    fn icon(&self) -> &str {
-        match self {
-            PrimitiveType::Cube => "🟧",
-            PrimitiveType::Sphere => "⚪",
-            PrimitiveType::Cylinder => "🔷",
-            PrimitiveType::Plane => "▬",
-            PrimitiveType::Capsule => "💊",
-            PrimitiveType::Cone => "🔺",
-        }
-    }
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct Material {
-    name: String,
-    albedo_color: [f32; 3],
-    metallic: f32,
-    roughness: f32,
-    albedo_texture: Option<String>,
-    #[serde(skip)]
-    albedo_texture_data: Option<Vec<u8>>, // Raw texture bytes for deployment
-}
-impl Default for Material {
-    fn default() -> Self {
-        Self {
-            name: "Default".into(),
-            albedo_color: [0.8, 0.8, 0.8],
-            metallic: 0.0,
-            roughness: 0.5,
-            albedo_texture: None,
-            albedo_texture_data: None,
-        }
-    }
-}
+// Helper for default layer (if needed by editor logic, otherwise handled by serde in scene.rs)
+fn default_layer_editor() -> u32 { 0 }
 
 // ============================================================================
 // SCENE DATA
 // ============================================================================
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct SceneEntity {
-    id: u32,
-    name: String,
-    position: [f32; 3],
-    rotation: [f32; 4],
-    scale: [f32; 3],
-    entity_type: EntityType,
-    material: Material,
-    script: Option<String>,
-    #[serde(default)]
-    collision_enabled: bool,
-    #[serde(default = "default_layer")]
-    layer: u32,
-    #[serde(default)]
-    is_static: bool,  // If true, object is not affected by gravity
-    #[serde(default)]
-    animator_config: Option<stfsc_engine::world::animation::AnimatorConfig>,
-    #[serde(default)]
-    parent_id: Option<u32>,
-    #[serde(default = "default_fov")]
-    fov: f32,
-    #[serde(skip)]
-    deployed: bool,
-}
-
-fn default_fov() -> f32 {
-    0.785 // PI/4
-}
-
-fn default_layer() -> u32 {
-    LAYER_DEFAULT
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-enum EntityType {
-    Primitive(PrimitiveType),
-    Mesh {
-        path: String,
-    },
-    Vehicle,
-    CrowdAgent {
-        state: String,
-        speed: f32,
-    },
-    Building {
-        height: f32,
-    },
-    Ground,
-    Camera,
-    /// Dynamic light source
-    Light {
-        light_type: LightTypeEditor,
-        intensity: f32,
-        range: f32,
-        color: [f32; 3],
-    },
-    /// 3D Audio Source
-    AudioSource {
-        sound_id: String,
-        volume: f32,
-        looping: bool,
-        max_distance: f32,
-        #[serde(skip)] // Don't serialize large audio data
-        audio_data: Option<Vec<u8>>,
-    },
-}
-
-/// Light types for editor
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
-enum LightTypeEditor {
-    Point,
-    Spot,
-    Directional,
-}
-
-/// A named UI layout with a FuckScript alias for menu_load()
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
-struct NamedUiLayout {
-    /// Display name shown in tab
-    pub name: String,
-    /// Alias for menu_load("alias") in FuckScript
-    pub alias: String,
-    /// Layer type determines behavior (pause, input blocking, etc.)
-    #[serde(default)]
-    pub layer_type: stfsc_engine::ui::UiLayerType,
-    /// The actual UI layout
-    pub layout: stfsc_engine::ui::UiLayout,
-}
-
-impl Default for NamedUiLayout {
-    fn default() -> Self {
-        Self {
-            name: "Main".to_string(),
-            alias: "main".to_string(),
-            layer_type: stfsc_engine::ui::UiLayerType::InGameOverlay,
-            layout: stfsc_engine::ui::UiLayout::default(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-struct Scene {
-    name: String,
-    version: String,
-    entities: Vec<SceneEntity>,
-    respawn_enabled: bool,
-    respawn_y: f32,
-    /// Multiple named UI layouts with tabs
-    #[serde(default)]
-    pub ui_layouts: Vec<NamedUiLayout>,
-    /// Legacy single layout (for backwards compatibility on load)
-    #[serde(default, skip_serializing)]
-    #[allow(dead_code)]
-    pub ui_layout: stfsc_engine::ui::UiLayout,
-}
-
-impl Scene {
-    fn new(name: &str) -> Self {
-        Self {
-            name: name.into(),
-            version: "1.0".into(),
-            entities: Vec::new(),
-            respawn_enabled: false,
-            respawn_y: -20.0,
-            ui_layouts: vec![NamedUiLayout::default()],
-            ui_layout: stfsc_engine::ui::UiLayout::default(),
-        }
-    }
-    
-    /// Get current layout for editing (ensures at least one exists)
-    #[allow(dead_code)]
-    fn get_or_create_layout(&mut self, idx: usize) -> &mut NamedUiLayout {
-        if self.ui_layouts.is_empty() {
-            // Migrate legacy ui_layout if present
-            if !self.ui_layout.buttons.is_empty() || !self.ui_layout.panels.is_empty() || !self.ui_layout.texts.is_empty() {
-                self.ui_layouts.push(NamedUiLayout {
-                    name: "Main".to_string(),
-                    alias: "main".to_string(),
-                    layer_type: stfsc_engine::ui::UiLayerType::InGameOverlay,
-                    layout: std::mem::take(&mut self.ui_layout),
-                });
-            } else {
-                self.ui_layouts.push(NamedUiLayout::default());
-            }
-        }
-        let idx = idx.min(self.ui_layouts.len() - 1);
-        &mut self.ui_layouts[idx]
-    }
-
-    fn create_test_scene() -> Self {
-        let mut s = Scene::new("Test");
-        s.respawn_enabled = true;
-        s.respawn_y = -20.0;
-        let m = Material::default();
-
-        // Ground - positioned to match main.rs floor (avoiding z-fighting)
-        // main.rs floor is at Y=-1.1 with scale 200x2x200, top at Y=-0.1
-        // We position this slightly lower so they don't z-fight
-        s.entities.push(SceneEntity {
-            id: 1,
-            name: "Ground".into(),
-            position: [0.0, -1.1, 0.0],  // Lowered to match main.rs floor exactly (top at -0.1)
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [200.0, 2.0, 200.0],  // Match size with main.rs floor (200x200)
-            entity_type: EntityType::Ground,
-            material: m.clone(),
-            script: None,
-            collision_enabled: true,
-            layer: LAYER_ENVIRONMENT,
-            is_static: false,
-            animator_config: None,
-            parent_id: None,
-            fov: 0.785,
-            deployed: false,
-        });
-        // Physics Cube
-        s.entities.push(SceneEntity {
-            id: 2,
-            name: "Physics Cube".into(),
-            position: [0.0, 10.0, -5.0],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [1.0, 1.0, 1.0],
-            entity_type: EntityType::Primitive(PrimitiveType::Cube),
-            material: Material {
-                albedo_color: [1.0, 0.5, 0.2],
-                ..m.clone()
-            },
-            script: None,
-            collision_enabled: true,
-            layer: LAYER_PROP,
-            is_static: false,
-            animator_config: None,
-            parent_id: None,
-            fov: 0.785,
-            deployed: false,
-        });
-        // Vehicle
-        s.entities.push(SceneEntity {
-            id: 3,
-            name: "Vehicle".into(),
-            position: [5.0, 2.0, -8.0],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [2.0, 1.0, 4.0],
-            entity_type: EntityType::Vehicle,
-            material: m.clone(),
-            script: Some("Vehicle".into()),
-            collision_enabled: true,
-            layer: LAYER_VEHICLE,
-            is_static: false,
-            animator_config: None,
-            parent_id: None,
-            fov: 0.785,
-            deployed: false,
-        });
-        // Agents
-        for i in 0..8 {
-            let (state, speed, color) = if i < 2 {
-                ("Fleeing", 8.0, [1.0, 0.2, 0.2])
-            } else if i < 4 {
-                ("Running", 5.0, [0.2, 1.0, 0.2])
-            } else {
-                ("Walking", 2.0, [1.0, 1.0, 1.0])
-            };
-            s.entities.push(SceneEntity {
-                id: 100 + i,
-                name: format!("Agent {} ({})", i, state),
-                position: [(i as f32 - 4.0) * 5.0, 1.0, -15.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [0.5, 1.8, 0.5],
-                entity_type: EntityType::CrowdAgent {
-                    state: state.into(),
-                    speed,
-                },
-                material: Material {
-                    albedo_color: color,
-                    ..m.clone()
-                },
-                script: Some("CrowdAgent".into()),
-                collision_enabled: false,
-                layer: LAYER_CHARACTER,
-                is_static: false,
-                animator_config: None,
-                parent_id: None,
-                fov: 0.785,
-                deployed: false,
-            });
-        }
-        // Buildings
-        for i in 0..4 {
-            let h = 8.0 + (i as f32) * 5.0;
-            s.entities.push(SceneEntity {
-                id: 200 + i,
-                name: format!("Building {}", i + 1),
-                position: [25.0 + (i as f32) * 12.0, h / 2.0, -40.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [6.0, h, 6.0],
-                entity_type: EntityType::Building { height: h },
-                material: Material {
-                    albedo_color: [1.0, 0.5, 0.2],
-                    ..m.clone()
-                },
-                script: None,
-                collision_enabled: false,
-                layer: LAYER_ENVIRONMENT,
-                is_static: true,  // Buildings are static by default
-                animator_config: None,
-                parent_id: None,
-                fov: 0.785,
-                deployed: false,
-            });
-        }
-        // Player Start - required for correct spawn position
-        s.entities.push(SceneEntity {
-            id: 0,
-            name: "Player Start".into(),
-            position: [0.0, 1.7, 0.0],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [0.5, 0.5, 0.5],
-            entity_type: EntityType::Camera,
-            material: Material {
-                albedo_color: [0.3, 0.3, 1.0],
-                ..m
-            },
-            script: None,
-            collision_enabled: false,
-            layer: LAYER_DEFAULT,
-            is_static: true,
-            animator_config: None,
-            parent_id: None,
-            fov: 0.785,
-            deployed: false,
-        });
-        s
-    }
-}
 
 enum AppCommand {
     Connect(String),
@@ -700,6 +343,19 @@ enum EditorView {
     #[default]
     SceneEditor,
     AnimationEditor,
+}
+
+/// Messages from async export thread
+#[derive(Debug)]
+enum ExportMessage {
+    /// Progress update with status message
+    Progress(String),
+    /// Export completed successfully
+    Complete { platform: String, output_path: String },
+    /// Export failed with error
+    Error(String),
+    /// All exports done
+    Done,
 }
 
 /// State for the animation editor
@@ -809,6 +465,20 @@ struct EditorApp {
     show_project_settings: bool,
     project_settings_tab: usize, // 0=General, 1=Build, 2=Input, 3=Assets
     recent_projects: stfsc_engine::project::RecentProjects,
+
+    // Project Export
+    show_export_dialog: bool,
+    export_target_linux: bool,
+    export_target_quest3: bool,
+    export_target_quest_pro: bool,
+    export_output_dir: String,
+    export_opt_level: stfsc_engine::project::OptLevel,
+    export_in_progress: bool,
+    export_log: String,
+    export_error: Option<String>,
+    /// Receiver for async export progress/completion
+    export_receiver: Option<std::sync::mpsc::Receiver<ExportMessage>>,
+
 
     // Model import
     show_import_model_dialog: bool,         // Show import model file browser
@@ -1022,6 +692,18 @@ impl EditorApp {
             show_project_settings: false,
             project_settings_tab: 0,
             recent_projects: stfsc_engine::project::RecentProjects::load(),
+
+            // Export dialog
+            show_export_dialog: false,
+            export_target_linux: true,
+            export_target_quest3: true,
+            export_target_quest_pro: false,
+            export_output_dir: String::new(),
+            export_opt_level: stfsc_engine::project::OptLevel::Release,
+            export_in_progress: false,
+            export_log: String::new(),
+            export_error: None,
+            export_receiver: None,
         }
     }
 
@@ -1274,6 +956,36 @@ impl EditorApp {
         }
     }
 
+    /// Save both project metadata and current scene content
+    fn save_everything(&mut self) -> Result<(), String> {
+        let mut save_items = Vec::new();
+
+        // 1. Save Scene
+        if let Some(path) = self.current_scene_path.clone() {
+            self.save_scene_to_path(&path)?;
+            save_items.push("Scene");
+        } else if let Some(scene) = &self.current_scene {
+            let path = format!("scenes/{}.json", scene.name.to_lowercase().replace(" ", "_"));
+            self.save_scene_to_path(&path)?;
+            save_items.push("Scene");
+        }
+
+        // 2. Save Project metadata
+        if let Some(proj) = &mut self.current_project {
+            if let Some(path) = &self.current_scene_path {
+                proj.metadata.startup_scene = Some(path.clone());
+            }
+            proj.save().map_err(|e| format!("Project error: {}", e))?;
+            save_items.push("Project Metadata");
+        }
+
+        if !save_items.is_empty() {
+            self.status = format!("Full Save Complete: {}", save_items.join(" + "));
+        }
+        
+        Ok(())
+    }
+
     /// Load a scene from the specified file path
     fn load_scene_from_path(&mut self, ctx: &egui::Context, path: &str) -> Result<(), String> {
         let absolute_path = if let Some(proj) = &self.current_project {
@@ -1345,6 +1057,41 @@ impl EditorApp {
         self.add_to_recent(path);
         self.status = format!("Loaded: {}", path);
         Ok(())
+    }
+
+    /// Apply a loaded project to the editor and load its startup scene
+    fn apply_loaded_project(&mut self, ctx: &egui::Context, proj: stfsc_engine::project::Project) {
+        let name = proj.metadata.name.clone();
+        let startup_scene = proj.metadata.startup_scene.clone();
+        
+        self.current_project = Some(proj);
+        self.status = format!("Loaded Project: {}", name);
+        
+        // Refresh scenes and models
+        self.scan_scene_files();
+        self.scenes = self.open_scene_files.iter()
+            .map(|p| std::path::Path::new(p).file_stem().unwrap().to_string_lossy().to_string())
+            .collect();
+        
+        // Load the startup scene or the first available scene
+        let scene_to_load = if let Some(path) = startup_scene {
+            Some(path)
+        } else if !self.open_scene_files.is_empty() {
+            Some(self.open_scene_files[0].clone())
+        } else {
+            None
+        };
+        
+        if let Some(path) = scene_to_load {
+            if let Err(e) = self.load_scene_from_path(ctx, &path) {
+                self.status = format!("Project loaded, but error loading scene: {}", e);
+            } else {
+                // Update selected index in the scene list
+                if let Some(idx) = self.open_scene_files.iter().position(|p| p == &path) {
+                    self.selected_scene_idx = Some(idx);
+                }
+            }
+        }
     }
 
     /// Scan the scenes directory for .json files
@@ -2296,7 +2043,7 @@ impl EditorApp {
             }
         }
 
-        if response.drag_released() {
+        if response.drag_stopped() {
             // Push undo for move if entity position changed
             if let (Some(start_entity), Some(drag_id)) = (self.drag_start_entity.take(), self.dragging_id) {
                 if let Some(scene) = &self.current_scene {
@@ -2383,7 +2130,7 @@ impl EditorApp {
         }
 
         // Zoom
-        let scroll = ui.input(|i| i.scroll_delta.y);
+        let scroll = ui.input(|i| i.raw_scroll_delta.y);
         self.camera.distance = (self.camera.distance - scroll * 1.5).clamp(0.1, 1000.0);
 
         // Try GPU-accelerated rendering for High quality mode
@@ -3790,7 +3537,7 @@ impl EditorApp {
             }
             
             // Handle scroll to zoom
-            let scroll = ui.input(|i| i.scroll_delta.y);
+            let scroll = ui.input(|i| i.raw_scroll_delta.y);
             if scroll != 0.0 && response.hovered() {
                 state.timeline_zoom = (state.timeline_zoom + scroll * 0.01).clamp(0.5, 5.0);
             }
@@ -4114,24 +3861,7 @@ impl eframe::App for EditorApp {
                                     self.recent_projects.add(&name, &path_str);
                                     let _ = self.recent_projects.save();
                                     
-                                    self.current_project = Some(proj);
-                                    self.status = format!("Loaded Project: {}", name);
-                                    
-                                    // Refresh scenes and models
-                                    self.scan_scene_files();
-                                    self.scenes = self.open_scene_files.iter()
-                                        .map(|p| std::path::Path::new(p).file_stem().unwrap().to_string_lossy().to_string())
-                                        .collect();
-                                    
-                                    // Select and load the first scene if available
-                                    if !self.open_scene_files.is_empty() {
-                                        let first_scene_path = self.open_scene_files[0].clone();
-                                        if let Err(e) = self.load_scene_from_path(ctx, &first_scene_path) {
-                                            self.status = format!("Project loaded, but error loading scene: {}", e);
-                                        } else {
-                                            self.selected_scene_idx = Some(0);
-                                        }
-                                    }
+                                    self.apply_loaded_project(ctx, proj);
                                 }
                                 Err(e) => self.status = format!("Error loading project: {}", e),
                             }
@@ -4149,26 +3879,9 @@ impl eframe::App for EditorApp {
                                     let path = std::path::PathBuf::from(&recent.path);
                                     match stfsc_engine::project::Project::load(path) {
                                         Ok(proj) => {
-                                            let name = proj.metadata.name.clone();
-                                            self.recent_projects.add(&name, &recent.path);
+                                            self.recent_projects.add(&proj.metadata.name, &recent.path);
                                             let _ = self.recent_projects.save();
-                                            
-                                            self.current_project = Some(proj);
-                                            self.status = format!("Loaded Project: {}", name);
-                                            
-                                            self.scan_scene_files();
-                                            self.scenes = self.open_scene_files.iter()
-                                                .map(|p| std::path::Path::new(p).file_stem().unwrap().to_string_lossy().to_string())
-                                                .collect();
-                                            
-                                            if !self.open_scene_files.is_empty() {
-                                                let first_scene_path = self.open_scene_files[0].clone();
-                                                if let Err(e) = self.load_scene_from_path(ctx, &first_scene_path) {
-                                                    self.status = format!("Project loaded, but error loading scene: {}", e);
-                                                } else {
-                                                    self.selected_scene_idx = Some(0);
-                                                }
-                                            }
+                                            self.apply_loaded_project(ctx, proj);
                                         }
                                         Err(e) => {
                                             self.status = format!("Error loading project: {}", e);
@@ -4189,6 +3902,8 @@ impl eframe::App for EditorApp {
                         });
                     }
                     
+                    let mut do_save_everything = false;
+                    
                     if let Some(proj) = &mut self.current_project {
                         ui.separator();
                         if ui.button("⚙ Project Settings").clicked() {
@@ -4202,13 +3917,59 @@ impl eframe::App for EditorApp {
                             ui.close_menu();
                         }
                         if ui.button("💾 Save Project").clicked() {
-                            if let Err(e) = proj.save() {
-                                self.status = format!("Error saving project: {}", e);
-                            } else {
-                                self.status = "Project saved".into();
-                            }
+                            do_save_everything = true;
+                        }
+                        ui.separator();
+                        if ui.button("📦 Export Project...").clicked() {
+                            // Set default export directory to project's exports folder
+                            self.export_output_dir = proj.root_path.join("exports").to_string_lossy().to_string();
+                            self.show_export_dialog = true;
+                            self.export_in_progress = false;
+                            self.export_log.clear();
+                            self.export_error = None;
                             ui.close_menu();
                         }
+                    }
+                    
+                    if do_save_everything {
+                        if let Err(e) = self.save_everything() {
+                            self.status = format!("Error saving: {}", e);
+                        }
+                        ui.close_menu();
+                    }
+                });
+
+                // Build Menu - Always visible for discoverability
+                ui.menu_button("Build", |ui| {
+                    let has_project = self.current_project.is_some();
+                    
+                    if ui.add_enabled(has_project, egui::Button::new("📦 Export Project...")).clicked() {
+                        if let Some(proj) = &self.current_project {
+                            self.export_output_dir = proj.root_path.join("exports").to_string_lossy().to_string();
+                        }
+                        self.show_export_dialog = true;
+                        self.export_in_progress = false;
+                        self.export_log.clear();
+                        self.export_error = None;
+                        ui.close_menu();
+                    }
+                    
+                    ui.separator();
+                    ui.label("Quick Build (CLI):");
+                    
+                    if ui.button("🐧 Build Linux").clicked() {
+                        self.status = "Run ./build_engine.sh linux in terminal".into();
+                        ui.close_menu();
+                    }
+                    if ui.button("🥽 Build Quest APK").clicked() {
+                        self.status = "Run ./build_engine.sh quest in terminal".into();
+                        ui.close_menu();
+                    }
+                    
+                    if !has_project {
+                        ui.separator();
+                        ui.label("💡 Create or open a project");
+                        ui.label("    to enable Export");
                     }
                 });
 
@@ -5584,38 +5345,25 @@ impl eframe::App for EditorApp {
                             } else {
                                 // Add to recent projects
                                 let path_str = root.to_string_lossy().to_string();
-                                self.recent_projects.add(&self.new_project_name, &path_str);
-                                let _ = self.recent_projects.save();
-                                
-                                self.current_project = Some(proj);
-                                
-                                // Create and save a default test scene in the new project
-                                let mut test_scene = Scene::create_test_scene();
-                                test_scene.name = "Main".to_string();
-                                self.current_scene = Some(test_scene);
-                                
-                                // Ensure the path is relative to project root
-                                let scene_path = "scenes/main.json";
-                                if let Err(e) = self.save_scene_to_path(scene_path) {
-                                    self.status = format!("Project created, but failed to save default scene: {}", e);
-                                } else {
-                                    self.status = format!("Created Project: {}", self.new_project_name);
-                                }
-                                
-                                self.show_new_project_dialog = false;
-                                self.scan_scene_files();
-                                self.scenes = self.open_scene_files.iter()
-                                    .map(|p| std::path::Path::new(p).file_stem().unwrap().to_string_lossy().to_string())
-                                    .collect();
-                                
-                                // Select "Main" scene if it was created
-                                if let Some(idx) = self.scenes.iter().position(|s| s == "Main") {
-                                    self.selected_scene_idx = Some(idx);
-                                } else {
-                                    self.selected_scene_idx = if self.scenes.is_empty() { None } else { Some(0) };
-                                }
-                            }
-                        }
+                                 self.recent_projects.add(&self.new_project_name, &path_str);
+                                 let _ = self.recent_projects.save();
+                                 
+                                 // Create a default test scene in the new project
+                                 let mut test_scene = Scene::create_test_scene();
+                                 test_scene.name = "Main".to_string();
+                                 let scene_json = serde_json::to_string_pretty(&test_scene).unwrap_or_default();
+                                 let scene_path = root.join("scenes/main.json");
+                                 let _ = std::fs::create_dir_all(scene_path.parent().unwrap());
+                                 let _ = std::fs::write(&scene_path, scene_json);
+                                 
+                                 // Set this as startup scene
+                                 proj.metadata.startup_scene = Some("scenes/main.json".to_string());
+                                 let _ = proj.save();
+
+                                 self.apply_loaded_project(ctx, proj);
+                                 self.show_new_project_dialog = false;
+                             }
+                         }
                         if ui.button("Cancel").clicked() {
                             self.show_new_project_dialog = false;
                         }
@@ -5624,6 +5372,7 @@ impl eframe::App for EditorApp {
         }
 
         // Project Settings Dialog (Tabbed)
+        let mut do_save_everything = false;
         if self.show_project_settings {
             if let Some(proj) = &mut self.current_project {
                 egui::Window::new("Project Settings")
@@ -5642,18 +5391,10 @@ impl eframe::App for EditorApp {
                         
                         // Tab bar
                         ui.horizontal(|ui| {
-                            if ui.selectable_label(self.project_settings_tab == 0, "📋 General").clicked() {
-                                self.project_settings_tab = 0;
-                            }
-                            if ui.selectable_label(self.project_settings_tab == 1, "🔧 Build").clicked() {
-                                self.project_settings_tab = 1;
-                            }
-                            if ui.selectable_label(self.project_settings_tab == 2, "🎮 Input").clicked() {
-                                self.project_settings_tab = 2;
-                            }
-                            if ui.selectable_label(self.project_settings_tab == 3, "📦 Assets").clicked() {
-                                self.project_settings_tab = 3;
-                            }
+                            ui.selectable_value(&mut self.project_settings_tab, 0, "General");
+                            ui.selectable_value(&mut self.project_settings_tab, 1, "Build");
+                            ui.selectable_value(&mut self.project_settings_tab, 2, "Input");
+                            ui.selectable_value(&mut self.project_settings_tab, 3, "Assets");
                         });
                         ui.separator();
                         
@@ -5830,11 +5571,7 @@ impl eframe::App for EditorApp {
                         ui.separator();
                         ui.horizontal(|ui| {
                             if ui.button("💾 Save").clicked() {
-                                if let Err(e) = proj.save() {
-                                    self.status = format!("Error saving project: {}", e);
-                                } else {
-                                    self.status = "Project saved".into();
-                                }
+                                do_save_everything = true;
                             }
                             if ui.button("Close").clicked() {
                                 self.show_project_settings = false;
@@ -5844,6 +5581,240 @@ impl eframe::App for EditorApp {
             } else {
                 self.show_project_settings = false;
             }
+        }
+        
+        if do_save_everything {
+            if let Err(e) = self.save_everything() {
+                self.status = format!("Error: {}", e);
+            }
+        }
+
+        // Export Project Dialog
+        if self.show_export_dialog {
+            // Poll for export messages from background thread
+            if let Some(ref rx) = self.export_receiver {
+                while let Ok(msg) = rx.try_recv() {
+                    match msg {
+                        ExportMessage::Progress(text) => {
+                            self.export_log.push_str(&text);
+                            self.export_log.push('\n');
+                            // Update status with last line
+                            if let Some(line) = text.lines().last() {
+                                self.status = line.to_string();
+                            }
+                        }
+                        ExportMessage::Complete { platform, output_path } => {
+                            self.export_log.push_str(&format!("✅ {} export complete: {}\n", platform, output_path));
+                            self.status = format!("✅ {} export complete", platform);
+                        }
+                        ExportMessage::Error(err) => {
+                            self.export_error = Some(err.clone());
+                            self.export_log.push_str(&format!("❌ Error: {}\n", err));
+                            self.status = format!("❌ Export failed: {}", err);
+                        }
+                        ExportMessage::Done => {
+                            self.export_in_progress = false;
+                            if self.export_error.is_none() {
+                                self.status = "✅ All exports complete!".into();
+                            }
+                        }
+                    }
+                }
+            }
+            
+            egui::Window::new("📦 Export Project")
+                .collapsible(false)
+                .resizable(true)
+                .min_width(500.0)
+                .min_height(350.0)
+                .show(ctx, |ui| {
+                    if let Some(proj) = &self.current_project {
+                        ui.heading(&proj.metadata.name);
+                        ui.add_space(8.0);
+                        
+                        // Target platforms
+                        ui.heading("Target Platforms");
+                        ui.add_space(4.0);
+                        ui.checkbox(&mut self.export_target_linux, "🐧 Linux Desktop");
+                        ui.checkbox(&mut self.export_target_quest3, "🥽 Meta Quest 3");
+                        ui.checkbox(&mut self.export_target_quest_pro, "🥽 Meta Quest Pro");
+                        
+                        ui.add_space(12.0);
+                        
+                        // Output directory
+                        ui.heading("Output");
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Directory:");
+                            ui.text_edit_singleline(&mut self.export_output_dir);
+                            if ui.button("...").clicked() {
+                                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                    self.export_output_dir = path.to_string_lossy().to_string();
+                                }
+                            }
+                        });
+                        
+                        ui.add_space(12.0);
+                        
+                        // Build settings
+                        ui.heading("Build Settings");
+                        ui.add_space(4.0);
+                        egui::ComboBox::from_id_source("export_opt_level")
+                            .selected_text(self.export_opt_level.name())
+                            .show_ui(ui, |ui| {
+                                for opt in stfsc_engine::project::OptLevel::all() {
+                                    ui.selectable_value(&mut self.export_opt_level, opt, opt.name());
+                                }
+                            });
+                        
+                        // Build time warning
+                        match self.export_opt_level {
+                            stfsc_engine::project::OptLevel::Debug => {
+                                ui.label("⚡ Fast build, larger binary, debug symbols");
+                            }
+                            stfsc_engine::project::OptLevel::Release => {
+                                ui.label("⚖️ Recommended - good optimization, reasonable build time");
+                            }
+                            stfsc_engine::project::OptLevel::ReleaseLTO => {
+                                ui.colored_label(egui::Color32::YELLOW, 
+                                    "⚠️ LTO: Very slow build (30+ min), maximum optimization");
+                                ui.label("    Consider using Release for testing");
+                            }
+                        }
+                        
+                        ui.add_space(16.0);
+                        ui.separator();
+                        
+                        // Export log
+                        if !self.export_log.is_empty() || self.export_error.is_some() {
+                            ui.collapsing("Build Log", |ui| {
+                                egui::ScrollArea::vertical()
+                                    .max_height(150.0)
+                                    .show(ui, |ui| {
+                                        ui.add(egui::TextEdit::multiline(&mut self.export_log.as_str())
+                                            .font(egui::TextStyle::Monospace)
+                                            .desired_width(f32::INFINITY));
+                                    });
+                            });
+                            if let Some(ref err) = self.export_error {
+                                ui.colored_label(egui::Color32::RED, format!("❌ Error: {}", err));
+                            }
+                        }
+                        
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            let can_export = !self.export_in_progress && 
+                                (self.export_target_linux || self.export_target_quest3 || self.export_target_quest_pro);
+                            
+                            if ui.add_enabled(can_export, egui::Button::new("🚀 Export")).clicked() {
+                                self.export_in_progress = true;
+                                self.export_log.clear();
+                                self.export_error = None;
+                                self.status = "Starting export...".into();
+                                
+                                // Create channel for progress updates
+                                let (tx, rx) = std::sync::mpsc::channel();
+                                self.export_receiver = Some(rx);
+                                
+                                // Clone data needed for background thread
+                                let engine_root = std::env::current_dir().unwrap_or_default();
+                                let output_dir = std::path::PathBuf::from(&self.export_output_dir);
+                                let opt_level = self.export_opt_level;
+                                let target_linux = self.export_target_linux;
+                                let target_quest3 = self.export_target_quest3;
+                                let target_quest_pro = self.export_target_quest_pro;
+                                
+                                // Clone project data for thread
+                                let project_clone = proj.clone();
+                                
+                                // Spawn background export thread with streaming output
+                                std::thread::spawn(move || {
+                                    let exporter = stfsc_engine::project::export::ProjectExporter::new(
+                                        engine_root,
+                                        output_dir,
+                                    );
+                                    
+                                    // Create a separate channel for streaming cargo output
+                                    let (stream_tx, stream_rx) = std::sync::mpsc::channel::<String>();
+                                    
+                                    // Forward streaming output to main channel
+                                    let tx_clone = tx.clone();
+                                    std::thread::spawn(move || {
+                                        while let Ok(line) = stream_rx.recv() {
+                                            let _ = tx_clone.send(ExportMessage::Progress(line));
+                                        }
+                                    });
+                                    
+                                    let mut had_error = false;
+                                    
+                                    if target_linux && !had_error {
+                                        let result = exporter.export_with_sender(
+                                            &project_clone, 
+                                            stfsc_engine::project::TargetPlatform::Linux, 
+                                            opt_level,
+                                            &stream_tx
+                                        );
+                                        if result.success {
+                                            let _ = tx.send(ExportMessage::Complete {
+                                                platform: "Linux".into(),
+                                                output_path: result.output_path.display().to_string(),
+                                            });
+                                        } else {
+                                            let _ = tx.send(ExportMessage::Error(result.error.unwrap_or_else(|| "Unknown error".into())));
+                                            had_error = true;
+                                        }
+                                    }
+                                    
+                                    if target_quest3 && !had_error {
+                                        let result = exporter.export_with_sender(
+                                            &project_clone, 
+                                            stfsc_engine::project::TargetPlatform::Quest3, 
+                                            opt_level,
+                                            &stream_tx
+                                        );
+                                        if result.success {
+                                            let _ = tx.send(ExportMessage::Complete {
+                                                platform: "Quest 3".into(),
+                                                output_path: result.output_path.display().to_string(),
+                                            });
+                                        } else {
+                                            let _ = tx.send(ExportMessage::Error(result.error.unwrap_or_else(|| "Unknown error".into())));
+                                            had_error = true;
+                                        }
+                                    }
+                                    
+                                    if target_quest_pro && !had_error {
+                                        let result = exporter.export_with_sender(
+                                            &project_clone, 
+                                            stfsc_engine::project::TargetPlatform::QuestPro, 
+                                            opt_level,
+                                            &stream_tx
+                                        );
+                                        if result.success {
+                                            let _ = tx.send(ExportMessage::Complete {
+                                                platform: "Quest Pro".into(),
+                                                output_path: result.output_path.display().to_string(),
+                                            });
+                                        } else {
+                                            let _ = tx.send(ExportMessage::Error(result.error.unwrap_or_else(|| "Unknown error".into())));
+                                        }
+                                    }
+                                    
+                                    let _ = tx.send(ExportMessage::Done);
+                                });
+                            }
+                            
+                            if ui.button("Cancel").clicked() {
+                                self.show_export_dialog = false;
+                            }
+                        });
+                    } else {
+                        ui.label("No project loaded.");
+                        if ui.button("Close").clicked() {
+                            self.show_export_dialog = false;
+                        }
+                    }
+                });
         }
 
         // Open Scene Dialog
@@ -6462,7 +6433,7 @@ impl eframe::App for EditorApp {
                             }
 
                             // Push undo on drag release
-                            if response.drag_released() {
+                            if response.drag_stopped() {
                                 if let (Some(before), Some(etype), Some(id), Some(scene)) = (self.ui_drag_start_element.take(), &self.selected_ui_element_type, self.selected_ui_id, &mut self.current_scene) {
                                     if let Some(nl) = scene.ui_layouts.get(self.selected_layout_idx) {
                                         let after = match etype.as_str() {
@@ -6531,7 +6502,7 @@ impl eframe::App for EditorApp {
                                                     (txt.color[2] * 255.0) as u8, (txt.color[3] * 255.0) as u8,
                                                 );
                                                 let galley = painter.layout_no_wrap(txt.content.clone(), egui::FontId::proportional(txt.font_size * scale), txt_color);
-                                                painter.galley(child_pos, galley);
+                                                painter.galley(child_pos, galley, egui::Color32::WHITE);
                                             }
                                         }
                                     }
@@ -6556,7 +6527,7 @@ impl eframe::App for EditorApp {
                                     );
                                     let galley = painter.layout_no_wrap(text.content.clone(), egui::FontId::proportional(text.font_size * scale), color);
                                     let text_rect = egui::Rect::from_min_size(pos, galley.size());
-                                    painter.galley(pos, galley);
+                                    painter.galley(pos, galley, egui::Color32::WHITE);
                                     if self.selected_ui_id == Some(i as u32) && self.selected_ui_element_type.as_deref() == Some("Text") {
                                         painter.rect_stroke(text_rect, 0.0, egui::Stroke::new(1.0, egui::Color32::YELLOW));
                                     }

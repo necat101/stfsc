@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod bundle;
 pub mod graphics;
 pub mod lighting;
 pub mod physics;
@@ -12,7 +13,7 @@ use ash::vk;
 #[cfg(target_os = "android")]
 use hecs::Entity;
 #[cfg(target_os = "android")]
-use log::{error, info};
+use log::{info, warn, error};
 #[cfg(target_os = "android")]
 use std::collections::{HashMap, HashSet};
 #[cfg(target_os = "android")]
@@ -20,10 +21,10 @@ use std::sync::{Arc, RwLock};
 #[cfg(target_os = "android")]
 use graphics::{GpuMesh, GraphicsContext, InstanceData, Texture};
 #[cfg(target_os = "android")]
-use world::GameWorld;
+use world::{GameWorld, DecodedImage};
 
 #[cfg(target_os = "android")]
-use resource_loader::{ResourceLoader, ResourceLoadRequest, ResourceLoadResult};
+use resource_loader::{ResourceLoader, ResourceLoadResult};
 #[cfg(target_os = "android")]
 use android_activity::{AndroidApp, MainEvent, PollEvent};
 #[cfg(target_os = "android")]
@@ -36,7 +37,13 @@ use xr::XrContext;
 use oxr::{Duration, EventDataBuffer, SessionState, ViewConfigurationType};
 
 #[cfg(target_os = "android")]
-use graphics::occlusion::{OcclusionCuller, AABB};
+use graphics::occlusion::OcclusionCuller;
+
+// Physics imports for Android VR runtime
+#[cfg(target_os = "android")]
+use physics::PhysicsWorld;
+#[cfg(target_os = "android")]
+use rapier3d::prelude::{point, vector, Ray, QueryFilter};
 
 // GpuMesh and InstanceData moved to graphics/mod.rs
 
@@ -354,6 +361,8 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             uv: [0.0, 0.0],
             color: [0.0, 0.0, 0.0],
             tangent: [0.0, 0.0, 0.0, 0.0],
+            bone_indices: [0, 0, 0, 0],
+            bone_weights: [0.0, 0.0, 0.0, 0.0],
         },
         world::Vertex {
             position: [1.0, -1.0, 1.0],
@@ -361,6 +370,8 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             uv: [0.0, 0.0],
             color: [0.0, 0.0, 0.0],
             tangent: [0.0, 0.0, 0.0, 0.0],
+            bone_indices: [0, 0, 0, 0],
+            bone_weights: [0.0, 0.0, 0.0, 0.0],
         },
         world::Vertex {
             position: [1.0, 1.0, 1.0],
@@ -368,6 +379,8 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             uv: [0.0, 0.0],
             color: [0.0, 0.0, 0.0],
             tangent: [0.0, 0.0, 0.0, 0.0],
+            bone_indices: [0, 0, 0, 0],
+            bone_weights: [0.0, 0.0, 0.0, 0.0],
         },
         world::Vertex {
             position: [-1.0, 1.0, 1.0],
@@ -375,6 +388,8 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             uv: [0.0, 0.0],
             color: [0.0, 0.0, 0.0],
             tangent: [0.0, 0.0, 0.0, 0.0],
+            bone_indices: [0, 0, 0, 0],
+            bone_weights: [0.0, 0.0, 0.0, 0.0],
         },
         world::Vertex {
             position: [-1.0, -1.0, -1.0],
@@ -382,6 +397,8 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             uv: [0.0, 0.0],
             color: [0.0, 0.0, 0.0],
             tangent: [0.0, 0.0, 0.0, 0.0],
+            bone_indices: [0, 0, 0, 0],
+            bone_weights: [0.0, 0.0, 0.0, 0.0],
         },
         world::Vertex {
             position: [1.0, -1.0, -1.0],
@@ -389,6 +406,8 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             uv: [0.0, 0.0],
             color: [0.0, 0.0, 0.0],
             tangent: [0.0, 0.0, 0.0, 0.0],
+            bone_indices: [0, 0, 0, 0],
+            bone_weights: [0.0, 0.0, 0.0, 0.0],
         },
         world::Vertex {
             position: [1.0, 1.0, -1.0],
@@ -396,6 +415,8 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             uv: [0.0, 0.0],
             color: [0.0, 0.0, 0.0],
             tangent: [0.0, 0.0, 0.0, 0.0],
+            bone_indices: [0, 0, 0, 0],
+            bone_weights: [0.0, 0.0, 0.0, 0.0],
         },
         world::Vertex {
             position: [-1.0, 1.0, -1.0],
@@ -403,6 +424,8 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             uv: [0.0, 0.0],
             color: [0.0, 0.0, 0.0],
             tangent: [0.0, 0.0, 0.0, 0.0],
+            bone_indices: [0, 0, 0, 0],
+            bone_weights: [0.0, 0.0, 0.0, 0.0],
         },
     ];
     let skybox_indices = [
@@ -484,7 +507,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
         world::Player,
     ));
 
-    let _cmd_tx = game_world.command_sender.clone();
+    let cmd_tx = game_world.command_sender.clone();
 
     // Shared State
     struct GameState {
@@ -504,85 +527,243 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
     }));
 
     // =========================================================================
-    // DEMO SCENE - DISABLED
-    // The editor now controls scene content. Deploy "Test Engine Scene" from
-    // editor via File > Test Engine Scene, then Scene > Deploy All to Quest
+    // LOADER: Bundle & Scene (Quest/Android)
     // =========================================================================
-    // To re-enable: uncomment the block below
-    /*
-    // Spawn a Test Physics Block
+    #[cfg(target_os = "android")]
     {
+        info!("Initializing Android Bundle Loader...");
+        // Import Bundle & Scene types
+        use crate::bundle::BundledProject;
+        use crate::project::scene::{Scene, EntityType, PrimitiveType};
+        use crate::world::gltf_loader;
+        use crate::world::fbx_loader;
+        
+        // Load bundle from APK assets
+        let mut bundled_project = BundledProject::new();
+        let am = app.asset_manager();
+        info!("Loading bundle from AssetManager...");
+        bundled_project.load_with_asset_manager(&am);
+        info!("Bundle loaded. Assets: {}, Scenes: {}", bundled_project.assets.len(), bundled_project.scene_data.len());
+
+        // Apply to Game World
         if let Ok(mut state) = game_state.write() {
-             // 1. Create Rigid Body
-             let handle = state.physics.add_box_rigid_body([0.0, 10.0, -8.0], [0.5, 0.5, 0.5], true);
-             state.physics.add_box_rigid_body([0.0, -2.0, 0.0], [100.0, 1.0, 100.0], false); // Ground Plane
+             // Find a scene to load
+             let scene_key = bundled_project.scene_data.keys()
+                 .find(|k| k.contains(".json"))
+                 .cloned();
+                 
+             if let Some(key) = scene_key {
+                 info!("Found scene: {}", key);
+                 if let Some(data) = bundled_project.scene_data.get(&key) {
+                     if let Ok(scene) = serde_json::from_slice::<Scene>(data) {
+                         info!("Deserialized scene: {} ({} entities)", scene.name, scene.entities.len());
+                         
+                         for entity_data in scene.entities {
+                             let pos = glam::Vec3::from(entity_data.position);
+                             let rot = glam::Quat::from_array(entity_data.rotation);
+                             let scale = glam::Vec3::from(entity_data.scale);
+                             
+                             info!("Processing entity: {} ({:?})", entity_data.name, entity_data.entity_type);
 
-             // 2. Create Entity
-             state.world.ecs.spawn((
-                 world::Transform {
-                     position: glam::Vec3::new(0.0, 10.0, -8.0),
-                     rotation: glam::Quat::IDENTITY,
-                     scale: glam::Vec3::ONE,
-                 },
-                 world::MeshHandle(0),
-                 world::RigidBodyHandle(handle),
-             ));
-             info!("Spawned Physics Test Cube + Ground");
+                             match entity_data.entity_type {
+                                 EntityType::Mesh { path } => {
+                                     // Check if we have the asset
+                                     if let Some(mesh_bytes) = bundled_project.assets.get(&path) {
+                                         // Load Model
+                                         let model_res = if path.ends_with(".glb") || path.ends_with(".gltf") {
+                                             gltf_loader::load_gltf_with_animations(mesh_bytes)
+                                         } else {
+                                              // Fallback / OBJ
+                                              crate::world::load_obj_from_bytes(mesh_bytes)
+                                                  .map(|m| crate::world::fbx_loader::ModelScene { meshes: vec![m], ..Default::default() })
+                                         };
+                                         
+                                         match model_res {
+                                             Ok(model) => {
+                                                 if let Some(mesh) = fbx_loader::model_to_mesh(&model) {
+                                                     let mat = crate::world::Material {
+                                                         color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                                         roughness: entity_data.material.roughness,
+                                                         metallic: entity_data.material.metallic,
+                                                         ..Default::default()
+                                                     };
+                                                     let entity = state.world.ecs.spawn((
+                                                         crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                                         mat,
+                                                     ));
+                                                     resource_loader.queue_mesh(entity, mesh);
+                                                     info!("Queued mesh upload for entity {:?}", entity);
+                                                 }
+                                             }
+                                             Err(e) => error!("Failed to load model {}: {:?}", path, e),
+                                         }
+                                     } else {
+                                         warn!("Asset not found in bundle: {}", path);
+                                     }
+                                 }
+                                 EntityType::Primitive(pt) => {
+                                     let material = crate::world::Material {
+                                         color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                         roughness: entity_data.material.roughness,
+                                         metallic: entity_data.material.metallic,
+                                         ..Default::default()
+                                     };
+                                     
+                                     // Map PrimitiveType to handle
+                                     let handle = match pt {
+                                         PrimitiveType::Cube => 0,
+                                         PrimitiveType::Sphere => 1,
+                                         PrimitiveType::Cylinder => 2,
+                                         PrimitiveType::Plane => 3,
+                                         PrimitiveType::Capsule => 4,
+                                         PrimitiveType::Cone => 5,
+                                     };
 
-             // 3. Spawn Test Vehicle
-             let veh_handle = state.physics.add_box_rigid_body([5.0, 2.0, -8.0], [1.0, 0.5, 2.0], true);
-             state.world.ecs.spawn((
-                 world::Transform {
-                     position: glam::Vec3::new(5.0, 2.0, -8.0),
-                     rotation: glam::Quat::IDENTITY,
-                     scale: glam::Vec3::ONE,
-                 },
-                 world::MeshHandle(0), // Re-use cube mesh for now
-                 world::RigidBodyHandle(veh_handle),
-                 world::Vehicle { speed: 10.0, max_speed: 30.0, steering: 0.0, accelerating: true },
-             ));
-
-             info!("Spawned Test Vehicle");
-
-             // 4. Spawn Crowd (50 Agents)
-             let mut seed: u32 = 999;
-             let mut rand = || {
-                 seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-                 (seed as f32) / (u32::MAX as f32)
-             };
-             for i in 0..50 {
-                 let x = (rand() - 0.5) * 40.0;
-                 let z = (rand() - 0.5) * 40.0;
-
-                 // Some agents are fleeing (10% of them) for demo
-                 let (agent_state, max_speed) = if i < 5 {
-                     (world::AgentState::Fleeing, 8.0)  // Fast runners
-                 } else if i < 15 {
-                     (world::AgentState::Running, 5.0)  // Jogging
-                 } else {
-                     (world::AgentState::Walking, 2.0)  // Normal walking
-                 };
-
-                 state.world.ecs.spawn((
-                     world::Transform {
-                         position: glam::Vec3::new(x, 1.0, z),
-                         rotation: glam::Quat::IDENTITY,
-                         scale: glam::Vec3::new(0.3, 1.7, 0.3), // Human-ish scale
-                     },
-                     world::MeshHandle(0),
-                     world::CrowdAgent {
-                         velocity: glam::Vec3::ZERO,
-                         target: glam::Vec3::new((rand() - 0.5) * 40.0, 1.0, (rand() - 0.5) * 40.0),
-                         state: agent_state,
-                         max_speed,
+                                     state.world.ecs.spawn((
+                                         crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                         crate::world::MeshHandle(handle), 
+                                         material,
+                                     ));
+                                 }
+                                 EntityType::Camera => {
+                                     state.world.player_start_transform.position = pos;
+                                     state.world.player_start_transform.rotation = rot;
+                                 }
+                                 EntityType::Light { light_type, color, intensity, range } => {
+                                      // Spawn Light
+                                      let engine_light_type = match light_type {
+                                          crate::project::scene::LightType::Point => crate::lighting::LightType::Point,
+                                          crate::project::scene::LightType::Spot => crate::lighting::LightType::Spot,
+                                          crate::project::scene::LightType::Directional => crate::lighting::LightType::Directional,
+                                      };
+                                      
+                                      state.world.ecs.spawn((
+                                          crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                          crate::lighting::Light {
+                                              light_type: engine_light_type,
+                                              color: glam::Vec3::from(color),
+                                              intensity,
+                                              range,
+                                              ..Default::default()
+                                          }
+                                      ));
+                                 }
+                                 EntityType::Ground => {
+                                     let material = crate::world::Material {
+                                         color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                         roughness: entity_data.material.roughness,
+                                         metallic: entity_data.material.metallic,
+                                         ..Default::default()
+                                     };
+                                     state.world.ecs.spawn((
+                                         crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                         crate::world::MeshHandle(3), // Plane
+                                         material,
+                                     ));
+                                 }
+                                 EntityType::Building { height: _ } => {
+                                     let material = crate::world::Material {
+                                         color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                         roughness: entity_data.material.roughness,
+                                         metallic: entity_data.material.metallic,
+                                         ..Default::default()
+                                     };
+                                     state.world.ecs.spawn((
+                                         crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                         crate::world::MeshHandle(0), // Cube
+                                         material,
+                                     ));
+                                 }
+                                 _ => {}
+                             }
+                         }
+                     } else {
+                         error!("Failed to deserialize scene JSON");
                      }
-                 ));
+                 }
+             } else {
+                 info!("No JSON scene found in bundle - falling back to Test Scene");
+                 let scene = Scene::create_test_scene();
+                 for entity_data in scene.entities {
+                     let pos = glam::Vec3::from(entity_data.position);
+                     let rot = glam::Quat::from_array(entity_data.rotation);
+                     let scale = glam::Vec3::from(entity_data.scale);
+                     
+                     match entity_data.entity_type {
+                         EntityType::Camera => {
+                             state.world.player_start_transform.position = pos;
+                             state.world.player_start_transform.rotation = rot;
+                         }
+                         EntityType::Primitive(pt) => {
+                             let material = crate::world::Material {
+                                 color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                 roughness: entity_data.material.roughness,
+                                 metallic: entity_data.material.metallic,
+                                 ..Default::default()
+                             };
+                             let handle = match pt {
+                                 PrimitiveType::Cube => 0,
+                                 PrimitiveType::Sphere => 1,
+                                 PrimitiveType::Cylinder => 2,
+                                 PrimitiveType::Plane => 3,
+                                 PrimitiveType::Capsule => 4,
+                                 PrimitiveType::Cone => 5,
+                             };
+                             state.world.ecs.spawn((
+                                 crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                 crate::world::MeshHandle(handle), 
+                                 material,
+                             ));
+                         }
+                         EntityType::Light { light_type, color, intensity, range } => {
+                             let engine_light_type = match light_type {
+                                 crate::project::scene::LightType::Point => crate::lighting::LightType::Point,
+                                 crate::project::scene::LightType::Spot => crate::lighting::LightType::Spot,
+                                 crate::project::scene::LightType::Directional => crate::lighting::LightType::Directional,
+                             };
+                             state.world.ecs.spawn((
+                                 crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                 crate::lighting::Light {
+                                     light_type: engine_light_type,
+                                     color: glam::Vec3::from(color),
+                                     intensity,
+                                     range,
+                                     ..Default::default()
+                                 }
+                             ));
+                         }
+                         EntityType::Ground => {
+                             let material = crate::world::Material {
+                                 color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                 roughness: entity_data.material.roughness,
+                                 metallic: entity_data.material.metallic,
+                                 ..Default::default()
+                             };
+                             state.world.ecs.spawn((
+                                 crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                 crate::world::MeshHandle(3),
+                                 material,
+                             ));
+                         }
+                         EntityType::Building { height: _ } => {
+                             let material = crate::world::Material {
+                                 color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                 roughness: entity_data.material.roughness,
+                                 metallic: entity_data.material.metallic,
+                                 ..Default::default()
+                             };
+                             state.world.ecs.spawn((
+                                 crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                 crate::world::MeshHandle(0),
+                                 material,
+                             ));
+                         }
+                         _ => {}
+                     }
+                 }
              }
-             info!("Spawned 50 Crowd Agents (5 Fleeing, 10 Running, 35 Walking)");
         }
     }
-    */
-    info!("Quest started with empty scene - deploy from editor");
 
     // Game Loop Thread
     let game_state_thread = game_state.clone();
@@ -606,18 +787,22 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             // ===== PHASE 2: World Streaming (short lock) =====
             {
                 if let Ok(mut state) = game_state_thread.try_write() {
-                    let player_pos = state.player_position;
+                    let state_ref = &mut *state;
+                    let player_pos = state_ref.player_position;
                     
                     // Sync player entity transform
-                    let player_ent = state.player_entity;
-                    if let Ok(mut t) = state.world.ecs.get::<&mut world::Transform>(player_ent) {
+                    let player_ent = state_ref.player_entity;
+                    if let Ok(mut t) = state_ref.world.ecs.get::<&mut world::Transform>(player_ent) {
                         t.position = player_pos;
                     }
 
-                    state.world.update_streaming(player_pos, &mut state.physics);
+                    let world = &mut state_ref.world;
+                    let physics = &mut state_ref.physics;
                     
-                    let ui_events = std::mem::take(&mut state.world.pending_ui_events);
-                    state.world.update_logic(&mut state.physics, 0.016, ui_events);
+                    world.update_streaming(player_pos, physics);
+                    
+                    let ui_events = std::mem::take(&mut world.pending_ui_events);
+                    world.update_logic(physics, 0.016, ui_events);
                 }
             }
             // Yield to render thread
@@ -695,7 +880,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
 
                 // Process each vehicle with short lock
                 for (speed, body_handle) in vehicle_data {
-                    if let Ok(mut state) = game_state_thread.try_write() {
+                    if let Ok(state) = game_state_thread.try_write() {
                         let ray_result = {
                             if let Some(body) = state.physics.rigid_body_set.get(body_handle) {
                                 let position = body.translation();
@@ -745,6 +930,9 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             // ===== PHASE 5: Crowd Logic (legacy removed, now handled by scripts) =====
             
             frame_count += 1;
+            if frame_count % 100 == 0 {
+                info!("Game loop frame: {}", frame_count);
+            }
             let elapsed = start.elapsed();
             // Target 36Hz (approx 27.77ms) for AppSW
             // We run physics/logic at 36fps and let AppSW synthesize the rest to 72Hz
@@ -836,7 +1024,12 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                         primitive: 0,
                                         position: [0.0; 3],
                                         rotation: [0.0; 4],
+                                        scale: [1.0, 1.0, 1.0],
                                         color: [1.0, 0.0, 1.0],
+                                        albedo_texture: None,
+                                        collision_enabled: false,
+                                        layer: 0,
+                                        is_static: true,
                                     } // Error sentinel
                                 });
 
@@ -1103,7 +1296,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                     }
                     // info!("frame_stream.begin succeeded");
 
-                    let mut layers: Vec<&oxr::CompositionLayerBase<oxr::Vulkan>> = Vec::new();
+                    // let mut layers: Vec<oxr::CompositionLayerBase<'_, oxr::Vulkan>> = Vec::new();
                     let projection_views: Vec<oxr::CompositionLayerProjectionView<oxr::Vulkan>>;
                     let projection_layer_storage: Option<
                         oxr::CompositionLayerProjection<oxr::Vulkan>,
@@ -1217,7 +1410,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                                 Ok(c_path) => {
                                                     match app.asset_manager().open(&c_path) {
                                                         Some(mut asset) => {
-                                                            if let Ok(bytes) = asset.get_buffer() {
+                                                            if let Ok(bytes) = asset.buffer() {
                                                                 // Decodes using rodio in audio module
                                                                 audio_system.load_buffer_from_bytes(
                                                                     bytes.to_vec(),
@@ -1253,7 +1446,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                                                         asset_manager.open(&c_path)
                                                                     {
                                                                         if let Ok(bytes) =
-                                                                            asset.get_buffer()
+                                                                            asset.buffer()
                                                                         {
                                                                             // Decode
                                                                             let cursor = std::io::Cursor::new(bytes.to_vec());
@@ -1595,13 +1788,18 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                     }
 
                                     // 4. Collect Dynamic Lights (no sorting - prevents flicker)
-                                    let light_ubo = collect_light_ubo(&state.world.ecs);
+                                    let mut light_ubo = lighting::LightUBO::new();
+                                    for (_id, (light, transform)) in state.world.ecs.query::<(&lighting::Light, &world::Transform)>().iter() {
+                                        let forward = transform.rotation * glam::Vec3::NEG_Z;
+                                        let gpu_light = lighting::GpuLightData::from_light(light, transform.position, forward, -1);
+                                        light_ubo.add_light(gpu_light);
+                                    }
 
                                     // Update light buffer on GPU
                                     *light_ptr = light_ubo;
 
                                     // FIX: Prune prev_transforms to avoid memory leak
-                                    let current_entities: HashSet<u64> = state.world.ecs.iter().map(|(e, _)| e.id() as u64).collect();
+                                    let current_entities: HashSet<u64> = state.world.ecs.iter().map(|e| e.entity().id() as u64).collect();
                                     prev_transforms.retain(|id, _| current_entities.contains(id));
 
                                     // Update cache for next potential lock failure
@@ -2193,7 +2391,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                     .views(&projection_views),
                             );
 
-                            layers.push(projection_layer_storage.as_ref().unwrap());
+                            // layers.push(projection_layer_storage.as_ref().unwrap().into());
                         } else {
                             projection_layer_storage = None;
                         }

@@ -175,6 +175,8 @@ pub fn load_gltf_with_animations(data: &[u8]) -> Result<ModelScene> {
         scene.textures.len()
     );
     
+    scene.recompute_aabb(); // Pre-calculate global AABB for editor
+    
     Ok(scene)
 }
 

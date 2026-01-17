@@ -1,4 +1,4 @@
-use shaderc;
+// build.rs - STFSC Engine build script
 use std::env;
 use std::path::Path;
 
@@ -45,44 +45,26 @@ fn main() {
             }
         }
     }
-    // Compile Shaders
-    let compiler = shaderc::Compiler::new().unwrap();
-    let options = shaderc::CompileOptions::new().unwrap();
-
+    // Copy pre-compiled SPIR-V shaders to OUT_DIR
+    // Shaders are pre-compiled and stored as .spv files in src/graphics/
+    // Naming convention in repo: shader_type.spv (e.g., vert_vert.spv)
+    // Required naming for include_bytes!: shader.type.spv (e.g., vert.vert.spv)
     let src_dir = Path::new("src/graphics");
-    // Output SPIR-V to OUT_DIR so shaders can be included with include_bytes!
     let out_dir = env::var("OUT_DIR").unwrap();
     let out_path = Path::new(&out_dir);
 
     if src_dir.exists() {
         println!("cargo:rerun-if-changed=src/graphics");
+        
         for entry in std::fs::read_dir(src_dir).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
-            if let Some(ext) = path.extension() {
-                let shader_kind = if ext == "vert" {
-                    shaderc::ShaderKind::Vertex
-                } else if ext == "frag" {
-                    shaderc::ShaderKind::Fragment
-                } else {
-                    continue;
-                };
-
-                let src = std::fs::read_to_string(&path).unwrap();
-                let binary_result = compiler
-                    .compile_into_spirv(
-                        &src,
-                        shader_kind,
-                        path.file_name().unwrap().to_str().unwrap(),
-                        "main",
-                        Some(&options),
-                    )
-                    .unwrap();
-
-                // Use dot naming: vert.vert -> vert.vert.spv (to match include_bytes! paths)
-                let filename = path.file_name().unwrap().to_str().unwrap();
-                let out_name = format!("{}.spv", filename);
-                std::fs::write(out_path.join(&out_name), binary_result.as_binary_u8()).unwrap();
+            let filename = path.file_name().unwrap().to_str().unwrap();
+            
+            if filename.ends_with(".spv") {
+                // Convert underscore naming to dot naming: vert_vert.spv -> vert.vert.spv
+                let out_name = filename.replace("_", ".");
+                std::fs::copy(&path, out_path.join(&out_name)).unwrap();
             }
         }
     }

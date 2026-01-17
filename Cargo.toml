@@ -16,10 +16,12 @@ log = "0.4"
 env_logger = "0.10"
 
 # Graphics (Vulkan via Ash)
-ash = { version = "0.37" }
+ash = "0.37"
 ash-window = "0.12"
 raw-window-handle = "0.5"
 
+# Pin transitive dependencies for Rust 1.84 compatibility
+async-lock = "=3.4.0"
 
 # Math & Physics
 glam = { version = "0.24", features = ["bytemuck", "serde"] }
@@ -30,34 +32,37 @@ rapier3d = { version = "0.18", features = ["simd-stable", "parallel"] }
 serde = { version = "1.0", features = ["derive"] }
 bincode = "1.3"
 serde_json = "1.0"  # Scene file serialization
-bytemuck = "1.14"
+bytemuck = { version = "1.14", features = ["derive"] }
 image = "0.24"
 ktx2 = "0.3.0"
 
 # ECS
-# ECS
 hecs = "0.10"
 rand = "0.8"
 rayon = "1.8"  # Parallel iteration for game logic
-eframe = "0.24"
 home = "=0.5.9"
 tobj = "3.2"
-rfd = { version = "0.12", default-features = false, features = ["xdg-portal"] } # Use portal to avoid GTK/glib dependency
-# glTF parsing done manually via serde_json to avoid dependency conflicts
-# glTF loading: Use Blender to export as custom binary format until gltf crate compatibility is resolved
-# Model loading via tobj (OBJ format) - FBX files should be converted to OBJ
-winit = { version = "0.29", features = ["rwh_05"] }
+
+# Audio (cross-platform)
 rodio = "0.17"  # Audio playback (requires alsa-lib-devel on Fedora)
 fontdue = "0.8"  # Lightweight font rasterization for UI text
 
+# Desktop-only dependencies (Linux/Windows/macOS)
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = "0.27"
+rfd = { version = "0.12", default-features = false, features = ["xdg-portal"] }
+smithay-clipboard = "=0.7.2"
+winit = { version = "0.29", features = ["rwh_05"] }
 
+# Android-only dependencies
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.13"
-ndk = "0.7"
+ndk = "0.8"
 ndk-context = "0.1"
 jni = "0.21"
-android-activity = { version = "0.4", features = ["native-activity"] }
+android-activity = { version = "0.5", features = ["native-activity"] }
 openxr = { version = "0.18", features = ["linked"] }
+winit = { version = "0.29", features = ["rwh_05", "android-native-activity"] }
 
 
 [package.metadata.android]
@@ -138,6 +143,6 @@ key_password = "android"
 lto = "thin"
 opt-level = 3
 codegen-units = 1
-[build-dependencies]
-shaderc = "0.9"
 
+# Note: Shaders are pre-compiled to .spv and copied by build.rs
+# To recompile shaders, use: glslc shader.vert -o shader.vert.spv

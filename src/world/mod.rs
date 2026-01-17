@@ -165,7 +165,7 @@ pub struct DecodedImage {
     pub data: Vec<u8>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Material {
     pub color: [f32; 4],
     pub albedo_texture: Option<String>,  // Texture ID for custom albedo texture

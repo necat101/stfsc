@@ -29,7 +29,7 @@ layout(push_constant) uniform PushConstants {
 } pushConstants;
 
 // Dynamic Lighting - Maximum lights for mobile VR
-const int MAX_LIGHTS = 256;
+const int MAX_LIGHTS = 32;
 
 // GPU Light data structure (matches Rust GpuLightData)
 struct LightData {

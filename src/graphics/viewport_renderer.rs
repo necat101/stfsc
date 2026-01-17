@@ -2,6 +2,10 @@
 //! 
 //! This module provides GPU-accelerated rendering to a texture that can be
 //! displayed in egui, replacing the software rasterizer.
+//!
+//! This module is only available on desktop platforms (not Android).
+
+#![cfg(not(target_os = "android"))]
 
 use anyhow::{Context, Result};
 use ash::vk;

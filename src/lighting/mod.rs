@@ -142,7 +142,7 @@ pub struct LightUBO {
 }
 
 /// Maximum lights supported (optimized for Quest 3 mobile GPU)
-pub const MAX_LIGHTS: usize = 256;
+pub const MAX_LIGHTS: usize = 32;
 
 impl Default for LightUBO {
     fn default() -> Self {
