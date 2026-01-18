@@ -625,10 +625,11 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                          material,
                                      ));
                                  }
-                                 EntityType::Camera => {
-                                     state.world.player_start_transform.position = pos;
-                                     state.world.player_start_transform.rotation = rot;
-                                 }
+                                  EntityType::Camera => {
+                                      state.world.player_start_transform.position = pos;
+                                      // Add 180 degree flip around Y to face +Z (Downtown)
+                                      state.world.player_start_transform.rotation = rot * glam::Quat::from_rotation_y(std::f32::consts::PI);
+                                  }
                                  EntityType::Light { light_type, color, intensity, range } => {
                                       // Spawn Light
                                       let engine_light_type = match light_type {
@@ -690,10 +691,11 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                      let scale = glam::Vec3::from(entity_data.scale);
                      
                      match entity_data.entity_type {
-                         EntityType::Camera => {
-                             state.world.player_start_transform.position = pos;
-                             state.world.player_start_transform.rotation = rot;
-                         }
+                          EntityType::Camera => {
+                              state.world.player_start_transform.position = pos;
+                              // Add 180 degree flip around Y to face +Z (Downtown)
+                              state.world.player_start_transform.rotation = rot * glam::Quat::from_rotation_y(std::f32::consts::PI);
+                          }
                          EntityType::Primitive(pt) => {
                              let material = crate::world::Material {
                                  color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
@@ -843,7 +845,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             }
             // Apply physics updates with short write lock
             if !physics_updates.is_empty() {
-                if let Ok(mut state) = game_state_thread.try_write() {
+                if let Ok(state) = game_state_thread.try_write() {
                     for (id, pos, rot) in physics_updates {
                         if let Ok(mut transform) = state.world.ecs.get::<&mut world::Transform>(id)
                         {
@@ -880,7 +882,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
 
                 // Process each vehicle with short lock
                 for (speed, body_handle) in vehicle_data {
-                    if let Ok(state) = game_state_thread.try_write() {
+                    if let Ok(mut state) = game_state_thread.try_write() {
                         let ray_result = {
                             if let Some(body) = state.physics.rigid_body_set.get(body_handle) {
                                 let position = body.translation();
@@ -2396,178 +2398,19 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                             projection_layer_storage = None;
                         }
 
-                        // AppSW Layer Chaining
-                        let mut space_warp_layer_info = if projection_layer_storage.is_some() {
-                            // Enable AppSW by chaining XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB
-                            let motion_sub_image = oxr::sys::SwapchainSubImage {
-                                swapchain: xr_context.motion_swapchain.as_raw(),
-                                image_rect: oxr::sys::Rect2Di {
-                                    offset: oxr::sys::Offset2Di { x: 0, y: 0 },
-                                    extent: oxr::sys::Extent2Di {
-                                        width: xr_context.resolution.width as i32,
-                                        height: xr_context.resolution.height as i32,
-                                    },
-                                },
-                                image_array_index: 0,
-                            };
-
-                            let depth_sub_image = oxr::sys::SwapchainSubImage {
-                                swapchain: xr_context.depth_swapchain.as_raw(),
-                                image_rect: oxr::sys::Rect2Di {
-                                    offset: oxr::sys::Offset2Di { x: 0, y: 0 },
-                                    extent: oxr::sys::Extent2Di {
-                                        width: xr_context.resolution.width as i32,
-                                        height: xr_context.resolution.height as i32,
-                                    },
-                                },
-                                image_array_index: 0,
-                            };
-
-                            let info = CompositionLayerSpaceWarpInfoFB {
-                                ty: oxr::StructureType::from_raw(1000171000), // XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB
-                                next: std::ptr::null(),
-                                layer_flags: 0,
-                                motion_vector_sub_image: motion_sub_image,
-                                app_space_delta_pose: oxr::sys::Posef {
-                                    orientation: oxr::sys::Quaternionf {
-                                        x: 0.0,
-                                        y: 0.0,
-                                        z: 0.0,
-                                        w: 1.0,
-                                    },
-                                    position: oxr::sys::Vector3f {
-                                        x: 0.0,
-                                        y: 0.0,
-                                        z: 0.0,
-                                    },
-                                },
-                                depth_sub_image: depth_sub_image,
-                                min_depth: 0.0,
-                                max_depth: 1.0,
-                                near_z: 0.01,
-                                far_z: 100.0,
-                            };
-                            Some(info)
-                        } else {
-                            None
-                        };
-
-                        let mut layers_ptrs: Vec<*const oxr::sys::CompositionLayerBaseHeader> =
-                            Vec::new();
-
-                        // Reconstruct CompositionLayerProjection as sys type to chain
-                        let projection_layer_sys = if projection_layer_storage.is_some() {
-                            // Iterate over ORIGINAL views to get data
-                            let sys_views: Vec<oxr::sys::CompositionLayerProjectionView> = views
-                                .iter()
-                                .enumerate()
-                                .map(|(i, view)| {
-                                    // Re-normalize (or duplicate logic)
-                                    let q = view.pose.orientation;
-                                    let len =
-                                        (q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w).sqrt();
-                                    let normalized_pose = if len > 0.0001 {
-                                        oxr::sys::Posef {
-                                            orientation: oxr::sys::Quaternionf {
-                                                x: q.x / len,
-                                                y: q.y / len,
-                                                z: q.z / len,
-                                                w: q.w / len,
-                                            },
-                                            position: oxr::sys::Vector3f {
-                                                x: view.pose.position.x,
-                                                y: view.pose.position.y,
-                                                z: view.pose.position.z,
-                                            },
-                                        }
-                                    } else {
-                                        oxr::sys::Posef {
-                                            orientation: oxr::sys::Quaternionf {
-                                                x: 0.0,
-                                                y: 0.0,
-                                                z: 0.0,
-                                                w: 1.0,
-                                            },
-                                            position: oxr::sys::Vector3f {
-                                                x: view.pose.position.x,
-                                                y: view.pose.position.y,
-                                                z: view.pose.position.z,
-                                            },
-                                        }
-                                    };
-
-                                    oxr::sys::CompositionLayerProjectionView {
-                                        ty: oxr::StructureType::COMPOSITION_LAYER_PROJECTION_VIEW,
-                                        next: std::ptr::null(),
-                                        pose: normalized_pose,
-                                        fov: oxr::sys::Fovf {
-                                            angle_left: view.fov.angle_left,
-                                            angle_right: view.fov.angle_right,
-                                            angle_up: view.fov.angle_up,
-                                            angle_down: view.fov.angle_down,
-                                        },
-                                        sub_image: oxr::sys::SwapchainSubImage {
-                                            swapchain: xr_context.swapchain.as_raw(),
-                                            image_rect: oxr::sys::Rect2Di {
-                                                offset: oxr::sys::Offset2Di { x: 0, y: 0 },
-                                                extent: oxr::sys::Extent2Di {
-                                                    width: xr_context.resolution.width as i32,
-                                                    height: xr_context.resolution.height as i32,
-                                                },
-                                            },
-                                            image_array_index: i as u32,
-                                        },
-                                    }
-                                })
-                                .collect();
-
-                            let mut sys_layer = oxr::sys::CompositionLayerProjection {
-                                ty: oxr::StructureType::COMPOSITION_LAYER_PROJECTION,
-                                next: std::ptr::null(),
-                                layer_flags: oxr::sys::CompositionLayerFlags::EMPTY,
-                                space: xr_context.stage_space.as_raw(),
-                                view_count: sys_views.len() as u32,
-                                views: sys_views.as_ptr(),
-                            };
-
-                            // Chain it!
-                            if let Some(ref mut info) = space_warp_layer_info {
-                                sys_layer.next = info as *mut _ as *const _;
-                            }
-
-                            Some((sys_layer, sys_views)) // Keep views alive!
-                        } else {
-                            None
-                        };
-
-                        if let Some((ref sys_layer, _)) = projection_layer_sys {
-                            layers_ptrs.push(
-                                sys_layer as *const _
-                                    as *const oxr::sys::CompositionLayerBaseHeader,
-                            );
+                        // Safe OpenXR Frame Submission (replaces low-level AppSW sys calls)
+                        let mut layers: Vec<&oxr::CompositionLayerBase<oxr::Vulkan>> = Vec::new();
+                        if let Some(ref proj_layer) = projection_layer_storage {
+                            layers.push(proj_layer);
                         }
 
-                        // Use the blend mode selected during session creation
-                        let blend_mode = xr_context.blend_mode;
-
-                        // info!("Calling frame_stream.end (AppSW)");
-                        unsafe {
-                            let frame_end_info = oxr::sys::FrameEndInfo {
-                                ty: oxr::StructureType::FRAME_END_INFO,
-                                next: std::ptr::null(),
-                                display_time: frame_state.predicted_display_time,
-                                environment_blend_mode: blend_mode,
-                                layer_count: layers_ptrs.len() as u32,
-                                layers: layers_ptrs.as_ptr(),
-                            };
-
-                            let fp = xr_context.instance.fp();
-                            let res = (fp.end_frame)(xr_context.session.as_raw(), &frame_end_info);
-                            if res.into_raw() < 0 {
-                                error!("frame_stream.end (sys) failed: {:?}", res);
-                            }
+                        if let Err(e) = xr_context.frame_stream.end(
+                            frame_state.predicted_display_time,
+                            xr_context.blend_mode,
+                            &layers,
+                        ) {
+                            error!("frame_stream.end failed: {:?}", e);
                         }
-                        // info!("frame_stream.end succeeded");
                     }
                 }
                 Err(e) => {
@@ -2588,21 +2431,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
     }
 }
 
-#[cfg(target_os = "android")]
-#[repr(C)]
-#[derive(Debug)]
-pub struct CompositionLayerSpaceWarpInfoFB {
-    pub ty: oxr::StructureType,
-    pub next: *const std::ffi::c_void,
-    pub layer_flags: u64, // XrCompositionLayerSpaceWarpInfoFlagsFB
-    pub motion_vector_sub_image: oxr::sys::SwapchainSubImage,
-    pub app_space_delta_pose: oxr::sys::Posef,
-    pub depth_sub_image: oxr::sys::SwapchainSubImage,
-    pub min_depth: f32,
-    pub max_depth: f32,
-    pub near_z: f32,
-    pub far_z: f32,
-}
+// AppSW struct removed
 
 #[cfg(any(target_os = "android", target_os = "linux"))]
 pub fn create_view_matrix(
@@ -2610,10 +2439,25 @@ pub fn create_view_matrix(
     eye_rot: glam::Quat,
     world_transform: &world::Transform,
 ) -> glam::Mat4 {
-    // PlayerStart * HMD
+    // In VR (Android), we use STAGE space which already gives physical height above floor.
+    // If the world_transform (PlayerStart) is at 1.7m (head height in editor), 
+    // we want to treat it as a ground-level start at Y=0 to avoid double height.
+    #[cfg(target_os = "android")]
+    let base_pos = {
+        let mut p = world_transform.position;
+        // Subtract standard eye height to get floor level if we're at approx 1.7m
+        if p.y > 1.5 && p.y < 2.0 {
+            p.y -= 1.7; 
+        }
+        p
+    };
+    
+    #[cfg(not(target_os = "android"))]
+    let base_pos = world_transform.position;
+
     let hmd_transform = glam::Mat4::from_rotation_translation(eye_rot, eye_pos);
     let player_transform =
-        glam::Mat4::from_rotation_translation(world_transform.rotation, world_transform.position);
+        glam::Mat4::from_rotation_translation(world_transform.rotation, base_pos);
 
     // The view matrix is the inverse of the camera's world transform
     (player_transform * hmd_transform).inverse()

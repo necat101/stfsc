@@ -1,0 +1,8 @@
+    Updating crates.io index
+     Locking 2 packages to latest compatible versions
+    Updating shaderc v0.9.1 -> v0.10.1
+    Updating shaderc-sys v0.9.1 -> v0.10.1
+ Downloading crates ...
+  Downloaded shaderc v0.10.1
+  Downloaded shaderc-sys v0.10.1
+   Compiling shaderc-sys v0.10.1

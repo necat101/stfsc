@@ -1,0 +1,122 @@
+   Compiling shaderc-sys v0.9.1
+warning: shaderc-sys@0.9.1: shaderc: searching for native shaderc libraries on system;  use '--features build-from-source' to force building from source code
+warning: shaderc-sys@0.9.1: shaderc: cannot find native shaderc library on system; falling back to build from source
+error: failed to run custom build command for `shaderc-sys v0.9.1`
+
+Caused by:
+  process didn't exit successfully: `/home/netcat/Downloads/stfsc-main/target/debug/build/shaderc-sys-efcf91320a47f1ce/build-script-build` (exit status: 101)
+  --- stdout
+  cargo:rerun-if-env-changed=SHADERC_NO_PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-unknown-linux-gnu
+  cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_unknown_linux_gnu
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG
+  cargo:rerun-if-env-changed=SHADERC_STATIC
+  cargo:rerun-if-env-changed=SHADERC_DYNAMIC
+  cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+  cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-unknown-linux-gnu
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_unknown_linux_gnu
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-unknown-linux-gnu
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-unknown-linux-gnu
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+  cargo:warning=shaderc: searching for native shaderc libraries on system;  use '--features build-from-source' to force building from source code
+  cargo:warning=shaderc: cannot find native shaderc library on system; falling back to build from source
+  CMAKE_TOOLCHAIN_FILE_x86_64-unknown-linux-gnu = None
+  CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu = None
+  HOST_CMAKE_TOOLCHAIN_FILE = None
+  CMAKE_TOOLCHAIN_FILE = None
+  CMAKE_GENERATOR_x86_64-unknown-linux-gnu = None
+  CMAKE_GENERATOR_x86_64_unknown_linux_gnu = None
+  HOST_CMAKE_GENERATOR = None
+  CMAKE_GENERATOR = None
+  CMAKE_PREFIX_PATH_x86_64-unknown-linux-gnu = None
+  CMAKE_PREFIX_PATH_x86_64_unknown_linux_gnu = None
+  HOST_CMAKE_PREFIX_PATH = None
+  CMAKE_PREFIX_PATH = None
+  CMAKE_x86_64-unknown-linux-gnu = None
+  CMAKE_x86_64_unknown_linux_gnu = None
+  HOST_CMAKE = None
+  CMAKE = None
+  -- optimizer enabled
+  -- Shaderc: build type is "Release".
+  -- Configuring Shaderc to avoid building tests.
+  -- Configuring Shaderc to build examples.
+  -- Configuring Shaderc to check copyrights.
+  -- asciidoctor was not found - no documentation will be generated
+  -- Configuring done (0.7s)
+  -- Generating done (0.3s)
+  -- Build files have been written to: /home/netcat/Downloads/stfsc-main/target/debug/build/shaderc-sys-ed8036f24eced494/out/build
+  [  2%] Built target spirv-tools-build-version
+  [  2%] Built target core_tables
+  [  3%] Built target spirv-tools-pkg-config
+  [  3%] Built target enum_string_mapping
+  [  3%] Built target spirv-tools-header-NonSemanticShaderDebugInfo100
+  [  3%] Built target spv-tools-spv-amd-sevp
+  [  3%] Built target spv-tools-spv-amd-stm
+  [  3%] Built target spv-tools-spv-amd-gs
+  [  3%] Built target spv-tools-cldi100
+  [  3%] Built target spv-tools-debuginfo
+  [  4%] Built target spv-tools-spv-amd-sb
+  [  4%] Built target spv-tools-shdi100
+  [  4%] Built target spirv-tools-header-DebugInfo
+  [  4%] Built target spv-tools-vkspreflection
+  [  5%] Built target spv-tools-clspvreflection
+  [  5%] Built target spirv-tools-header-OpenCLDebugInfo100
+  [  5%] Built target GenericCodeGen
+  [  5%] Built target MachineIndependent
+  [  6%] Built target OSDependent
+  [  7%] Built target glslang-default-resource-limits
+  [  7%] Check copyright
+  [  7%] Built target shaderc-pkg-config
+  [  7%] Built target shaderc_static-pkg-config
+  [  7%] Built target shaderc_combined-pkg-config
+  [  7%] Built target check-copyright
+  [  7%] Update build-version.inc in the Shaderc build directory (if necessary).
+  [  7%] Built target extinst_tables
+  [  7%] Built target build-version
+  [ 25%] Built target SPIRV-Tools-shared
+  [ 42%] Built target SPIRV-Tools-static
+
+  --- stderr
+  running: cd "/home/netcat/Downloads/stfsc-main/target/debug/build/shaderc-sys-ed8036f24eced494/out/build" && CMAKE_PREFIX_PATH="" LC_ALL="C" "cmake" "/home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/shaderc-sys-0.9.1/build" "-B" "/home/netcat/Downloads/stfsc-main/target/debug/build/shaderc-sys-ed8036f24eced494/out/build" "-DCMAKE_INSTALL_LIBDIR=lib" "-DCMAKE_POSITION_INDEPENDENT_CODE=ON" "-DENABLE_SPVREMAPPER=OFF" "-DENABLE_GLSLANG_BINARIES=OFF" "-DSHADERC_SKIP_TESTS=ON" "-DSPIRV_SKIP_EXECUTABLES=ON" "-DSPIRV_WERROR=OFF" "-DCMAKE_INSTALL_PREFIX=/home/netcat/Downloads/stfsc-main/target/debug/build/shaderc-sys-ed8036f24eced494/out" "-DCMAKE_C_FLAGS= -ffunction-sections -fdata-sections -fPIC -m64 -w" "-DCMAKE_C_COMPILER=/usr/bin/cc" "-DCMAKE_CXX_FLAGS= -ffunction-sections -fdata-sections -fPIC -m64 -w" "-DCMAKE_CXX_COMPILER=/usr/bin/c++" "-DCMAKE_ASM_FLAGS= -ffunction-sections -fdata-sections -fPIC -m64 -w" "-DCMAKE_ASM_COMPILER=/usr/bin/cc" "-DCMAKE_BUILD_TYPE=Release"
+  CMake Deprecation Warning at CMakeLists.txt:6 (cmake_minimum_required):
+    Compatibility with CMake < 3.10 will be removed from a future version of
+    CMake.
+
+    Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+    to tell CMake that the project requires at least <min> but has been updated
+    to work with policies introduced by <max> or earlier.
+
+
+  CMake Warning (dev) at CMakeLists.txt:8 (project):
+    Policy CMP0048 is not set: project() command manages VERSION variables.
+    Run "cmake --help-policy CMP0048" for policy details.  Use the cmake_policy
+    command to set the policy and suppress this warning.
+
+    The following variable(s) would be set to empty:
+
+      CMAKE_PROJECT_VERSION
+      CMAKE_PROJECT_VERSION_MAJOR
+      CMAKE_PROJECT_VERSION_MINOR
+      CMAKE_PROJECT_VERSION_PATCH
+  This warning is for project developers.  Use -Wno-dev to suppress it.
+
+  running: cd "/home/netcat/Downloads/stfsc-main/target/debug/build/shaderc-sys-ed8036f24eced494/out/build" && LC_ALL="C" MAKEFLAGS="-j --jobserver-fds=8,9 --jobserver-auth=8,9" "cmake" "--build" "/home/netcat/Downloads/stfsc-main/target/debug/build/shaderc-sys-ed8036f24eced494/out/build" "--target" "install" "--config" "Release"
+  /usr/include/c++/15/bits/stl_vector.h:1346: std::vector<_Tp, _Alloc>::reference std::vector<_Tp, _Alloc>::front() [with _Tp = cmGccStyleDependency; _Alloc = std::allocator<cmGccStyleDependency>; reference = cmGccStyleDependency&]: Assertion '!this->empty()' failed.
+  gmake[2]: *** [spirv-tools/source/opt/CMakeFiles/SPIRV-Tools-opt.dir/build.make:1936: spirv-tools/source/opt/CMakeFiles/SPIRV-Tools-opt.dir/depend] Aborted (core dumped)
+  gmake[1]: *** [CMakeFiles/Makefile2:1429: spirv-tools/source/opt/CMakeFiles/SPIRV-Tools-opt.dir/all] Error 2
+  gmake: *** [Makefile:136: all] Error 2
+  thread 'main' panicked at /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/cmake-0.1.57/src/lib.rs:1132:5:
+
+  command did not execute successfully, got: exit status: 2
+
+  build script failed, must exit now
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

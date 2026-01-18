@@ -91,7 +91,7 @@ float ShadowCalculation(vec4 fragPosLightSpace) {
     vec3 lightDir = normalize(pushConstants.lightDir.xyz);
     
     float slopeBias = 1.0 - abs(dot(normal, lightDir));
-    float bias = max(0.0005 + 0.001 * slopeBias, 0.0005); 
+    float bias = max(0.001 + 0.002 * slopeBias, 0.001); 
     
     // PCF
     float shadow = 0.0;
@@ -312,7 +312,7 @@ void main() {
     
     // Accumulate lighting from all dynamic lights
     vec3 Lo = vec3(0.0);
-    vec3 ambient = lightData.ambient.xyz * albedo;
+    vec3 ambient = (lightData.ambient.xyz + vec3(0.05)) * albedo; // Boost ambient base
     
     // Process dynamic lights
     int numLights = min(lightData.numLights, MAX_LIGHTS);
@@ -348,7 +348,7 @@ void main() {
         float shadow = 1.0 - (shadowFactor * 0.8); // 0.2 min light
         
         Lo = (kD * albedo / PI + specular) * vec3(2.5) * NdotL * shadow;
-        ambient = (pushConstants.cameraPos.w * 0.8) * albedo; // Use ambient from push constants
+        ambient = (pushConstants.cameraPos.w * 0.8 + 0.1) * albedo; // Boost fallback ambient
     } else {
         // For dynamic lights, apply shadow to first directional light if present
         if (lightData.lights[0].position_type.w == float(LIGHT_DIRECTIONAL)) {

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use log::info;
 use ash::{vk, Device, Entry, Instance};
 #[cfg(target_os = "android")]
 use ash::vk::Handle;  // For as_raw/from_raw methods on vk types
@@ -1655,18 +1656,14 @@ impl GraphicsContext {
     }
 
     pub fn create_default_pbr_textures(&self) -> Result<(Texture, Texture, Texture)> {
-        // Albedo: Checkerboard
+        info!("CREATING DEFAULT PBR TEXTURES (PINK SMOKE TEST V2 - CLEAN BUILD)");
+        // Albedo: Solid Pink (Verification Color)
         let width = 256;
         let height = 256;
         let mut albedo_img = image::RgbaImage::new(width, height);
         for x in 0..width {
             for y in 0..height {
-                let color = if (x / 32 + y / 32) % 2 == 0 {
-                    image::Rgba([255, 255, 255, 255])
-                } else {
-                    image::Rgba([128, 128, 128, 255]) // Grey instead of black for better lighting test
-                };
-                albedo_img.put_pixel(x, y, color);
+                albedo_img.put_pixel(x, y, image::Rgba([255, 20, 147, 255])); // Deep Pink
             }
         }
         let albedo = self.create_texture_from_image(&albedo_img)?;
@@ -1680,15 +1677,11 @@ impl GraphicsContext {
         }
         let normal = self.create_texture_from_image(&normal_img)?;
 
-        // MetallicRoughness: R=Metallic, G=Roughness.
-        // Let's make it shiny metal? Or plastic?
-        // Checkerboard roughness?
+        // MetallicRoughness: R=Metallic (0), G=Roughness (128 = 0.5)
         let mut mr_img = image::RgbaImage::new(width, height);
         for x in 0..width {
             for y in 0..height {
-                // Metal = 0.0 (Plastic), Roughness = 0.2 (Shiny) or 0.8 (Rough) based on checker
-                let roughness = if (x / 64 + y / 64) % 2 == 0 { 50 } else { 200 };
-                mr_img.put_pixel(x, y, image::Rgba([0, roughness, 0, 255]));
+                mr_img.put_pixel(x, y, image::Rgba([0, 128, 0, 255]));
             }
         }
         let mr = self.create_texture_from_image(&mr_img)?;

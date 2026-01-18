@@ -46,7 +46,8 @@ impl XrContext {
         #[cfg(target_os = "android")]
         {
             extensions.khr_android_create_instance = true;
-            extensions.fb_space_warp = true;
+            // Disable AppSW (fb_space_warp) as it might be causing the tilting/warping and performance issues
+            // extensions.fb_space_warp = true;
         }
 
         // Enable AppSW extension if available
@@ -297,8 +298,18 @@ impl XrContext {
             framebuffers.push(framebuffers_per_eye);
         }
 
-        let stage_space =
-            session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
+        // Pick Reference Space: STAGE (Floor-relative) preferred over LOCAL (Head-relative)
+        let space_type = if session
+            .enumerate_reference_spaces()
+            .unwrap_or_default()
+            .contains(&xr::ReferenceSpaceType::STAGE)
+        {
+            xr::ReferenceSpaceType::STAGE
+        } else {
+            xr::ReferenceSpaceType::LOCAL
+        };
+
+        let stage_space = session.create_reference_space(space_type, xr::Posef::IDENTITY)?;
 
         Ok(Self {
             instance: instance.clone(),

@@ -1,0 +1,5 @@
+    Updating crates.io index
+     Locking 2 packages to latest compatible versions
+ Downgrading ash-window v0.13.0 -> v0.12.0 (available: v0.13.0)
+ Downgrading raw-window-metal v0.4.0 -> v0.3.2
+    Blocking waiting for file lock on build directory

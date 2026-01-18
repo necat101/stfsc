@@ -421,11 +421,11 @@ impl ProjectExporter {
                     let name = Path::new(&s.path).file_stem()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "scene".into());
-                    format!("{}.bincode", name)
+                    format!("{}.json", name)
                 })
-                .unwrap_or_else(|| "main.bincode".into())
+                .unwrap_or_else(|| "main.json".into())
         } else {
-            "main.bincode".into()
+            "main.json".into()
         };
         
         let manifest = crate::bundle::BundledProjectManifest {
@@ -436,7 +436,7 @@ impl ProjectExporter {
                     let name = Path::new(&s.path).file_stem()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "scene".into());
-                    format!("{}.bincode", name)
+                    format!("{}.json", name)
                 })
                 .collect(),
             models: project.assets.models.iter()
@@ -596,11 +596,11 @@ impl ProjectExporter {
                     let name = Path::new(&s.path).file_stem()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "scene".into());
-                    format!("{}.bincode", name)
+                    format!("{}.json", name)
                 })
-                .unwrap_or_else(|| "main.bincode".into())
+                .unwrap_or_else(|| "main.json".into())
         } else {
-            "main.bincode".into()
+            "main.json".into()
         };
         
         let manifest = crate::bundle::BundledProjectManifest {
@@ -611,7 +611,7 @@ impl ProjectExporter {
                     let name = Path::new(&s.path).file_stem()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "scene".into());
-                    format!("{}.bincode", name)
+                    format!("{}.json", name)
                 })
                 .collect(),
             models: project.assets.models.iter()

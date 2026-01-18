@@ -150,7 +150,7 @@ impl Default for LightUBO {
             lights: [GpuLightData::default(); MAX_LIGHTS],
             num_lights: 0,
             _padding: [0; 3],
-            ambient: [0.1, 0.1, 0.1, 1.0], // Default low ambient
+            ambient: [0.2, 0.2, 0.2, 1.0], // Boosted default ambient for mobile
         }
     }
 }

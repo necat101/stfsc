@@ -1,82 +1,46 @@
-    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
-warning: unused import: `debug`
- --> src/lib.rs:3:24
-  |
-3 | use log::{info, error, debug};
-  |                        ^^^^^
-  |
-  = note: `#[warn(unused_imports)]` on by default
+    Updating crates.io index
+     Locking 526 packages to latest compatible versions
+      Adding android-activity v0.5.2 (available: v0.6.0)
+      Adding android_logger v0.13.3 (available: v0.15.1)
+      Adding async-lock v3.4.2 (requires Rust 1.85)
+      Adding bincode v1.3.3 (available: v3.0.0, requires Rust 1.85.0)
+      Adding block-sys v0.1.0-beta.1 (available: v0.1.0-beta.2)
+      Adding block2 v0.2.0-alpha.6 (available: v0.2.0)
+      Adding eframe v0.27.2 (available: v0.31.1)
+      Adding env_logger v0.10.2 (available: v0.11.8)
+      Adding fontdue v0.8.0 (available: v0.9.3)
+      Adding generic-array v0.14.7 (available: v0.14.9)
+      Adding glam v0.24.2 (available: v0.30.10)
+      Adding hecs v0.10.5 (available: v0.11.0)
+      Adding home v0.5.9 (available: v0.5.11)
+      Adding image v0.24.9 (available: v0.25.6)
+      Adding ktx2 v0.3.0 (available: v0.4.0)
+      Adding nalgebra v0.32.6 (available: v0.33.2)
+      Adding ndk v0.8.0 (available: v0.9.0)
+      Adding objc-sys v0.2.0-beta.2 (available: v0.2.0-beta.3)
+      Adding objc2 v0.3.0-beta.3.patch-leaks.3 (available: v0.3.0-beta.5)
+      Adding objc2-encode v2.0.0-pre.2 (available: v2.0.0)
+      Adding openxr v0.18.0 (available: v0.21.1)
+      Adding rand v0.8.5 (available: v0.9.2)
+      Adding rapier3d v0.18.0 (available: v0.26.1)
+      Adding rfd v0.12.1 (available: v0.17.2)
+      Adding rodio v0.17.3 (available: v0.21.1)
+      Adding shaderc v0.9.1 (available: v0.10.1)
+      Adding smithay-clipboard v0.7.2 (available: v0.7.3, requires Rust 1.85.0)
+      Adding tobj v3.2.5 (available: v4.0.3)
+      Adding wasip2 v1.0.2+wasi-0.2.9 (requires Rust 1.87.0)
+      Adding winit v0.29.15 (available: v0.30.12)
+      Adding wit-bindgen v0.51.0 (requires Rust 1.87.0)
+      Adding zvariant_utils v1.0.1 (available: v1.1.1)
+ Downloading crates ...
+  Downloaded getrandom v0.2.17
+  Downloaded cc v1.2.53
+  Downloaded zmij v1.0.14
+  Downloaded find-msvc-tools v0.1.8
+  Downloaded flate2 v1.1.8
+error: rustc 1.84.1 is not supported by the following package:
+  async-lock@3.4.2 requires rustc 1.85
+Either upgrade rustc or select compatible dependency versions with
+`cargo update <name>@<current-ver> --precise <compatible-ver>`
+where `<compatible-ver>` is the latest version supporting rustc 1.84.1
 
-warning: unused import: `std::ptr`
- --> src/graphics/mod.rs:7:5
-  |
-7 | use std::ptr;
-  |     ^^^^^^^^
-
-warning: unused import: `tokio::runtime::Runtime`
- --> src/world/mod.rs:2:5
-  |
-2 | use tokio::runtime::Runtime;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^
-
-warning: unused imports: `EnvironmentBlendMode`, `Posef`, and `ReferenceSpaceType`
-  --> src/lib.rs:30:5
-   |
-30 |     ReferenceSpaceType, Posef, CompositionLayerProjectionView,
-   |     ^^^^^^^^^^^^^^^^^^  ^^^^^
-31 |     SwapchainSubImage, Rect2Di, Offset2Di, Extent2Di,
-32 |     CompositionLayerProjection, EnvironmentBlendMode, Duration
-   |                                 ^^^^^^^^^^^^^^^^^^^^
-
-error[E0308]: mismatched types
-   --> src/lib.rs:730:25
-    |
-727 |                     if let Err(e) = xr_context.frame_stream.end(
-    |                                                             --- arguments to this method are incorrect
-...
-730 |                         &layers,
-    |                         ^^^^^^^ expected `&[&CompositionLayerBase<'_, ...>]`, found `&Vec<&...>`
-    |
-    = note: expected reference `&[&CompositionLayerBase<'_, Vulkan>]`
-               found reference `&Vec<&openxr::CompositionLayerProjection<'_, Vulkan>>`
-note: method defined here
-   --> /home/netcat/.cargo/registry/src/index.crates.io-6f17d22bba15001f/openxr-0.18.0/src/frame_stream.rs:104:12
-    |
-104 |     pub fn end(
-    |            ^^^
-
-warning: unused variable: `vertex_input_info`
-   --> src/graphics/mod.rs:771:13
-    |
-771 |         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
-    |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vertex_input_info`
-    |
-    = note: `#[warn(unused_variables)]` on by default
-
-warning: unused variable: `id`
-   --> src/world/mod.rs:119:38
-    |
-119 |                 SceneUpdate::Spawn { id, position, color } => {
-    |                                      ^^ help: try ignoring the field: `id: _`
-
-warning: unused variable: `id`
-   --> src/world/mod.rs:149:42
-    |
-149 |                 SceneUpdate::SpawnMesh { id, mesh, position } => {
-    |                                          ^^ help: try ignoring the field: `id: _`
-
-warning: unused variable: `id`
-   --> src/world/mod.rs:159:37
-    |
-159 |                 SceneUpdate::Move { id, position } => {
-    |                                     ^^ help: try ignoring the field: `id: _`
-
-warning: unused variable: `position`
-   --> src/world/mod.rs:159:41
-    |
-159 |                 SceneUpdate::Move { id, position } => {
-    |                                         ^^^^^^^^ help: try ignoring the field: `position: _`
-
-For more information about this error, try `rustc --explain E0308`.
-warning: `stfsc_engine` (lib) generated 9 warnings
-error: could not compile `stfsc_engine` (lib) due to 1 previous error; 9 warnings emitted
