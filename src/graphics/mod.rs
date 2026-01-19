@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use log::info;
 use ash::{vk, Device, Entry, Instance};
 #[cfg(target_os = "android")]
 use ash::vk::Handle;  // For as_raw/from_raw methods on vk types
@@ -1656,14 +1655,13 @@ impl GraphicsContext {
     }
 
     pub fn create_default_pbr_textures(&self) -> Result<(Texture, Texture, Texture)> {
-        info!("CREATING DEFAULT PBR TEXTURES (PINK SMOKE TEST V2 - CLEAN BUILD)");
-        // Albedo: Solid Pink (Verification Color)
+        // Albedo: Solid Light Grey
         let width = 256;
         let height = 256;
         let mut albedo_img = image::RgbaImage::new(width, height);
         for x in 0..width {
             for y in 0..height {
-                albedo_img.put_pixel(x, y, image::Rgba([255, 20, 147, 255])); // Deep Pink
+                albedo_img.put_pixel(x, y, image::Rgba([200, 200, 200, 255])); 
             }
         }
         let albedo = self.create_texture_from_image(&albedo_img)?;

@@ -1,0 +1,44 @@
+    Checking safe_arch v0.7.4
+    Checking symphonia-core v0.5.5
+   Compiling oboe-sys v0.6.1
+   Compiling paste v1.0.15
+warning: oboe-sys@0.6.1: Compiler family detection failed due to error: ToolNotFound: failed to find tool "aarch64-linux-android-clang++": No such file or directory (os error 2)
+error: failed to run custom build command for `oboe-sys v0.6.1`
+
+Caused by:
+  process didn't exit successfully: `/home/netcat/Downloads/stfsc-main/target/debug/build/oboe-sys-8fdbc30aefde9334/build-script-build` (exit status: 1)
+  --- stdout
+  OPT_LEVEL = Some(0)
+  TARGET = Some(aarch64-linux-android)
+  CARGO_ENCODED_RUSTFLAGS = Some()
+  HOST = Some(x86_64-unknown-linux-gnu)
+  cargo:rerun-if-env-changed=CXX_aarch64-linux-android
+  CXX_aarch64-linux-android = None
+  cargo:rerun-if-env-changed=CXX_aarch64_linux_android
+  CXX_aarch64_linux_android = None
+  cargo:rerun-if-env-changed=TARGET_CXX
+  TARGET_CXX = None
+  cargo:rerun-if-env-changed=CXX
+  CXX = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:warning=Compiler family detection failed due to error: ToolNotFound: failed to find tool "aarch64-linux-android-clang++": No such file or directory (os error 2)
+  RUSTC_WRAPPER = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  DEBUG = Some(true)
+  cargo:rerun-if-env-changed=CXXFLAGS
+  CXXFLAGS = None
+  cargo:rerun-if-env-changed=TARGET_CXXFLAGS
+  TARGET_CXXFLAGS = None
+  cargo:rerun-if-env-changed=CXXFLAGS_aarch64_linux_android
+  CXXFLAGS_aarch64_linux_android = None
+  cargo:rerun-if-env-changed=CXXFLAGS_aarch64-linux-android
+  CXXFLAGS_aarch64-linux-android = None
+
+  --- stderr
+
+
+  error occurred in cc-rs: failed to find tool "aarch64-linux-android-clang++": No such file or directory (os error 2)
+
+
+warning: build failed, waiting for other jobs to finish...

@@ -428,6 +428,18 @@ pub fn model_to_mesh(scene: &ModelScene) -> Option<Mesh> {
     }
 }
 
+/// Get all meshes from a ModelScene (both static and skinned)
+pub fn model_to_all_meshes(scene: &ModelScene) -> Vec<crate::world::Mesh> {
+    let mut all = Vec::new();
+    for m in &scene.meshes {
+        all.push(m.clone());
+    }
+    for sm in &scene.skinned_meshes {
+        all.push(sm.mesh.clone());
+    }
+    all
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

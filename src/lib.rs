@@ -22,11 +22,13 @@ use std::sync::{Arc, RwLock};
 use graphics::{GpuMesh, GraphicsContext, InstanceData, Texture};
 #[cfg(target_os = "android")]
 use world::{GameWorld, DecodedImage};
+#[cfg(target_os = "android")]
+use world::animation::{Animator, AnimationState};
 
 #[cfg(target_os = "android")]
 use resource_loader::{ResourceLoader, ResourceLoadResult};
 #[cfg(target_os = "android")]
-use android_activity::{AndroidApp, MainEvent, PollEvent};
+use android_activity::{AndroidApp, MainEvent, PollEvent, InputStatus};
 #[cfg(target_os = "android")]
 use openxr as oxr;
 #[cfg(target_os = "android")]
@@ -114,6 +116,15 @@ fn android_main(app: AndroidApp) {
                 _ => {}
             },
         );
+
+        // Drain system input queue to prevent ANR. 
+        // OpenXR handles VR input, but Android still requires us to poll system events.
+        if let Ok(mut iter) = app.input_events_iter() {
+            while iter.next(|_event| InputStatus::Unhandled) {
+                // Ignore events, just draining the queue.
+            }
+        }
+
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
@@ -286,7 +297,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
         match graphics_context.device.map_memory(
             light_memory,
             0,
-            light_buffer_size,
+            vk::WHOLE_SIZE,
             vk::MemoryMapFlags::empty(),
         ) {
             Ok(ptr) => ptr as *mut lighting::LightUBO,
@@ -303,8 +314,8 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
     }
     info!("Created light buffer for {} lights", lighting::MAX_LIGHTS);
 
-    // Create Bone Matrices buffer
-    let (bone_buffer, _bone_memory) = match graphics_context.create_buffer(
+    // Create Bone Buffer for skeletal animation (128 bones max)
+    let (bone_buffer, bone_memory) = match graphics_context.create_buffer(
         (128 * std::mem::size_of::<glam::Mat4>()) as u64,
         vk::BufferUsageFlags::UNIFORM_BUFFER,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
@@ -313,6 +324,21 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
         Err(e) => {
             error!("Failed to create bone buffer: {:?}", e);
             return;
+        }
+    };
+
+    let bone_ptr = unsafe {
+        match graphics_context.device.map_memory(
+            bone_memory,
+            0,
+            vk::WHOLE_SIZE,
+            vk::MemoryMapFlags::empty(),
+        ) {
+            Ok(ptr) => ptr as *mut glam::Mat4,
+            Err(e) => {
+                error!("Failed to map bone buffer: {:?}", e);
+                return;
+            }
         }
     };
 
@@ -566,41 +592,65 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                              info!("Processing entity: {} ({:?})", entity_data.name, entity_data.entity_type);
 
                              match entity_data.entity_type {
-                                 EntityType::Mesh { path } => {
-                                     // Check if we have the asset
-                                     if let Some(mesh_bytes) = bundled_project.assets.get(&path) {
-                                         // Load Model
-                                         let model_res = if path.ends_with(".glb") || path.ends_with(".gltf") {
-                                             gltf_loader::load_gltf_with_animations(mesh_bytes)
-                                         } else {
-                                              // Fallback / OBJ
-                                              crate::world::load_obj_from_bytes(mesh_bytes)
-                                                  .map(|m| crate::world::fbx_loader::ModelScene { meshes: vec![m], ..Default::default() })
-                                         };
-                                         
-                                         match model_res {
-                                             Ok(model) => {
-                                                 if let Some(mesh) = fbx_loader::model_to_mesh(&model) {
-                                                     let mat = crate::world::Material {
-                                                         color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
-                                                         roughness: entity_data.material.roughness,
-                                                         metallic: entity_data.material.metallic,
-                                                         ..Default::default()
-                                                     };
-                                                     let entity = state.world.ecs.spawn((
-                                                         crate::world::Transform { position: pos, rotation: rot, scale: scale },
-                                                         mat,
-                                                     ));
-                                                     resource_loader.queue_mesh(entity, mesh);
-                                                     info!("Queued mesh upload for entity {:?}", entity);
-                                                 }
-                                             }
-                                             Err(e) => error!("Failed to load model {}: {:?}", path, e),
-                                         }
-                                     } else {
-                                         warn!("Asset not found in bundle: {}", path);
-                                     }
-                                 }
+                                  EntityType::Mesh { path } => {
+                                      // Fix asset lookup: use filename for bundled assets
+                                      let filename = std::path::Path::new(&path).file_name()
+                                          .map(|n| n.to_string_lossy().to_string())
+                                          .unwrap_or_else(|| path.clone());
+
+                                      // Check if we have the asset
+                                      if let Some(mesh_bytes) = bundled_project.assets.get(&filename) {
+                                          // Load Model
+                                          let model_res = if path.ends_with(".glb") || path.ends_with(".gltf") {
+                                              gltf_loader::load_gltf_with_animations(mesh_bytes)
+                                          } else {
+                                               // Fallback / OBJ
+                                               crate::world::load_obj_from_bytes(mesh_bytes)
+                                                   .map(|m| crate::world::fbx_loader::ModelScene { meshes: vec![m], ..Default::default() })
+                                          };
+                                          
+                                          match model_res {
+                                              Ok(model) => {
+                                                  let meshes = fbx_loader::model_to_all_meshes(&model);
+                                                  for (i, mesh) in meshes.into_iter().enumerate() {
+                                                      let mat = crate::world::Material {
+                                                          color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                                          roughness: entity_data.material.roughness,
+                                                          metallic: entity_data.material.metallic,
+                                                          ..Default::default()
+                                                      };
+                                                      
+                                                      let mut spawn_tuple = (
+                                                          crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                                          mat,
+                                                      );
+                                                      
+                                                      let entity = state.world.ecs.spawn(spawn_tuple);
+                                                      
+                                                      // Attach animator if this is the first mesh and config exists
+                                                      if i == 0 {
+                                                          if let Some(anim_config) = &entity_data.animator_config {
+                                                              if let Some(skeleton) = &model.skeleton {
+                                                                  let clips = model.animations.iter().map(|a| Arc::new(a.clone())).collect();
+                                                                    let mut animator = Animator::new(Arc::new(skeleton.clone()), clips);
+                                                                    animator.speed = anim_config.speed;
+                                                                    let anim_state = AnimationState::new(skeleton.bones.len());
+                                                                    let _ = state.world.ecs.insert(entity, (animator, anim_state));
+                                                                  info!("Attached Animator to entity {:?}", entity);
+                                                              }
+                                                          }
+                                                      }
+
+                                                      resource_loader.queue_mesh(entity, mesh);
+                                                      info!("Queued mesh upload for entity {:?} (sub-mesh {})", entity, i);
+                                                  }
+                                              }
+                                              Err(e) => error!("Failed to load model {}: {:?}", path, e),
+                                          }
+                                      } else {
+                                          warn!("Asset not found in bundle: {} (looked for {})", path, filename);
+                                      }
+                                  }
                                  EntityType::Primitive(pt) => {
                                      let material = crate::world::Material {
                                          color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
@@ -627,8 +677,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                  }
                                   EntityType::Camera => {
                                       state.world.player_start_transform.position = pos;
-                                      // Add 180 degree flip around Y to face +Z (Downtown)
-                                      state.world.player_start_transform.rotation = rot * glam::Quat::from_rotation_y(std::f32::consts::PI);
+                                      state.world.player_start_transform.rotation = rot;
                                   }
                                  EntityType::Light { light_type, color, intensity, range } => {
                                       // Spawn Light
@@ -675,6 +724,63 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                          material,
                                      ));
                                  }
+                                  EntityType::Vehicle => {
+                                      let material = crate::world::Material {
+                                          color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                          roughness: entity_data.material.roughness,
+                                          metallic: entity_data.material.metallic,
+                                          ..Default::default()
+                                      };
+                                      state.world.ecs.spawn((
+                                          crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                          crate::world::MeshHandle(0), // Cube placeholder
+                                          crate::world::Vehicle { speed: 0.0, max_speed: 10.0, steering: 0.0, accelerating: false },
+                                          material,
+                                      ));
+                                      info!("Spawned Vehicle at {:?}", pos);
+                                  }
+                                  EntityType::CrowdAgent { state: agent_state_str, speed } => {
+                                      let material = crate::world::Material {
+                                          color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                          roughness: entity_data.material.roughness,
+                                          metallic: entity_data.material.metallic,
+                                          ..Default::default()
+                                      };
+                                      let agent_state = match agent_state_str.as_str() {
+                                          "Idle" => crate::world::AgentState::Idle,
+                                          "Walking" => crate::world::AgentState::Walking,
+                                          "Running" => crate::world::AgentState::Running,
+                                          _ => crate::world::AgentState::Idle,
+                                      };
+                                      state.world.ecs.spawn((
+                                          crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                          crate::world::MeshHandle(4), // Capsule placeholder
+                                          crate::world::CrowdAgent {
+                                              velocity: glam::Vec3::ZERO,
+                                              target: pos,
+                                              state: agent_state,
+                                              max_speed: speed,
+                                              stuck_timer: 0.0,
+                                              last_pos: pos,
+                                          },
+                                          material,
+                                      ));
+                                      info!("Spawned CrowdAgent at {:?}", pos);
+                                  }
+                                  EntityType::AudioSource { sound_id, volume, looping, max_distance, .. } => {
+                                      state.world.ecs.spawn((
+                                          crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                          crate::world::AudioSource {
+                                              sound_id,
+                                              volume,
+                                              looping,
+                                              max_distance,
+                                              playing: true,
+                                              runtime_handle: None,
+                                          },
+                                      ));
+                                      info!("Spawned AudioSource at {:?}", pos);
+                                  }
                                  _ => {}
                              }
                          }
@@ -693,8 +799,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                      match entity_data.entity_type {
                           EntityType::Camera => {
                               state.world.player_start_transform.position = pos;
-                              // Add 180 degree flip around Y to face +Z (Downtown)
-                              state.world.player_start_transform.rotation = rot * glam::Quat::from_rotation_y(std::f32::consts::PI);
+                              state.world.player_start_transform.rotation = rot;
                           }
                          EntityType::Primitive(pt) => {
                              let material = crate::world::Material {
@@ -1612,6 +1717,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                     HashMap::new();
                                 let mut custom_draws: Vec<(GpuMesh, InstanceData)> = Vec::new();
                                 let mut textured_draws: Vec<(usize, InstanceData, vk::DescriptorSet)> = Vec::new();
+                                let mut skinned_draws: Vec<(GpuMesh, InstanceData, Vec<glam::Mat4>)> = Vec::new();
 
                                 if let Ok(state) = game_state.try_read() {
                                     // Update cached player position for shadow calculations
@@ -1665,7 +1771,16 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                                 }
 
                                                 if !textured {
-                                                    batch_map.entry(handle.0).or_default().push(instance);
+                                                    let mut skinning = None;
+                                                    if let Ok(anim_state) = state.world.ecs.get::<&world::animation::AnimationState>(id) {
+                                                        skinning = Some(anim_state.bone_matrices.clone());
+                                                    }
+
+                                                    if let Some(joints) = skinning {
+                                                        skinned_draws.push((gpu_mesh.clone(), instance, joints));
+                                                    } else {
+                                                        batch_map.entry(handle.0).or_default().push(instance);
+                                                    }
                                                 }
                                             }
                                         }
@@ -1778,14 +1893,22 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                                 [1.0, 1.0, 1.0, 1.0]
                                             };
 
-                                            custom_draws.push((
-                                                gpu_mesh.clone(),
-                                                InstanceData {
-                                                    model,
-                                                    prev_model,
-                                                    color,
-                                                },
-                                            ));
+                                            let mut skinning = None;
+                                            if let Ok(anim_state) = state.world.ecs.get::<&world::animation::AnimationState>(id) {
+                                                skinning = Some(anim_state.bone_matrices.clone());
+                                            }
+
+                                            let instance = InstanceData {
+                                                model,
+                                                prev_model,
+                                                color,
+                                            };
+
+                                            if let Some(joints) = skinning {
+                                                skinned_draws.push((gpu_mesh.clone(), instance, joints));
+                                            } else {
+                                                custom_draws.push((gpu_mesh.clone(), instance));
+                                            }
                                         }
                                     }
 
@@ -1823,6 +1946,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                 let mut batched_draw_calls: Vec<(usize, u32, u32)> = Vec::new(); // (mesh_idx, first_instance, instance_count)
                                 let mut custom_draw_calls: Vec<(GpuMesh, u32, u32)> = Vec::new(); // (mesh, first_instance, instance_count)
                                 let mut textured_draw_calls: Vec<(usize, u32, u32, vk::DescriptorSet)> = Vec::new();
+                                let mut skinned_draw_calls: Vec<(GpuMesh, u32, u32, Vec<glam::Mat4>)> = Vec::new();
 
                                 // Batch Maps
                                 for (mesh_idx, instances) in batch_map {
@@ -1872,6 +1996,18 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                     custom_draw_calls.push((mesh, instance_offset as u32, 1));
                                     instance_offset += 1;
                                 }
+                                 // Skinned Draws
+                                 for (mesh, instance_data, joints) in skinned_draws {
+                                     if instance_offset + 1 > 10000 {
+                                         error!("Instance buffer overflow (skinned)!");
+                                         break;
+                                     }
+                                     let dest = instance_ptr.add(instance_offset);
+                                     std::ptr::write(dest, instance_data);
+
+                                     skinned_draw_calls.push((mesh, instance_offset as u32, 1, joints));
+                                     instance_offset += 1;
+                                 }
 
                                 // Flush instance buffer (if not HOST_COHERENT, but we used HOST_COHERENT)
 
@@ -1906,7 +2042,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                 let light_proj = glam::Mat4::orthographic_rh(
                                     -shadow_half_extent, shadow_half_extent, 
                                     -shadow_half_extent, shadow_half_extent, 
-                                    1.0, shadow_half_extent * 3.0,
+                                    5.0, shadow_half_extent * 3.0,
                                 );
                                 let light_view =
                                     glam::Mat4::look_at_rh(light_pos, shadow_center, glam::Vec3::Y);
@@ -1944,12 +2080,12 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
 
                                     // Set depth bias to prevent shadow acne (constant, clamp, slope)
                                     // Higher values needed for large 200+ unit ground planes with 2048 shadow map
-                                    graphics_context.device.cmd_set_depth_bias(
-                                        graphics_context.command_buffer,
-                                        200.0,
-                                        0.0,
-                                        25.0,
-                                    );
+                                     graphics_context.device.cmd_set_depth_bias(
+                                         graphics_context.command_buffer,
+                                         200.0, // Reduced from 500 to prevent precision issues
+                                         0.0,
+                                         10.0, // Reduced from 50 to prevent precision issues
+                                     );
 
                                     // Bind Global Set (Set 0) - Contains Instance Buffer (Binding 1)
                                     graphics_context.device.cmd_bind_descriptor_sets(
@@ -2215,6 +2351,59 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                         );
                                     }
 
+                                    // Draw Skinned Batches
+                                    if !skinned_draw_calls.is_empty() {
+                                        graphics_context.device.cmd_bind_pipeline(
+                                            graphics_context.command_buffer,
+                                            vk::PipelineBindPoint::GRAPHICS,
+                                            graphics_context.skinned_pipeline,
+                                        );
+                                        
+                                        for (gpu_mesh, first_instance, instance_count, joints) in &skinned_draw_calls {
+                                            // Update Bone Buffer
+                                            let bone_count = joints.len().min(128);
+                                            std::ptr::copy_nonoverlapping(joints.as_ptr(), bone_ptr, bone_count);
+                                            
+                                            // Bind Material Set
+                                            graphics_context.device.cmd_bind_descriptor_sets(
+                                                graphics_context.command_buffer,
+                                                vk::PipelineBindPoint::GRAPHICS,
+                                                graphics_context.skinned_pipeline_layout,
+                                                1,
+                                                &[gpu_mesh.material_descriptor_set],
+                                                &[],
+                                            );
+
+                                            graphics_context.device.cmd_bind_vertex_buffers(
+                                                graphics_context.command_buffer,
+                                                0,
+                                                &[gpu_mesh.vertex_buffer],
+                                                &[0],
+                                            );
+                                            graphics_context.device.cmd_bind_index_buffer(
+                                                graphics_context.command_buffer,
+                                                gpu_mesh.index_buffer,
+                                                0,
+                                                vk::IndexType::UINT32,
+                                            );
+                                            graphics_context.device.cmd_draw_indexed(
+                                                graphics_context.command_buffer,
+                                                gpu_mesh.index_count,
+                                                *instance_count,
+                                                0,
+                                                0,
+                                                *first_instance,
+                                            );
+                                        }
+                                        
+                                        // Re-bind standard pipeline for later batches
+                                        graphics_context.device.cmd_bind_pipeline(
+                                            graphics_context.command_buffer,
+                                            vk::PipelineBindPoint::GRAPHICS,
+                                            graphics_context.pipeline,
+                                        );
+                                    }
+
                                     // Draw Textured Batches
                                     for (mesh_idx, first_instance, instance_count, descriptor_set) in &textured_draw_calls {
                                         let gpu_mesh = &mesh_library[*mesh_idx];
@@ -2456,8 +2645,14 @@ pub fn create_view_matrix(
     let base_pos = world_transform.position;
 
     let hmd_transform = glam::Mat4::from_rotation_translation(eye_rot, eye_pos);
+    
+    // Extract yaw only (horizontal rotation) from the world transform 
+    // to keep the VR floor level and prevent horizon tilting.
+    let (yaw, _, _) = world_transform.rotation.to_euler(glam::EulerRot::YXZ);
+    let horizontal_rotation = glam::Quat::from_rotation_y(yaw);
+
     let player_transform =
-        glam::Mat4::from_rotation_translation(world_transform.rotation, base_pos);
+        glam::Mat4::from_rotation_translation(horizontal_rotation, base_pos);
 
     // The view matrix is the inverse of the camera's world transform
     (player_transform * hmd_transform).inverse()
