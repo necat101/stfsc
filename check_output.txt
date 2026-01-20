@@ -1,45 +1,14 @@
-    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
-error[E0405]: cannot find trait `CompositionLayer` in module `xr`
-   --> src/lib.rs:726:50
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/stfsc-main)
+error: unexpected closing delimiter: `}`
+   --> src/bin/editor.rs:443:1
     |
-726 |                     let layers_dyn: Vec<&dyn xr::CompositionLayer> = layers.iter().map(|l| *l as &dyn xr::CompositionLayer).collect();
-    |                                                  ^^^^^^^^^^^^^^^^ not found in `xr`
+262 | impl Scene {
+    |            - this opening brace...
+...
+440 | }
+    | - ...matches this closing brace
+...
+443 | }
+    | ^ unexpected closing delimiter
 
-error[E0405]: cannot find trait `CompositionLayer` in module `xr`
-   --> src/lib.rs:726:107
-    |
-726 |                     let layers_dyn: Vec<&dyn xr::CompositionLayer> = layers.iter().map(|l| *l as &dyn xr::CompositionLayer).collect();
-    |                                                                                                           ^^^^^^^^^^^^^^^^ not found in `xr`
-
-warning: unused import: `debug`
- --> src/lib.rs:3:24
-  |
-3 | use log::{info, error, debug};
-  |                        ^^^^^
-  |
-  = note: `#[warn(unused_imports)]` on by default
-
-warning: unused import: `std::ptr`
- --> src/graphics/mod.rs:7:5
-  |
-7 | use std::ptr;
-  |     ^^^^^^^^
-
-warning: unused import: `tokio::runtime::Runtime`
- --> src/world/mod.rs:2:5
-  |
-2 | use tokio::runtime::Runtime;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^
-
-warning: unused imports: `EnvironmentBlendMode`, `Posef`, and `ReferenceSpaceType`
-  --> src/lib.rs:30:5
-   |
-30 |     ReferenceSpaceType, Posef, CompositionLayerProjectionView,
-   |     ^^^^^^^^^^^^^^^^^^  ^^^^^
-31 |     SwapchainSubImage, Rect2Di, Offset2Di, Extent2Di,
-32 |     CompositionLayerProjection, EnvironmentBlendMode, Duration
-   |                                 ^^^^^^^^^^^^^^^^^^^^
-
-For more information about this error, try `rustc --explain E0405`.
-warning: `stfsc_engine` (lib) generated 4 warnings
-error: could not compile `stfsc_engine` (lib) due to 2 previous errors; 4 warnings emitted
+error: could not compile `stfsc_engine` (bin "editor") due to 1 previous error

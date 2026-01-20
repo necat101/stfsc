@@ -598,8 +598,11 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                           .map(|n| n.to_string_lossy().to_string())
                                           .unwrap_or_else(|| path.clone());
 
+                                      info!("Looking up asset in bundle: {} (original path: {})", filename, path);
+
                                       // Check if we have the asset
                                       if let Some(mesh_bytes) = bundled_project.assets.get(&filename) {
+                                          info!("Found asset in bundle: {} ({} bytes)", filename, mesh_bytes.len());
                                           // Load Model
                                           let model_res = if path.ends_with(".glb") || path.ends_with(".gltf") {
                                               gltf_loader::load_gltf_with_animations(mesh_bytes)
@@ -610,184 +613,184 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                           };
                                           
                                           match model_res {
-                                              Ok(model) => {
-                                                  let meshes = fbx_loader::model_to_all_meshes(&model);
-                                                  for (i, mesh) in meshes.into_iter().enumerate() {
-                                                      let mat = crate::world::Material {
-                                                          color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
-                                                          roughness: entity_data.material.roughness,
-                                                          metallic: entity_data.material.metallic,
-                                                          ..Default::default()
-                                                      };
-                                                      
-                                                      let mut spawn_tuple = (
-                                                          crate::world::Transform { position: pos, rotation: rot, scale: scale },
-                                                          mat,
-                                                      );
-                                                      
-                                                      let entity = state.world.ecs.spawn(spawn_tuple);
-                                                      
-                                                      // Attach animator if this is the first mesh and config exists
-                                                      if i == 0 {
-                                                          if let Some(anim_config) = &entity_data.animator_config {
-                                                              if let Some(skeleton) = &model.skeleton {
-                                                                  let clips = model.animations.iter().map(|a| Arc::new(a.clone())).collect();
-                                                                    let mut animator = Animator::new(Arc::new(skeleton.clone()), clips);
-                                                                    animator.speed = anim_config.speed;
-                                                                    let anim_state = AnimationState::new(skeleton.bones.len());
-                                                                    let _ = state.world.ecs.insert(entity, (animator, anim_state));
-                                                                  info!("Attached Animator to entity {:?}", entity);
-                                                              }
-                                                          }
-                                                      }
+                                               Ok(model) => {
+                                                   let meshes = fbx_loader::model_to_all_meshes(&model);
+                                                   for (i, mesh) in meshes.into_iter().enumerate() {
+                                                       let mat = crate::world::Material {
+                                                           color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                                           albedo_texture: entity_data.material.albedo_texture.clone(),
+                                                           roughness: entity_data.material.roughness,
+                                                           metallic: entity_data.material.metallic,
+                                                       };
+                                                       
+                                                       let spawn_tuple = (
+                                                           crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                                           mat,
+                                                       );
+                                                       
+                                                       let entity = state.world.ecs.spawn(spawn_tuple);
+                                                       
+                                                       // Attach animator if this is the first mesh and config exists
+                                                       if i == 0 {
+                                                           if let Some(anim_config) = &entity_data.animator_config {
+                                                               if let Some(skeleton) = &model.skeleton {
+                                                                   let clips = model.animations.iter().map(|a| Arc::new(a.clone())).collect();
+                                                                     let mut animator = Animator::new(Arc::new(skeleton.clone()), clips);
+                                                                     animator.speed = anim_config.speed;
+                                                                     let anim_state = AnimationState::new(skeleton.bones.len());
+                                                                     let _ = state.world.ecs.insert(entity, (animator, anim_state));
+                                                                   info!("Attached Animator to entity {:?}", entity);
+                                                               }
+                                                           }
+                                                       }
 
-                                                      resource_loader.queue_mesh(entity, mesh);
-                                                      info!("Queued mesh upload for entity {:?} (sub-mesh {})", entity, i);
-                                                  }
-                                              }
-                                              Err(e) => error!("Failed to load model {}: {:?}", path, e),
-                                          }
-                                      } else {
-                                          warn!("Asset not found in bundle: {} (looked for {})", path, filename);
-                                      }
-                                  }
-                                 EntityType::Primitive(pt) => {
-                                     let material = crate::world::Material {
-                                         color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
-                                         roughness: entity_data.material.roughness,
-                                         metallic: entity_data.material.metallic,
-                                         ..Default::default()
-                                     };
-                                     
-                                     // Map PrimitiveType to handle
-                                     let handle = match pt {
-                                         PrimitiveType::Cube => 0,
-                                         PrimitiveType::Sphere => 1,
-                                         PrimitiveType::Cylinder => 2,
-                                         PrimitiveType::Plane => 3,
-                                         PrimitiveType::Capsule => 4,
-                                         PrimitiveType::Cone => 5,
-                                     };
-
-                                     state.world.ecs.spawn((
-                                         crate::world::Transform { position: pos, rotation: rot, scale: scale },
-                                         crate::world::MeshHandle(handle), 
-                                         material,
-                                     ));
-                                 }
-                                  EntityType::Camera => {
-                                      state.world.player_start_transform.position = pos;
-                                      state.world.player_start_transform.rotation = rot;
-                                  }
-                                 EntityType::Light { light_type, color, intensity, range } => {
-                                      // Spawn Light
-                                      let engine_light_type = match light_type {
-                                          crate::project::scene::LightType::Point => crate::lighting::LightType::Point,
-                                          crate::project::scene::LightType::Spot => crate::lighting::LightType::Spot,
-                                          crate::project::scene::LightType::Directional => crate::lighting::LightType::Directional,
+                                                       resource_loader.queue_mesh(entity, mesh);
+                                                       info!("Queued mesh upload for entity {:?} (sub-mesh {})", entity, i);
+                                                   }
+                                               }
+                                               Err(e) => error!("Failed to load model {}: {:?}", path, e),
+                                           }
+                                       } else {
+                                           warn!("Asset not found in bundle: {} (looked for {})", path, filename);
+                                       }
+                                   }
+                                  EntityType::Primitive(pt) => {
+                                      let material = crate::world::Material {
+                                          color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                          albedo_texture: entity_data.material.albedo_texture.clone(),
+                                          roughness: entity_data.material.roughness,
+                                          metallic: entity_data.material.metallic,
                                       };
                                       
-                                      state.world.ecs.spawn((
-                                          crate::world::Transform { position: pos, rotation: rot, scale: scale },
-                                          crate::lighting::Light {
-                                              light_type: engine_light_type,
-                                              color: glam::Vec3::from(color),
-                                              intensity,
-                                              range,
-                                              ..Default::default()
-                                          }
-                                      ));
-                                 }
-                                 EntityType::Ground => {
-                                     let material = crate::world::Material {
-                                         color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
-                                         roughness: entity_data.material.roughness,
-                                         metallic: entity_data.material.metallic,
-                                         ..Default::default()
-                                     };
-                                     state.world.ecs.spawn((
-                                         crate::world::Transform { position: pos, rotation: rot, scale: scale },
-                                         crate::world::MeshHandle(3), // Plane
-                                         material,
-                                     ));
-                                 }
-                                 EntityType::Building { height: _ } => {
-                                     let material = crate::world::Material {
-                                         color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
-                                         roughness: entity_data.material.roughness,
-                                         metallic: entity_data.material.metallic,
-                                         ..Default::default()
-                                     };
-                                     state.world.ecs.spawn((
-                                         crate::world::Transform { position: pos, rotation: rot, scale: scale },
-                                         crate::world::MeshHandle(0), // Cube
-                                         material,
-                                     ));
-                                 }
-                                  EntityType::Vehicle => {
-                                      let material = crate::world::Material {
-                                          color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
-                                          roughness: entity_data.material.roughness,
-                                          metallic: entity_data.material.metallic,
-                                          ..Default::default()
+                                      // Map PrimitiveType to handle
+                                      let handle = match pt {
+                                          PrimitiveType::Cube => 0,
+                                          PrimitiveType::Sphere => 1,
+                                          PrimitiveType::Cylinder => 2,
+                                          PrimitiveType::Plane => 3,
+                                          PrimitiveType::Capsule => 4,
+                                          PrimitiveType::Cone => 5,
                                       };
+
                                       state.world.ecs.spawn((
                                           crate::world::Transform { position: pos, rotation: rot, scale: scale },
-                                          crate::world::MeshHandle(0), // Cube placeholder
-                                          crate::world::Vehicle { speed: 0.0, max_speed: 10.0, steering: 0.0, accelerating: false },
+                                          crate::world::MeshHandle(handle), 
                                           material,
                                       ));
-                                      info!("Spawned Vehicle at {:?}", pos);
                                   }
-                                  EntityType::CrowdAgent { state: agent_state_str, speed } => {
+                                   EntityType::Camera => {
+                                       state.world.player_start_transform.position = pos;
+                                       state.world.player_start_transform.rotation = rot;
+                                   }
+                                  EntityType::Light { light_type, color, intensity, range } => {
+                                       // Spawn Light
+                                       let engine_light_type = match light_type {
+                                           crate::project::scene::LightType::Point => crate::lighting::LightType::Point,
+                                           crate::project::scene::LightType::Spot => crate::lighting::LightType::Spot,
+                                           crate::project::scene::LightType::Directional => crate::lighting::LightType::Directional,
+                                       };
+                                       
+                                       state.world.ecs.spawn((
+                                           crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                           crate::lighting::Light {
+                                               light_type: engine_light_type,
+                                               color: glam::Vec3::from(color),
+                                               intensity,
+                                               range,
+                                               ..Default::default()
+                                           }
+                                       ));
+                                  }
+                                  EntityType::Ground => {
                                       let material = crate::world::Material {
                                           color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                          albedo_texture: entity_data.material.albedo_texture.clone(),
                                           roughness: entity_data.material.roughness,
                                           metallic: entity_data.material.metallic,
-                                          ..Default::default()
-                                      };
-                                      let agent_state = match agent_state_str.as_str() {
-                                          "Idle" => crate::world::AgentState::Idle,
-                                          "Walking" => crate::world::AgentState::Walking,
-                                          "Running" => crate::world::AgentState::Running,
-                                          _ => crate::world::AgentState::Idle,
                                       };
                                       state.world.ecs.spawn((
                                           crate::world::Transform { position: pos, rotation: rot, scale: scale },
-                                          crate::world::MeshHandle(4), // Capsule placeholder
-                                          crate::world::CrowdAgent {
-                                              velocity: glam::Vec3::ZERO,
-                                              target: pos,
-                                              state: agent_state,
-                                              max_speed: speed,
-                                              stuck_timer: 0.0,
-                                              last_pos: pos,
-                                          },
+                                          crate::world::MeshHandle(3), // Plane
                                           material,
                                       ));
-                                      info!("Spawned CrowdAgent at {:?}", pos);
                                   }
-                                  EntityType::AudioSource { sound_id, volume, looping, max_distance, .. } => {
+                                  EntityType::Building { height: _ } => {
+                                      let material = crate::world::Material {
+                                          color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                          albedo_texture: entity_data.material.albedo_texture.clone(),
+                                          roughness: entity_data.material.roughness,
+                                          metallic: entity_data.material.metallic,
+                                      };
                                       state.world.ecs.spawn((
                                           crate::world::Transform { position: pos, rotation: rot, scale: scale },
-                                          crate::world::AudioSource {
-                                              sound_id,
-                                              volume,
-                                              looping,
-                                              max_distance,
-                                              playing: true,
-                                              runtime_handle: None,
-                                          },
+                                          crate::world::MeshHandle(0), // Cube
+                                          material,
                                       ));
-                                      info!("Spawned AudioSource at {:?}", pos);
                                   }
-                                 _ => {}
-                             }
-                         }
-                     } else {
-                         error!("Failed to deserialize scene JSON");
-                     }
-                 }
+                                   EntityType::Vehicle => {
+                                       let material = crate::world::Material {
+                                           color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                           albedo_texture: entity_data.material.albedo_texture.clone(),
+                                           roughness: entity_data.material.roughness,
+                                           metallic: entity_data.material.metallic,
+                                       };
+                                       state.world.ecs.spawn((
+                                           crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                           crate::world::MeshHandle(0), // Cube placeholder
+                                           crate::world::Vehicle { speed: 0.0, max_speed: 10.0, steering: 0.0, accelerating: false },
+                                           material,
+                                       ));
+                                       info!("Spawned Vehicle at {:?}", pos);
+                                   }
+                                   EntityType::CrowdAgent { state: agent_state_str, speed } => {
+                                       let material = crate::world::Material {
+                                           color: [entity_data.material.albedo_color[0], entity_data.material.albedo_color[1], entity_data.material.albedo_color[2], 1.0],
+                                           albedo_texture: entity_data.material.albedo_texture.clone(),
+                                           roughness: entity_data.material.roughness,
+                                           metallic: entity_data.material.metallic,
+                                       };
+                                       let agent_state = match agent_state_str.as_str() {
+                                           "Idle" => crate::world::AgentState::Idle,
+                                           "Walking" => crate::world::AgentState::Walking,
+                                           "Running" => crate::world::AgentState::Running,
+                                           _ => crate::world::AgentState::Idle,
+                                       };
+                                       state.world.ecs.spawn((
+                                           crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                           crate::world::MeshHandle(4), // Capsule placeholder
+                                           crate::world::CrowdAgent {
+                                               velocity: glam::Vec3::ZERO,
+                                               target: pos,
+                                               state: agent_state,
+                                               max_speed: speed,
+                                               stuck_timer: 0.0,
+                                               last_pos: pos,
+                                           },
+                                           material,
+                                       ));
+                                       info!("Spawned CrowdAgent at {:?}", pos);
+                                   }
+                                   EntityType::AudioSource { sound_id, volume, looping, max_distance, .. } => {
+                                       state.world.ecs.spawn((
+                                           crate::world::Transform { position: pos, rotation: rot, scale: scale },
+                                           crate::world::AudioSource {
+                                               sound_id,
+                                               volume,
+                                               looping,
+                                               max_distance,
+                                               playing: true,
+                                               runtime_handle: None,
+                                           },
+                                       ));
+                                       info!("Spawned AudioSource at {:?}", pos);
+                                   }
+                                  _ => {}
+                              }
+                          }
+                      } else {
+                          error!("Failed to deserialize scene JSON");
+                      }
+                  }
              } else {
                  info!("No JSON scene found in bundle - falling back to Test Scene");
                  let scene = Scene::create_test_scene();
@@ -1747,18 +1750,21 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                                     .unwrap_or(&model);
                                                 prev_transforms.insert(entity_id, model);
 
-                                                let (color, albedo_texture) = if let Ok(mat) =
+                                                let (color, albedo_texture, metallic, roughness) = if let Ok(mat) =
                                                     state.world.ecs.get::<&world::Material>(id)
                                                 {
-                                                    (mat.color, mat.albedo_texture.clone())
+                                                    (mat.color, mat.albedo_texture.clone(), mat.metallic, mat.roughness)
                                                 } else {
-                                                    ([1.0, 1.0, 1.0, 1.0], None)
+                                                    ([1.0, 1.0, 1.0, 1.0], None, 0.0, 0.5)
                                                 };
 
                                                 let instance = InstanceData {
                                                     model,
                                                     prev_model,
                                                     color,
+                                                    metallic,
+                                                    roughness,
+                                                    _padding: [0.0; 2],
                                                 };
 
                                                 // Check for custom texture in cache
@@ -1827,18 +1833,21 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                                         .unwrap_or(&model);
                                                     prev_transforms.insert(entity_id, model);
 
-                                                    let (color, albedo_texture) = if let Ok(mat) =
+                                                    let (color, albedo_texture, metallic, roughness) = if let Ok(mat) =
                                                         state.world.ecs.get::<&world::Material>(id)
                                                     {
-                                                        (mat.color, mat.albedo_texture.clone())
+                                                        (mat.color, mat.albedo_texture.clone(), mat.metallic, mat.roughness)
                                                     } else {
-                                                        ([1.0, 1.0, 1.0, 1.0], None)
+                                                        ([1.0, 1.0, 1.0, 1.0], None, 0.0, 0.5)
                                                     };
 
                                                     let instance = InstanceData {
                                                         model,
                                                         prev_model,
                                                         color,
+                                                        metallic,
+                                                        roughness,
+                                                        _padding: [0.0; 2],
                                                     };
 
                                                     let mut textured = false;
@@ -1898,10 +1907,21 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                                 skinning = Some(anim_state.bone_matrices.clone());
                                             }
 
+                                            let (metallic, roughness) = if let Ok(mat) =
+                                                state.world.ecs.get::<&world::Material>(id)
+                                            {
+                                                (mat.metallic, mat.roughness)
+                                            } else {
+                                                (0.0, 0.5)
+                                            };
+
                                             let instance = InstanceData {
                                                 model,
                                                 prev_model,
                                                 color,
+                                                metallic,
+                                                roughness,
+                                                _padding: [0.0; 2],
                                             };
 
                                             if let Some(joints) = skinning {
@@ -2370,7 +2390,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                                 vk::PipelineBindPoint::GRAPHICS,
                                                 graphics_context.skinned_pipeline_layout,
                                                 1,
-                                                &[gpu_mesh.material_descriptor_set],
+                                                &[graphics_context.default_material_descriptor_set],
                                                 &[],
                                             );
 

@@ -26,6 +26,9 @@ pub struct InstanceData {
     pub model: glam::Mat4,
     pub prev_model: glam::Mat4,
     pub color: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub _padding: [f32; 2],
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +67,7 @@ pub struct GraphicsContext {
     pub global_set_layout: vk::DescriptorSetLayout,
     pub material_set_layout: vk::DescriptorSetLayout,
     pub descriptor_pool: vk::DescriptorPool,
+    pub default_material_descriptor_set: vk::DescriptorSet,
 
     // Shadow Resources
     pub shadow_render_pass: vk::RenderPass,
@@ -489,7 +493,7 @@ impl GraphicsContext {
         let skinned_pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_create_info, None)? };
         let skinned_pipeline = Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
 
-        Ok(Self {
+        let mut ctx = Self {
             entry,
             instance,
             physical_device,
@@ -508,6 +512,7 @@ impl GraphicsContext {
             global_set_layout,
             material_set_layout,
             descriptor_pool,
+            default_material_descriptor_set: vk::DescriptorSet::null(),
             shadow_render_pass,
             shadow_pipeline_layout,
             shadow_pipeline,
@@ -524,7 +529,38 @@ impl GraphicsContext {
             surface: None,
             #[cfg(target_os = "linux")]
             swapchain_loader: None,
-        })
+            #[cfg(target_os = "linux")]
+            swapchain: vk::SwapchainKHR::null(),
+            #[cfg(target_os = "linux")]
+            swapchain_images: Vec::new(),
+            #[cfg(target_os = "linux")]
+            swapchain_image_views: Vec::new(),
+            #[cfg(target_os = "linux")]
+            swapchain_framebuffers: Vec::new(),
+            #[cfg(target_os = "linux")]
+            desktop_depth_image: None,
+            #[cfg(target_os = "linux")]
+            desktop_depth_memory: None,
+            #[cfg(target_os = "linux")]
+            desktop_depth_view: None,
+            #[cfg(target_os = "linux")]
+            desktop_motion_image: None,
+            #[cfg(target_os = "linux")]
+            desktop_motion_memory: None,
+            #[cfg(target_os = "linux")]
+            desktop_motion_view: None,
+            #[cfg(target_os = "linux")]
+            swapchain_extent: None,
+            #[cfg(target_os = "linux")]
+            image_available_semaphore: None,
+            #[cfg(target_os = "linux")]
+            render_finished_semaphore: None,
+        };
+
+        let (albedo, normal, mr) = ctx.create_default_pbr_textures()?;
+        ctx.default_material_descriptor_set = ctx.create_material_descriptor_set(&albedo, &normal, &mr)?;
+
+        Ok(ctx)
     }
 
     #[cfg(target_os = "linux")]
@@ -701,10 +737,11 @@ impl GraphicsContext {
         let skinned_pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&push_constant_ranges).set_layouts(&[global_set_layout, material_set_layout]), None)? };
         let skinned_pipeline = Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
 
-        Ok(Self {
+        let mut ctx = Self {
             entry, instance, physical_device, device, queue_family_index, queue, command_pool, command_buffer, fence, render_pass, 
             pipeline_layout, pipeline, skinned_pipeline_layout, skinned_pipeline,
             depth_format, global_set_layout, material_set_layout, descriptor_pool,
+            default_material_descriptor_set: vk::DescriptorSet::null(),
             shadow_render_pass, shadow_pipeline_layout, shadow_pipeline, shadow_depth_image, shadow_depth_memory, shadow_depth_view, shadow_framebuffer, shadow_sampler, shadow_extent,
             queue_mutex: std::sync::Mutex::new(()),
             surface_loader: Some(surface_loader),
@@ -723,7 +760,12 @@ impl GraphicsContext {
             swapchain_extent: Some(extent),
             image_available_semaphore: Some(image_available_semaphore),
             render_finished_semaphore: Some(render_finished_semaphore),
-        })
+        };
+
+        let (albedo, normal, mr) = ctx.create_default_pbr_textures()?;
+        ctx.default_material_descriptor_set = ctx.create_material_descriptor_set(&albedo, &normal, &mr)?;
+
+        Ok(ctx)
     }
 
     /// Create a headless graphics context for offscreen rendering (no window required).
@@ -832,10 +874,11 @@ impl GraphicsContext {
         let pipeline = Self::create_graphics_pipeline_internal(&device, pipeline_layout, render_pass)?;
         let skinned_pipeline = Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
 
-        Ok(Self {
+        let mut ctx = Self {
             entry, instance, physical_device, device, queue_family_index, queue, command_pool, command_buffer, fence, render_pass, 
             pipeline_layout, pipeline, skinned_pipeline_layout, skinned_pipeline,
             depth_format, global_set_layout, material_set_layout, descriptor_pool,
+            default_material_descriptor_set: vk::DescriptorSet::null(),
             shadow_render_pass, shadow_pipeline_layout, shadow_pipeline, shadow_depth_image, shadow_depth_memory, shadow_depth_view, shadow_framebuffer, shadow_sampler, shadow_extent,
             queue_mutex: std::sync::Mutex::new(()),
             surface_loader: None,
@@ -854,7 +897,12 @@ impl GraphicsContext {
             swapchain_extent: None,
             image_available_semaphore: None,
             render_finished_semaphore: None,
-        })
+        };
+
+        let (albedo, normal, mr) = ctx.create_default_pbr_textures()?;
+        ctx.default_material_descriptor_set = ctx.create_material_descriptor_set(&albedo, &normal, &mr)?;
+
+        Ok(ctx)
     }
 
     /// Create a new command pool (useful for creating thread-local pools)
@@ -1655,13 +1703,13 @@ impl GraphicsContext {
     }
 
     pub fn create_default_pbr_textures(&self) -> Result<(Texture, Texture, Texture)> {
-        // Albedo: Solid Light Grey
+        // Albedo: Solid White
         let width = 256;
         let height = 256;
         let mut albedo_img = image::RgbaImage::new(width, height);
         for x in 0..width {
             for y in 0..height {
-                albedo_img.put_pixel(x, y, image::Rgba([200, 200, 200, 255])); 
+                albedo_img.put_pixel(x, y, image::Rgba([255, 255, 255, 255])); 
             }
         }
         let albedo = self.create_texture_from_image(&albedo_img)?;
@@ -1675,11 +1723,11 @@ impl GraphicsContext {
         }
         let normal = self.create_texture_from_image(&normal_img)?;
 
-        // MetallicRoughness: R=Metallic (0), G=Roughness (128 = 0.5)
+        // MetallicRoughness: Solid White (1.0) so InstanceData multipliers are base values
         let mut mr_img = image::RgbaImage::new(width, height);
         for x in 0..width {
             for y in 0..height {
-                mr_img.put_pixel(x, y, image::Rgba([0, 128, 0, 255]));
+                mr_img.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
             }
         }
         let mr = self.create_texture_from_image(&mr_img)?;

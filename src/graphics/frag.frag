@@ -11,6 +11,8 @@ layout(location = 7) in vec4 inClipPos;
 layout(location = 8) in vec4 inPrevClipPos;
 layout(location = 9) in vec3 inCameraPos;
 layout(location = 10) in vec4 inNormalOffsetShadowPos;
+layout(location = 11) in float inMetallic;
+layout(location = 12) in float inRoughness;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec4 outMotionVector;
@@ -298,8 +300,8 @@ void main() {
     }
     
     vec3 mr = texture(metallicRoughnessMap, inUV).rgb;
-    float metallic = mr.r;
-    float roughness = max(mr.g, 0.04); // Prevent zero roughness
+    float metallic = mr.r * inMetallic;
+    float roughness = max(mr.g * inRoughness, 0.04); // Prevent zero roughness
     
     // View direction with safe normalization
     vec3 viewDir = inCameraPos - inWorldPos;

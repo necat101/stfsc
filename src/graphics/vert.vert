@@ -6,22 +6,14 @@ layout(location = 2) in vec2 uv;
 layout(location = 3) in vec3 color;
 layout(location = 4) in vec4 tangent;
 
-layout(location = 0) out vec3 outWorldPos;
-layout(location = 1) out vec3 outNormal;
-layout(location = 2) out vec2 outUV;
-layout(location = 3) out vec3 outColor;
-layout(location = 4) out vec3 outTangent;
-layout(location = 5) out vec3 outBitangent;
-layout(location = 6) out vec4 outLightSpacePos;
-layout(location = 7) out vec4 outClipPos;
-layout(location =8) out vec4 outPrevClipPos;
-layout(location = 9) out vec3 outCameraPos;
-layout(location = 10) out vec4 outNormalOffsetShadowPos;
 
 struct InstanceData {
     mat4 model;
     mat4 prevModel;
     vec4 color;
+    float metallic;
+    float roughness;
+    vec2 _padding;
 };
 
 // Set 0 Binding 1: Instance Buffer
@@ -37,10 +29,26 @@ layout(push_constant) uniform PushConstants {
     vec4 lightDir;  // xyz = light direction, w unused
 } viewData;
 
+layout(location = 0) out vec3 outWorldPos;
+layout(location = 1) out vec3 outNormal;
+layout(location = 2) out vec2 outUV;
+layout(location = 3) out vec3 outColor;
+layout(location = 4) out vec3 outTangent;
+layout(location = 5) out vec3 outBitangent;
+layout(location = 6) out vec4 outLightSpacePos;
+layout(location = 7) out vec4 outClipPos;
+layout(location = 8) out vec4 outPrevClipPos;
+layout(location = 9) out vec3 outCameraPos;
+layout(location = 10) out vec4 outNormalOffsetShadowPos;
+layout(location = 11) out float outMetallic;
+layout(location = 12) out float outRoughness;
+
 void main() {
     mat4 model = instanceData.instances[gl_InstanceIndex].model;
     mat4 prevModel = instanceData.instances[gl_InstanceIndex].prevModel;
     vec4 instanceColor = instanceData.instances[gl_InstanceIndex].color;
+    outMetallic = instanceData.instances[gl_InstanceIndex].metallic;
+    outRoughness = instanceData.instances[gl_InstanceIndex].roughness;
 
     vec4 worldPos = model * vec4(position, 1.0);
     gl_Position = viewData.viewProj * worldPos;

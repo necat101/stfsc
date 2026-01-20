@@ -1,45 +1,11 @@
-    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/STFSC engine)
-error[E0405]: cannot find trait `CompositionLayer` in crate `oxr`
-   --> src/lib.rs:726:51
+    Checking stfsc_engine v0.1.0 (/home/netcat/Downloads/stfsc-main)
+warning: function `default_layer_editor` is never used
+   --> src/bin/editor.rs:256:4
     |
-726 |                     let layers_dyn: Vec<&dyn oxr::CompositionLayer> = layers.iter().map(|l| *l as &dyn oxr::CompositionLayer).collect();
-    |                                                   ^^^^^^^^^^^^^^^^ not found in `oxr`
-
-error[E0405]: cannot find trait `CompositionLayer` in crate `oxr`
-   --> src/lib.rs:726:109
+256 | fn default_layer_editor() -> u32 { 0 }
+    |    ^^^^^^^^^^^^^^^^^^^^
     |
-726 |                     let layers_dyn: Vec<&dyn oxr::CompositionLayer> = layers.iter().map(|l| *l as &dyn oxr::CompositionLayer).collect();
-    |                                                                                                             ^^^^^^^^^^^^^^^^ not found in `oxr`
+    = note: `#[warn(dead_code)]` on by default
 
-warning: unused import: `debug`
- --> src/lib.rs:3:24
-  |
-3 | use log::{info, error, debug};
-  |                        ^^^^^
-  |
-  = note: `#[warn(unused_imports)]` on by default
-
-warning: unused import: `std::ptr`
- --> src/graphics/mod.rs:7:5
-  |
-7 | use std::ptr;
-  |     ^^^^^^^^
-
-warning: unused import: `tokio::runtime::Runtime`
- --> src/world/mod.rs:2:5
-  |
-2 | use tokio::runtime::Runtime;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^
-
-warning: unused imports: `EnvironmentBlendMode`, `Posef`, and `ReferenceSpaceType`
-  --> src/lib.rs:30:5
-   |
-30 |     ReferenceSpaceType, Posef, CompositionLayerProjectionView,
-   |     ^^^^^^^^^^^^^^^^^^  ^^^^^
-31 |     SwapchainSubImage, Rect2Di, Offset2Di, Extent2Di,
-32 |     CompositionLayerProjection, EnvironmentBlendMode, Duration
-   |                                 ^^^^^^^^^^^^^^^^^^^^
-
-For more information about this error, try `rustc --explain E0405`.
-warning: `stfsc_engine` (lib) generated 4 warnings
-error: could not compile `stfsc_engine` (lib) due to 2 previous errors; 4 warnings emitted
+warning: `stfsc_engine` (bin "editor") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 42.74s
