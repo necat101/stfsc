@@ -51,8 +51,11 @@ fontdue = "0.8"  # Lightweight font rasterization for UI text
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = "0.27"
 rfd = { version = "0.12", default-features = false, features = ["xdg-portal"] }
-smithay-clipboard = "=0.7.2"
 winit = { version = "0.29", features = ["rwh_05"] }
+
+# Linux/Unix-specific clipboard (uses Wayland/X11)
+[target.'cfg(all(not(target_os = "android"), unix))'.dependencies]
+smithay-clipboard = "=0.7.2"
 
 # Android-only dependencies
 [target.'cfg(target_os = "android")'.dependencies]
