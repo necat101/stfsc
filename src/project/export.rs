@@ -11,6 +11,19 @@ use std::sync::mpsc::Sender;
 
 use super::{Project, TargetPlatform, OptLevel};
 
+// Cross-platform file permission helper
+#[cfg(unix)]
+fn make_executable(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+}
+
+#[cfg(windows)]
+fn make_executable(_path: &Path) -> io::Result<()> {
+    // Windows .exe files are inherently executable
+    Ok(())
+}
+
 /// Result of an export operation
 #[derive(Debug)]
 pub struct ExportResult {
@@ -116,13 +129,8 @@ impl ProjectExporter {
                 self.export_quest(project, &export_path, opt_level, platform)
             }
             TargetPlatform::PC => {
-                // Windows cross-compilation not yet supported
-                ExportResult {
-                    success: false,
-                    output_path: export_path,
-                    log: String::new(),
-                    error: Some("Windows export requires cross-compilation setup. Use Linux or Quest for now.".into()),
-                }
+                // Windows desktop export
+                self.export_windows(project, &export_path, opt_level)
             }
         }
     }
@@ -162,12 +170,7 @@ impl ProjectExporter {
                 self.export_quest_streaming(project, &export_path, opt_level, platform, progress_tx)
             }
             TargetPlatform::PC => {
-                ExportResult {
-                    success: false,
-                    output_path: export_path,
-                    log: String::new(),
-                    error: Some("Windows export not yet supported.".into()),
-                }
+                self.export_windows_streaming(project, &export_path, opt_level, progress_tx)
             }
         }
     }
@@ -256,11 +259,7 @@ impl ProjectExporter {
         }
 
         // Make executable
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&binary_dst, fs::Permissions::from_mode(0o755));
-        }
+        let _ = make_executable(&binary_dst);
 
         log.push_str(&format!("Binary created: {}\n", binary_dst.display()));
 
@@ -273,11 +272,7 @@ impl ProjectExporter {
         if let Err(e) = fs::write(&script_path, script_content) {
             log.push_str(&format!("Warning: Failed to create launch script: {}\n", e));
         } else {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755));
-            }
+            let _ = make_executable(&script_path);
         }
 
         log.push_str("\n=== Export complete ===\n");
@@ -356,11 +351,7 @@ impl ProjectExporter {
             };
         }
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&binary_dst, fs::Permissions::from_mode(0o755));
-        }
+        let _ = make_executable(&binary_dst);
 
         // Create launch script
         let script_path = export_path.join("run.sh");
@@ -369,11 +360,7 @@ impl ProjectExporter {
             project.metadata.name
         );
         let _ = fs::write(&script_path, script_content);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755));
-        }
+        let _ = make_executable(&script_path);
 
         let _ = progress_tx.send(format!("✅ Linux export complete: {}", export_path.display()));
 
@@ -781,6 +768,196 @@ impl ProjectExporter {
         log.push_str("\n=== Export complete ===\n");
         log.push_str("\nInstall with:\n");
         log.push_str(&format!("  adb install \"{}\"\n", apk_dst.display()));
+
+        ExportResult {
+            success: true,
+            output_path: export_path.to_path_buf(),
+            log,
+            error: None,
+        }
+    }
+
+    /// Export for Windows desktop
+    fn export_windows(
+        &self,
+        project: &Project,
+        export_path: &Path,
+        opt_level: OptLevel,
+    ) -> ExportResult {
+        let mut log = String::new();
+        
+        log.push_str(&format!("=== Exporting {} for Windows ===\n", project.metadata.name));
+        
+        // Step 1: Copy assets
+        log.push_str("Copying assets...\n");
+        if let Err(e) = self.copy_assets(project, export_path) {
+            return ExportResult {
+                success: false,
+                output_path: export_path.to_path_buf(),
+                log,
+                error: Some(format!("Failed to copy assets: {}", e)),
+            };
+        }
+        log.push_str(&format!("  Copied {} assets\n", project.assets.total_count()));
+
+        // Step 2: Build the engine binary
+        log.push_str("Building Windows binary...\n");
+        
+        let cargo_args = match opt_level {
+            OptLevel::Debug => vec!["build", "--bin", "stfsc_engine"],
+            OptLevel::Release => vec!["build", "--release", "--bin", "stfsc_engine"],
+            OptLevel::ReleaseLTO => vec!["build", "--release", "--bin", "stfsc_engine"],
+        };
+
+        let target_dir = match opt_level {
+            OptLevel::Debug => "debug",
+            OptLevel::Release | OptLevel::ReleaseLTO => "release",
+        };
+
+        let output = Command::new("cargo")
+            .args(&cargo_args)
+            .current_dir(&self.engine_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+
+        match output {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log.push_str(&stdout);
+                log.push_str(&stderr);
+
+                if !output.status.success() {
+                    return ExportResult {
+                        success: false,
+                        output_path: export_path.to_path_buf(),
+                        log,
+                        error: Some("Cargo build failed".into()),
+                    };
+                }
+            }
+            Err(e) => {
+                return ExportResult {
+                    success: false,
+                    output_path: export_path.to_path_buf(),
+                    log,
+                    error: Some(format!("Failed to run cargo: {}", e)),
+                };
+            }
+        }
+
+        // Step 3: Copy binary to export directory
+        let binary_src = self.engine_root.join("target").join(target_dir).join("stfsc_engine.exe");
+        let binary_dst = export_path.join(format!("{}.exe", project.metadata.name));
+
+        if let Err(e) = fs::copy(&binary_src, &binary_dst) {
+            return ExportResult {
+                success: false,
+                output_path: export_path.to_path_buf(),
+                log,
+                error: Some(format!("Failed to copy binary: {}", e)),
+            };
+        }
+
+        // Windows .exe files are already executable, no need to set permissions
+        log.push_str(&format!("Binary created: {}\n", binary_dst.display()));
+
+        // Step 4: Create launch script (Windows batch file)
+        let script_path = export_path.join("run.bat");
+        let script_content = format!(
+            "@echo off\r\ncd /D \"%~dp0\"\r\n\"{}.exe\"\r\n",
+            project.metadata.name
+        );
+        if let Err(e) = fs::write(&script_path, script_content) {
+            log.push_str(&format!("Warning: Failed to create launch script: {}\n", e));
+        }
+
+        log.push_str("\n=== Export complete ===\n");
+
+        ExportResult {
+            success: true,
+            output_path: export_path.to_path_buf(),
+            log,
+            error: None,
+        }
+    }
+    
+    /// Export for Windows desktop with streaming output
+    fn export_windows_streaming(
+        &self,
+        project: &Project,
+        export_path: &Path,
+        opt_level: OptLevel,
+        progress_tx: &Sender<String>,
+    ) -> ExportResult {
+        let mut log = String::new();
+        
+        let _ = progress_tx.send(format!("=== Exporting {} for Windows ===", project.metadata.name));
+        
+        // Step 1: Copy assets
+        let _ = progress_tx.send("📦 Copying assets...".into());
+        if let Err(e) = self.copy_assets(project, export_path) {
+            return ExportResult {
+                success: false,
+                output_path: export_path.to_path_buf(),
+                log,
+                error: Some(format!("Failed to copy assets: {}", e)),
+            };
+        }
+        let _ = progress_tx.send(format!("✓ Copied {} assets", project.assets.total_count()));
+
+        // Step 2: Build with streaming
+        let _ = progress_tx.send("🔨 Compiling Windows binary...".into());
+        
+        let cargo_args: Vec<&str> = match opt_level {
+            OptLevel::Debug => vec!["build", "--bin", "stfsc_engine"],
+            OptLevel::Release => vec!["build", "--release", "--bin", "stfsc_engine"],
+            OptLevel::ReleaseLTO => vec!["build", "--release", "--bin", "stfsc_engine"],
+        };
+
+        let target_dir = match opt_level {
+            OptLevel::Debug => "debug",
+            OptLevel::Release | OptLevel::ReleaseLTO => "release",
+        };
+
+        match self.run_cargo_streaming(&cargo_args, Some(progress_tx)) {
+            Ok(output) => {
+                log.push_str(&output);
+            }
+            Err(e) => {
+                return ExportResult {
+                    success: false,
+                    output_path: export_path.to_path_buf(),
+                    log,
+                    error: Some(e),
+                };
+            }
+        }
+
+        // Step 3: Copy binary
+        let _ = progress_tx.send("📋 Copying binary...".into());
+        let binary_src = self.engine_root.join("target").join(target_dir).join("stfsc_engine.exe");
+        let binary_dst = export_path.join(format!("{}.exe", project.metadata.name));
+
+        if let Err(e) = fs::copy(&binary_src, &binary_dst) {
+            return ExportResult {
+                success: false,
+                output_path: export_path.to_path_buf(),
+                log,
+                error: Some(format!("Failed to copy binary: {}", e)),
+            };
+        }
+
+        // Create launch script (Windows batch file)
+        let script_path = export_path.join("run.bat");
+        let script_content = format!(
+            "@echo off\r\ncd /D \"%~dp0\"\r\n\"{}.exe\"\r\n",
+            project.metadata.name
+        );
+        let _ = fs::write(&script_path, script_content);
+
+        let _ = progress_tx.send(format!("✅ Windows export complete: {}", export_path.display()));
 
         ExportResult {
             success: true,

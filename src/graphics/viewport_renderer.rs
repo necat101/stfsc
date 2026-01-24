@@ -298,7 +298,7 @@ impl ViewportRenderer {
         
         // 12. Create descriptor sets
         let global_descriptor_set = graphics.create_global_descriptor_set(
-            graphics.shadow_depth_view,
+            graphics.shadow_depth_views[0],
             graphics.shadow_sampler,
             instance_buffer,
             light_buffer,

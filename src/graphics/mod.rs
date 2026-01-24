@@ -56,8 +56,12 @@ pub struct GraphicsContext {
     pub queue_family_index: u32,
     pub queue: vk::Queue,
     pub command_pool: vk::CommandPool,
-    pub command_buffer: vk::CommandBuffer,
-    pub fence: vk::Fence,
+    pub in_flight_command_buffers: Vec<vk::CommandBuffer>,
+    pub in_flight_fences: Vec<vk::Fence>,
+    pub image_available_semaphores: Vec<vk::Semaphore>,
+    pub render_finished_semaphores: Vec<vk::Semaphore>,
+    pub current_frame: usize,
+    pub max_frames_in_flight: usize,
     pub render_pass: vk::RenderPass,
     pub pipeline_layout: vk::PipelineLayout,
     pub pipeline: vk::Pipeline,
@@ -73,48 +77,43 @@ pub struct GraphicsContext {
     pub shadow_render_pass: vk::RenderPass,
     pub shadow_pipeline_layout: vk::PipelineLayout,
     pub shadow_pipeline: vk::Pipeline,
-    pub shadow_depth_image: vk::Image,
-    pub shadow_depth_memory: vk::DeviceMemory,
-    pub shadow_depth_view: vk::ImageView,
-    pub shadow_framebuffer: vk::Framebuffer,
+    pub shadow_depth_images: Vec<vk::Image>,
+    pub shadow_depth_memories: Vec<vk::DeviceMemory>,
+    pub shadow_depth_views: Vec<vk::ImageView>,
+    pub shadow_framebuffers: Vec<vk::Framebuffer>,
     pub shadow_sampler: vk::Sampler,
     pub shadow_extent: vk::Extent2D,
 
     // Thread safety for queue submission
     pub queue_mutex: std::sync::Mutex<()>,
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "android"))]
     pub surface_loader: Option<ash::extensions::khr::Surface>,
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "android"))]
     pub surface: Option<vk::SurfaceKHR>,
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "android"))]
     pub swapchain_loader: Option<ash::extensions::khr::Swapchain>,
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "android"))]
     pub swapchain: Option<vk::SwapchainKHR>,
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "android"))]
     pub swapchain_images: Vec<vk::Image>,
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "android"))]
     pub swapchain_image_views: Vec<vk::ImageView>,
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "android"))]
     pub swapchain_framebuffers: Vec<vk::Framebuffer>,
-    #[cfg(target_os = "linux")]
-    pub desktop_depth_image: Option<vk::Image>,
-    #[cfg(target_os = "linux")]
-    pub desktop_depth_memory: Option<vk::DeviceMemory>,
-    #[cfg(target_os = "linux")]
-    pub desktop_depth_view: Option<vk::ImageView>,
-    #[cfg(target_os = "linux")]
-    pub desktop_motion_image: Option<vk::Image>,
-    #[cfg(target_os = "linux")]
-    pub desktop_motion_memory: Option<vk::DeviceMemory>,
-    #[cfg(target_os = "linux")]
-    pub desktop_motion_view: Option<vk::ImageView>,
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "android"))]
+    pub desktop_depth_images: Vec<vk::Image>,
+    #[cfg(not(target_os = "android"))]
+    pub desktop_depth_memories: Vec<vk::DeviceMemory>,
+    #[cfg(not(target_os = "android"))]
+    pub desktop_depth_views: Vec<vk::ImageView>,
+    #[cfg(not(target_os = "android"))]
+    pub desktop_motion_images: Vec<vk::Image>,
+    #[cfg(not(target_os = "android"))]
+    pub desktop_motion_memories: Vec<vk::DeviceMemory>,
+    #[cfg(not(target_os = "android"))]
+    pub desktop_motion_views: Vec<vk::ImageView>,
     pub swapchain_extent: Option<vk::Extent2D>,
-    #[cfg(target_os = "linux")]
-    pub image_available_semaphore: Option<vk::Semaphore>,
-    #[cfg(target_os = "linux")]
-    pub render_finished_semaphore: Option<vk::Semaphore>,
 }
 
 /// Calculate optimal shadow map resolution based on ground plane extent.
@@ -228,23 +227,26 @@ impl GraphicsContext {
         let device = unsafe { instance.create_device(physical_device, &device_create_info, None)? };
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
-        // 5. Create Command Pool
+        // 5. Synchronization & Command Buffers
+        let max_frames_in_flight = 1; // Android stays with 1 for now
+        let mut in_flight_fences = Vec::new();
+        let mut image_available_semaphores = Vec::new();
+        let mut render_finished_semaphores = Vec::new();
+        for _ in 0..max_frames_in_flight {
+             in_flight_fences.push(unsafe { device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None)? });
+             image_available_semaphores.push(unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? });
+             render_finished_semaphores.push(unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? });
+        }
+
         let pool_create_info = vk::CommandPoolCreateInfo::builder()
             .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let command_pool = unsafe { device.create_command_pool(&pool_create_info, None)? };
-
-        // 6. Allocate Command Buffer
-        let buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
-            .command_pool(command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-        let command_buffer = unsafe { device.allocate_command_buffers(&buffer_allocate_info)?[0] };
-
-        // 7. Create Fence
-        let fence_create_info =
-            vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
-        let fence = unsafe { device.create_fence(&fence_create_info, None)? };
+        
+        let mut in_flight_command_buffers = Vec::new();
+        for _ in 0..max_frames_in_flight {
+            in_flight_command_buffers.push(unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::builder().command_pool(command_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1))?[0] });
+        }
 
         // Find Depth Format
         let depth_format = Self::find_depth_format(&instance, physical_device)?;
@@ -501,8 +503,12 @@ impl GraphicsContext {
             queue_family_index,
             queue,
             command_pool,
-            command_buffer,
-            fence,
+            in_flight_command_buffers,
+            in_flight_fences,
+            image_available_semaphores,
+            render_finished_semaphores,
+            current_frame: 0,
+            max_frames_in_flight,
             render_pass,
             pipeline_layout,
             pipeline,
@@ -516,45 +522,41 @@ impl GraphicsContext {
             shadow_render_pass,
             shadow_pipeline_layout,
             shadow_pipeline,
-            shadow_depth_image,
-            shadow_depth_memory,
-            shadow_depth_view,
-            shadow_framebuffer,
+            shadow_depth_images: vec![shadow_depth_image],
+            shadow_depth_memories: vec![shadow_depth_memory],
+            shadow_depth_views: vec![shadow_depth_view],
+            shadow_framebuffers: vec![shadow_framebuffer],
             shadow_sampler,
             shadow_extent,
             queue_mutex: std::sync::Mutex::new(()),
-            #[cfg(target_os = "linux")]
+            #[cfg(not(target_os = "android"))]
             surface_loader: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(not(target_os = "android"))]
             surface: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(not(target_os = "android"))]
             swapchain_loader: None,
-            #[cfg(target_os = "linux")]
-            swapchain: vk::SwapchainKHR::null(),
-            #[cfg(target_os = "linux")]
+            #[cfg(not(target_os = "android"))]
+            swapchain: None,
+            #[cfg(not(target_os = "android"))]
             swapchain_images: Vec::new(),
-            #[cfg(target_os = "linux")]
+            #[cfg(not(target_os = "android"))]
             swapchain_image_views: Vec::new(),
-            #[cfg(target_os = "linux")]
+            #[cfg(not(target_os = "android"))]
             swapchain_framebuffers: Vec::new(),
-            #[cfg(target_os = "linux")]
-            desktop_depth_image: None,
-            #[cfg(target_os = "linux")]
-            desktop_depth_memory: None,
-            #[cfg(target_os = "linux")]
-            desktop_depth_view: None,
-            #[cfg(target_os = "linux")]
-            desktop_motion_image: None,
-            #[cfg(target_os = "linux")]
-            desktop_motion_memory: None,
-            #[cfg(target_os = "linux")]
-            desktop_motion_view: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(not(target_os = "android"))]
+            desktop_depth_images: Vec::new(),
+            #[cfg(not(target_os = "android"))]
+            desktop_depth_memories: Vec::new(),
+            #[cfg(not(target_os = "android"))]
+            desktop_depth_views: Vec::new(),
+            #[cfg(not(target_os = "android"))]
+            desktop_motion_images: Vec::new(),
+            #[cfg(not(target_os = "android"))]
+            desktop_motion_memories: Vec::new(),
+            #[cfg(not(target_os = "android"))]
+            desktop_motion_views: Vec::new(),
+            #[cfg(not(target_os = "android"))]
             swapchain_extent: None,
-            #[cfg(target_os = "linux")]
-            image_available_semaphore: None,
-            #[cfg(target_os = "linux")]
-            render_finished_semaphore: None,
         };
 
         let (albedo, normal, mr) = ctx.create_default_pbr_textures()?;
@@ -563,7 +565,7 @@ impl GraphicsContext {
         Ok(ctx)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "android"))]
     pub fn new_desktop(window: &winit::window::Window) -> Result<Self> {
         Self::new_desktop_with_shadow_resolution(window, None)
     }
@@ -573,7 +575,7 @@ impl GraphicsContext {
     /// # Arguments
     /// * `shadow_resolution` - Shadow map size (e.g., 2048, 4096). If None, uses default 4096.
     ///                        Calculate with `calculate_shadow_resolution(ground_half_extent)`.
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "android"))]
     pub fn new_desktop_with_shadow_resolution(window: &winit::window::Window, shadow_resolution: Option<u32>) -> Result<Self> {
         use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
         let entry = unsafe { Entry::load()? };
@@ -622,9 +624,16 @@ impl GraphicsContext {
             .queue_priorities(&queue_priorities);
 
         let device_extensions = [ash::extensions::khr::Swapchain::name().as_ptr()];
+        
+        // Enable device features (samplerAnisotropy for textures, independentBlend for UI overlay)
+        let device_features = vk::PhysicalDeviceFeatures::builder()
+            .sampler_anisotropy(true)
+            .independent_blend(true);
+            
         let device_create_info = vk::DeviceCreateInfo::builder()
             .queue_create_infos(std::slice::from_ref(&queue_create_info))
-            .enabled_extension_names(&device_extensions);
+            .enabled_extension_names(&device_extensions)
+            .enabled_features(&device_features);
 
         let device = unsafe { instance.create_device(physical_device, &device_create_info, None)? };
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
@@ -633,7 +642,15 @@ impl GraphicsContext {
 
         // 4. Swapchain
         let surface_capabilities = unsafe { surface_loader.get_physical_device_surface_capabilities(physical_device, surface)? };
-        let surface_format = unsafe { surface_loader.get_physical_device_surface_formats(physical_device, surface)?[0] };
+        let available_formats = unsafe { surface_loader.get_physical_device_surface_formats(physical_device, surface)? };
+        
+        // Select preferred surface format: prefer B8G8R8A8_UNORM or B8G8R8A8_SRGB for Windows compatibility
+        let surface_format = available_formats.iter()
+            .find(|f| f.format == vk::Format::B8G8R8A8_UNORM && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
+            .or_else(|| available_formats.iter().find(|f| f.format == vk::Format::B8G8R8A8_SRGB))
+            .or_else(|| available_formats.iter().find(|f| f.format == vk::Format::R8G8B8A8_UNORM))
+            .unwrap_or(&available_formats[0])
+            .clone();
         let extent = surface_capabilities.current_extent;
 
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
@@ -661,17 +678,46 @@ impl GraphicsContext {
             unsafe { device.create_image_view(&create_info, None) }
         }).collect::<Result<Vec<_>, _>>()?;
 
-        // 5. Command Pool & Buffer
+        // 5. Synchronization & Command Buffers
+        let max_frames_in_flight = 2;
+        let mut in_flight_fences = Vec::new();
+        let mut image_available_semaphores = Vec::new();
+        let mut render_finished_semaphores = Vec::new();
+        for _ in 0..max_frames_in_flight {
+             in_flight_fences.push(unsafe { device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None)? });
+             image_available_semaphores.push(unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? });
+             render_finished_semaphores.push(unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? });
+        }
+
         let pool_create_info = vk::CommandPoolCreateInfo::builder()
             .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let command_pool = unsafe { device.create_command_pool(&pool_create_info, None)? };
-        let command_buffer = unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::builder().command_pool(command_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1))?[0] };
-        let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None)? };
+        
+        let mut in_flight_command_buffers = Vec::new();
+        for _ in 0..max_frames_in_flight {
+            in_flight_command_buffers.push(unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::builder().command_pool(command_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1))?[0] });
+        }
 
-        // 6. Depth & Motion Vector Resources
-        let (desktop_depth_image, desktop_depth_memory, desktop_depth_view) = Self::create_image_resources_internal(&instance, &device, physical_device, extent.width, extent.height, depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
-        let (desktop_motion_image, desktop_motion_memory, desktop_motion_view) = Self::create_image_resources_internal(&instance, &device, physical_device, extent.width, extent.height, vk::Format::R16G16_SFLOAT, vk::ImageUsageFlags::COLOR_ATTACHMENT, vk::ImageAspectFlags::COLOR)?;
+        // 6. Depth & Motion Vector Resources (Per swapchain image)
+        let mut desktop_depth_images = Vec::new();
+        let mut desktop_depth_memories = Vec::new();
+        let mut desktop_depth_views = Vec::new();
+        let mut desktop_motion_images = Vec::new();
+        let mut desktop_motion_memories = Vec::new();
+        let mut desktop_motion_views = Vec::new();
+
+        for _ in 0..swapchain_images.len() {
+            let (d_img, d_mem, d_view) = Self::create_image_resources_internal(&instance, &device, physical_device, extent.width, extent.height, depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
+            desktop_depth_images.push(d_img);
+            desktop_depth_memories.push(d_mem);
+            desktop_depth_views.push(d_view);
+
+            let (m_img, m_mem, m_view) = Self::create_image_resources_internal(&instance, &device, physical_device, extent.width, extent.height, vk::Format::R16G16_SFLOAT, vk::ImageUsageFlags::COLOR_ATTACHMENT, vk::ImageAspectFlags::COLOR)?;
+            desktop_motion_images.push(m_img);
+            desktop_motion_memories.push(m_mem);
+            desktop_motion_views.push(m_view);
+        }
 
         // 7. Render Pass (Desktop version)
         let render_pass_attachments = [
@@ -688,9 +734,9 @@ impl GraphicsContext {
         let dependencies = [vk::SubpassDependency::builder().src_subpass(vk::SUBPASS_EXTERNAL).dst_subpass(0).src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS).dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS).dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE).build()];
         let render_pass = unsafe { device.create_render_pass(&vk::RenderPassCreateInfo::builder().attachments(&render_pass_attachments).subpasses(&subpasses).dependencies(&dependencies), None)? };
 
-        // 8. Framebuffers
-        let swapchain_framebuffers = swapchain_image_views.iter().map(|&view| {
-            let attachments = [view, desktop_depth_view, desktop_motion_view];
+        // 8. Framebuffers (mapping to per-swapchain depth/motion)
+        let swapchain_framebuffers = swapchain_image_views.iter().enumerate().map(|(i, &view)| {
+            let attachments = [view, desktop_depth_views[i], desktop_motion_views[i]];
             let create_info = vk::FramebufferCreateInfo::builder()
                 .render_pass(render_pass)
                 .attachments(&attachments)
@@ -720,29 +766,47 @@ impl GraphicsContext {
         let push_constant_ranges = [vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT).offset(0).size(192 + 32).build()];
         let pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&push_constant_ranges).set_layouts(&[global_set_layout, material_set_layout]), None)? };
 
-        // 11. Shadow Resources
+        // 11. Shadow Resources (Per frame in flight)
         let shadow_res = shadow_resolution.unwrap_or(4096);
         let shadow_extent = vk::Extent2D { width: shadow_res, height: shadow_res };
         let shadow_render_pass = Self::create_shadow_render_pass_internal(&device)?;
         let shadow_pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&[vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::VERTEX).offset(0).size(64).build()]).set_layouts(&[global_set_layout]), None)? };
         let shadow_pipeline = Self::create_shadow_pipeline_internal(&device, shadow_pipeline_layout, shadow_render_pass)?;
-        let (shadow_depth_image, shadow_depth_memory, shadow_depth_view) = Self::create_shadow_image_resources_internal(&instance, &device, physical_device, shadow_extent)?;
-        let shadow_framebuffer = unsafe { device.create_framebuffer(&vk::FramebufferCreateInfo::builder().render_pass(shadow_render_pass).attachments(&[shadow_depth_view]).width(shadow_extent.width).height(shadow_extent.height).layers(1), None)? };
+        
+        let mut shadow_depth_images = Vec::new();
+        let mut shadow_depth_memories = Vec::new();
+        let mut shadow_depth_views = Vec::new();
+        let mut shadow_framebuffers = Vec::new();
+
+        for _ in 0..max_frames_in_flight {
+            let (s_img, s_mem, s_view) = Self::create_shadow_image_resources_internal(&instance, &device, physical_device, shadow_extent)?;
+            let s_fb = unsafe { device.create_framebuffer(&vk::FramebufferCreateInfo::builder().render_pass(shadow_render_pass).attachments(&[s_view]).width(shadow_extent.width).height(shadow_extent.height).layers(1), None)? };
+            shadow_depth_images.push(s_img);
+            shadow_depth_memories.push(s_mem);
+            shadow_depth_views.push(s_view);
+            shadow_framebuffers.push(s_fb);
+        }
+
         let shadow_sampler = unsafe { device.create_sampler(&vk::SamplerCreateInfo::builder().mag_filter(vk::Filter::LINEAR).min_filter(vk::Filter::LINEAR).address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER).address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER).address_mode_w(vk::SamplerAddressMode::CLAMP_TO_BORDER).border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE).build(), None)? };
 
-        let image_available_semaphore = unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? };
-        let render_finished_semaphore = unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? };
+        unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? };
+        unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? };
 
         let pipeline = Self::create_graphics_pipeline_internal(&device, pipeline_layout, render_pass)?;
         let skinned_pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&push_constant_ranges).set_layouts(&[global_set_layout, material_set_layout]), None)? };
         let skinned_pipeline = Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
 
         let mut ctx = Self {
-            entry, instance, physical_device, device, queue_family_index, queue, command_pool, command_buffer, fence, render_pass, 
+            entry, instance, physical_device, device, queue_family_index, queue, command_pool, 
+            in_flight_command_buffers,
+            in_flight_fences, image_available_semaphores, render_finished_semaphores, current_frame: 0, max_frames_in_flight,
+            render_pass, 
             pipeline_layout, pipeline, skinned_pipeline_layout, skinned_pipeline,
             depth_format, global_set_layout, material_set_layout, descriptor_pool,
             default_material_descriptor_set: vk::DescriptorSet::null(),
-            shadow_render_pass, shadow_pipeline_layout, shadow_pipeline, shadow_depth_image, shadow_depth_memory, shadow_depth_view, shadow_framebuffer, shadow_sampler, shadow_extent,
+            shadow_render_pass, shadow_pipeline_layout, shadow_pipeline, 
+            shadow_depth_images, shadow_depth_memories, shadow_depth_views, shadow_framebuffers, 
+            shadow_sampler, shadow_extent,
             queue_mutex: std::sync::Mutex::new(()),
             surface_loader: Some(surface_loader),
             surface: Some(surface),
@@ -751,15 +815,9 @@ impl GraphicsContext {
             swapchain_images,
             swapchain_image_views,
             swapchain_framebuffers,
-            desktop_depth_image: Some(desktop_depth_image),
-            desktop_depth_memory: Some(desktop_depth_memory),
-            desktop_depth_view: Some(desktop_depth_view),
-            desktop_motion_image: Some(desktop_motion_image),
-            desktop_motion_memory: Some(desktop_motion_memory),
-            desktop_motion_view: Some(desktop_motion_view),
+            desktop_depth_images, desktop_depth_memories, desktop_depth_views,
+            desktop_motion_images, desktop_motion_memories, desktop_motion_views,
             swapchain_extent: Some(extent),
-            image_available_semaphore: Some(image_available_semaphore),
-            render_finished_semaphore: Some(render_finished_semaphore),
         };
 
         let (albedo, normal, mr) = ctx.create_default_pbr_textures()?;
@@ -770,7 +828,7 @@ impl GraphicsContext {
 
     /// Create a headless graphics context for offscreen rendering (no window required).
     /// Used by the editor for GPU-accelerated viewport rendering.
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "android"))]
     pub fn new_headless() -> Result<Self> {
         let entry = unsafe { Entry::load()? };
 
@@ -817,13 +875,25 @@ impl GraphicsContext {
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
         let depth_format = Self::find_depth_format(&instance, physical_device)?;
 
-        // 4. Command Pool & Buffer
         let pool_create_info = vk::CommandPoolCreateInfo::builder()
             .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let command_pool = unsafe { device.create_command_pool(&pool_create_info, None)? };
-        let command_buffer = unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::builder().command_pool(command_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1))?[0] };
-        let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None)? };
+        
+        let max_frames_in_flight = 1; // Headless only needs 1 frame in flight usually
+        let mut in_flight_fences = Vec::new();
+        let mut image_available_semaphores = Vec::new();
+        let mut render_finished_semaphores = Vec::new();
+        for _ in 0..max_frames_in_flight {
+             in_flight_fences.push(unsafe { device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None)? });
+             image_available_semaphores.push(unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? });
+             render_finished_semaphores.push(unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? });
+        }
+
+        let mut in_flight_command_buffers = Vec::new();
+        for _ in 0..max_frames_in_flight {
+            in_flight_command_buffers.push(unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::builder().command_pool(command_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1))?[0] });
+        }
 
         // 5. Create offscreen render pass (renders to texture, not swapchain)
         let render_pass_attachments = [
@@ -875,11 +945,19 @@ impl GraphicsContext {
         let skinned_pipeline = Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
 
         let mut ctx = Self {
-            entry, instance, physical_device, device, queue_family_index, queue, command_pool, command_buffer, fence, render_pass, 
+            entry, instance, physical_device, device, queue_family_index, queue, command_pool, 
+            in_flight_command_buffers,
+            in_flight_fences, image_available_semaphores, render_finished_semaphores, current_frame: 0, max_frames_in_flight,
+            render_pass, 
             pipeline_layout, pipeline, skinned_pipeline_layout, skinned_pipeline,
             depth_format, global_set_layout, material_set_layout, descriptor_pool,
             default_material_descriptor_set: vk::DescriptorSet::null(),
-            shadow_render_pass, shadow_pipeline_layout, shadow_pipeline, shadow_depth_image, shadow_depth_memory, shadow_depth_view, shadow_framebuffer, shadow_sampler, shadow_extent,
+            shadow_render_pass, shadow_pipeline_layout, shadow_pipeline, 
+            shadow_depth_images: vec![shadow_depth_image],
+            shadow_depth_memories: vec![shadow_depth_memory],
+            shadow_depth_views: vec![shadow_depth_view],
+            shadow_framebuffers: vec![shadow_framebuffer],
+            shadow_sampler, shadow_extent,
             queue_mutex: std::sync::Mutex::new(()),
             surface_loader: None,
             surface: None,
@@ -888,15 +966,13 @@ impl GraphicsContext {
             swapchain_images: Vec::new(),
             swapchain_image_views: Vec::new(),
             swapchain_framebuffers: Vec::new(),
-            desktop_depth_image: None,
-            desktop_depth_memory: None,
-            desktop_depth_view: None,
-            desktop_motion_image: None,
-            desktop_motion_memory: None,
-            desktop_motion_view: None,
+            desktop_depth_images: Vec::new(),
+            desktop_depth_memories: Vec::new(),
+            desktop_depth_views: Vec::new(),
+            desktop_motion_images: Vec::new(),
+            desktop_motion_memories: Vec::new(),
+            desktop_motion_views: Vec::new(),
             swapchain_extent: None,
-            image_available_semaphore: None,
-            render_finished_semaphore: None,
         };
 
         let (albedo, normal, mr) = ctx.create_default_pbr_textures()?;
@@ -2522,6 +2598,21 @@ impl GraphicsContext {
             pipeline_layout,
         })
     }
+
+    pub fn destroy_mesh(&self, mesh: &GpuMesh) {
+        unsafe {
+            self.device.destroy_buffer(mesh.vertex_buffer, None);
+            self.device.free_memory(mesh.vertex_memory, None);
+            self.device.destroy_buffer(mesh.index_buffer, None);
+            self.device.free_memory(mesh.index_memory, None);
+            for tex in &mesh.custom_textures {
+                self.device.destroy_sampler(tex.sampler, None);
+                self.device.destroy_image_view(tex.image_view, None);
+                self.device.destroy_image(tex.image, None);
+                self.device.free_memory(tex.image_memory, None);
+            }
+        }
+    }
 }
 
 impl Drop for GraphicsContext {
@@ -2535,36 +2626,46 @@ impl Drop for GraphicsContext {
             self.device.destroy_descriptor_set_layout(self.material_set_layout, None);
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device.destroy_pipeline(self.skinned_pipeline, None);
+            self.device.destroy_pipeline_layout(self.skinned_pipeline_layout, None);
             self.device.destroy_render_pass(self.render_pass, None);
-            self.device.destroy_fence(self.fence, None);
+            
+            for &fence in &self.in_flight_fences {
+                self.device.destroy_fence(fence, None);
+            }
+            for &sem in &self.image_available_semaphores {
+                self.device.destroy_semaphore(sem, None);
+            }
+            for &sem in &self.render_finished_semaphores {
+                self.device.destroy_semaphore(sem, None);
+            }
+
             self.device.destroy_command_pool(self.command_pool, None);
 
             // Shadow resources
             self.device.destroy_sampler(self.shadow_sampler, None);
-            self.device.destroy_framebuffer(self.shadow_framebuffer, None);
-            self.device.destroy_image_view(self.shadow_depth_view, None);
-            self.device.destroy_image(self.shadow_depth_image, None);
-            self.device.free_memory(self.shadow_depth_memory, None);
+            for &fb in &self.shadow_framebuffers { self.device.destroy_framebuffer(fb, None); }
+            for &view in &self.shadow_depth_views { self.device.destroy_image_view(view, None); }
+            for &img in &self.shadow_depth_images { self.device.destroy_image(img, None); }
+            for &mem in &self.shadow_depth_memories { self.device.free_memory(mem, None); }
             self.device.destroy_pipeline(self.shadow_pipeline, None);
             self.device.destroy_pipeline_layout(self.shadow_pipeline_layout, None);
             self.device.destroy_render_pass(self.shadow_render_pass, None);
 
-            #[cfg(target_os = "linux")]
+            #[cfg(not(target_os = "android"))]
             {
-                if let Some(sem) = self.image_available_semaphore { self.device.destroy_semaphore(sem, None); }
-                if let Some(sem) = self.render_finished_semaphore { self.device.destroy_semaphore(sem, None); }
                 for &fb in &self.swapchain_framebuffers { self.device.destroy_framebuffer(fb, None); }
                 for &view in &self.swapchain_image_views { self.device.destroy_image_view(view, None); }
                 if let Some(sw) = self.swapchain { self.swapchain_loader.as_ref().unwrap().destroy_swapchain(sw, None); }
                 if let Some(surf) = self.surface { self.surface_loader.as_ref().unwrap().destroy_surface(surf, None); }
                 
-                if let Some(view) = self.desktop_depth_view { self.device.destroy_image_view(view, None); }
-                if let Some(img) = self.desktop_depth_image { self.device.destroy_image(img, None); }
-                if let Some(mem) = self.desktop_depth_memory { self.device.free_memory(mem, None); }
+                for &img in &self.desktop_depth_images { self.device.destroy_image(img, None); }
+                for &mem in &self.desktop_depth_memories { self.device.free_memory(mem, None); }
+                for &view in &self.desktop_depth_views { self.device.destroy_image_view(view, None); }
 
-                if let Some(view) = self.desktop_motion_view { self.device.destroy_image_view(view, None); }
-                if let Some(img) = self.desktop_motion_image { self.device.destroy_image(img, None); }
-                if let Some(mem) = self.desktop_motion_memory { self.device.free_memory(mem, None); }
+                for &img in &self.desktop_motion_images { self.device.destroy_image(img, None); }
+                for &mem in &self.desktop_motion_memories { self.device.free_memory(mem, None); }
+                for &view in &self.desktop_motion_views { self.device.destroy_image_view(view, None); }
             }
 
             self.device.destroy_device(None);

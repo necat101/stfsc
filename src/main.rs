@@ -35,7 +35,11 @@ struct TextureEntry {
 fn main() {
     env_logger::init();
 
-    info!("STFSC Engine - Linux Desktop Target");
+    #[cfg(target_os = "linux")]
+    info!("STFSC Engine - Linux Desktop");
+    
+    #[cfg(target_os = "windows")]
+    info!("STFSC Engine - Windows Desktop");
 
     // ========================================================================
     // SCENE PRE-INITIALIZATION PHASE (like COD's shader compilation screen)
@@ -64,47 +68,67 @@ fn main() {
     // Create Default Textures
     let (albedo_tex, normal_tex, mr_tex) = graphics_context.create_default_pbr_textures().expect("Failed to create default textures");
 
-    // Create Global Instance Buffer (10k instances)
+    // 5. Create Per-Frame Data Buffers
+    let max_frames_in_flight = graphics_context.max_frames_in_flight;
+    let mut instance_buffers = Vec::new();
+    let mut instance_memories = Vec::new();
+    let mut instance_ptrs = Vec::new();
+    let mut light_buffers = Vec::new();
+    let mut light_memories = Vec::new();
+    let mut light_ptrs = Vec::new();
+    let mut bone_buffers = Vec::new();
+    let mut bone_memories = Vec::new();
+    let mut global_descriptor_sets = Vec::new();
+
     let max_instances = 10000;
-    let (instance_buffer, instance_memory) = graphics_context.create_buffer(
-        (max_instances * std::mem::size_of::<InstanceData>()) as u64,
-        vk::BufferUsageFlags::STORAGE_BUFFER,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-    ).expect("Failed to create instance buffer");
-
-    let instance_ptr = unsafe {
-        graphics_context.device.map_memory(instance_memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).expect("Failed to map instance buffer") as *mut InstanceData
-    };
-
-    // Create Light Uniform Buffer
     let light_buffer_size = std::mem::size_of::<LightUBO>() as u64;
-    let (light_buffer, light_memory) = graphics_context.create_buffer(
-        light_buffer_size,
-        vk::BufferUsageFlags::UNIFORM_BUFFER,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-    ).expect("Failed to create light buffer");
-
-    let light_ptr = unsafe {
-        graphics_context.device.map_memory(light_memory, 0, light_buffer_size, vk::MemoryMapFlags::empty()).expect("Failed to map light buffer") as *mut LightUBO
-    };
-
-    unsafe { *light_ptr = LightUBO::default(); }
-
-    // Create Bone Matrices buffer
     let bone_buffer_size = (128 * std::mem::size_of::<glam::Mat4>()) as u64;
-    let (bone_buffer, _bone_memory) = graphics_context.create_buffer(
-        bone_buffer_size,
-        vk::BufferUsageFlags::UNIFORM_BUFFER,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-    ).expect("Failed to create bone buffer");
 
-    let global_descriptor_set = graphics_context.create_global_descriptor_set(
-        graphics_context.shadow_depth_view,
-        graphics_context.shadow_sampler,
-        instance_buffer,
-        light_buffer,
-        bone_buffer,
-    ).expect("Failed to create global descriptor set");
+    for i in 0..max_frames_in_flight {
+        // Instance Buffer
+        let (i_buf, i_mem) = graphics_context.create_buffer(
+            (max_instances * std::mem::size_of::<InstanceData>()) as u64,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ).expect("Failed to create instance buffer");
+        let i_ptr = unsafe {
+            graphics_context.device.map_memory(i_mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).expect("Failed to map instance buffer") as *mut InstanceData
+        };
+        instance_buffers.push(i_buf);
+        instance_memories.push(i_mem);
+        instance_ptrs.push(i_ptr);
+
+        // Light Buffer
+        let (l_buf, l_mem) = graphics_context.create_buffer(
+            light_buffer_size,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ).expect("Failed to create light buffer");
+        let l_ptr = unsafe {
+            graphics_context.device.map_memory(l_mem, 0, light_buffer_size, vk::MemoryMapFlags::empty()).expect("Failed to map light buffer") as *mut LightUBO
+        };
+        unsafe { *l_ptr = LightUBO::default(); }
+        light_buffers.push(l_buf);
+        light_memories.push(l_mem);
+        light_ptrs.push(l_ptr);
+
+        let (b_buf, b_mem) = graphics_context.create_buffer(
+            bone_buffer_size,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ).expect("Failed to create bone buffer");
+        bone_buffers.push(b_buf);
+        bone_memories.push(b_mem);
+
+        let descriptor_set = graphics_context.create_global_descriptor_set(
+            graphics_context.shadow_depth_views[i],
+            graphics_context.shadow_sampler,
+            i_buf,
+            l_buf,
+            b_buf,
+        ).expect("Failed to create global descriptor set");
+        global_descriptor_sets.push(descriptor_set);
+    }
 
     let material_descriptor_set = graphics_context.create_material_descriptor_set(&albedo_tex, &normal_tex, &mr_tex).expect("Failed to create material descriptor set");
 
@@ -180,8 +204,8 @@ fn main() {
     ));
     physics_world.rigid_body_set.get_mut(floor_rb).unwrap().user_data = floor_id.to_bits().get() as u128;
 
-    // 2. CollisionLogger Sphere (falls onto floor)
-    let sphere_pos = [2.0, 8.0, 0.0];
+    // 2. CollisionLogger Sphere (Moved to ground level to verify rendering)
+    let sphere_pos = [2.0, 0.5, 0.0];
     let sphere_rb = physics_world.add_sphere_rigid_body(0, sphere_pos, 0.5, true, stfsc_engine::world::LAYER_PROP, u32::MAX);
     let sphere_id = game_world.ecs.spawn((
         stfsc_engine::world::StartupScene, // Marker for ClearScene
@@ -202,7 +226,7 @@ fn main() {
     )).unwrap();
 
     // 3. TouchToDestroy Cube
-    let cube_pos = [-2.0, 5.0, 0.0];
+    let cube_pos = [-2.0, 2.0, 0.0];
     let cube_rb = physics_world.add_box_rigid_body(0, cube_pos, [0.5, 0.5, 0.5], true, stfsc_engine::world::LAYER_PROP, stfsc_engine::world::LAYER_ENVIRONMENT | stfsc_engine::world::LAYER_PROP);
     let cube_id = game_world.ecs.spawn((
         stfsc_engine::world::StartupScene, // Marker for ClearScene
@@ -486,6 +510,7 @@ fn main() {
     };
 
     // Main Loop
+    let mut frame_counter: usize = 0;
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Poll);
 
@@ -712,7 +737,7 @@ fn main() {
                 }
             }
             Event::WindowEvent { 
-                event: WindowEvent::KeyboardInput { 
+                event: WindowEvent::KeyboardInput {
                     event: key_event,
                     .. 
                 }, .. 
@@ -724,43 +749,12 @@ fn main() {
                     ElementState::Pressed => {
                         keys_pressed.insert(physical_key);
 
-                        // Escape OR Grave (backtick/tilde key) to release cursor
+                        // Note: Escape/Grave pause toggle is handled in DeviceEvent::Key 
+                        // to avoid double-firing on Windows where both events trigger.
                         let is_escape = physical_key == PhysicalKey::Code(KeyCode::Escape) 
                             || key_event.logical_key == Key::Named(NamedKey::Escape);
                         let is_grave = physical_key == PhysicalKey::Code(KeyCode::Backquote)
                             || key_event.logical_key == Key::Character("`".into());
-
-                        if is_escape || is_grave {
-                            ui_state.toggle_pause();
-                            
-                            // Sync UI layer visibility with pause state
-                            if let Ok(mut state) = game_state.write() {
-                                if ui_state.paused {
-                                    // Show pause menu layer
-                                    state.world.ui_layers.show(ui::UiLayer::PauseMenu);
-                                } else {
-                                    // Hide pause menu and clear any intermediate menus
-                                    state.world.ui_layers.hide(&ui::UiLayer::PauseMenu);
-                                    // Clear menu stack and hide any intermediate menus
-                                    while let Some(alias) = state.world.menu_stack.pop() {
-                                        state.world.ui_layers.hide(&ui::UiLayer::Custom(alias));
-                                    }
-                                }
-                            }
-                            
-                            if ui_state.paused {
-                                if cursor_captured {
-                                    cursor_captured = false;
-                                    window.set_cursor_visible(true);
-                                    let _ = window.set_cursor_grab(CursorGrabMode::None);
-                                }
-                            } else {
-                                cursor_captured = true;
-                                window.set_cursor_visible(false);
-                                let _ = window.set_cursor_grab(CursorGrabMode::Locked)
-                                    .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
-                            }
-                        }
 
                         // Handle dynamic keybinds (only when NOT paused and NOT escape/grave)
                         if !ui_state.paused && !is_escape && !is_grave {
@@ -1001,18 +995,19 @@ fn main() {
                     }
                 }
 
-                // 1. Wait for Fence
+                // 1. Wait for current frame's fence
+                let frame_idx = frame_counter % graphics_context.max_frames_in_flight;
                 unsafe {
-                    graphics_context.device.wait_for_fences(&[graphics_context.fence], true, u64::MAX).unwrap();
-                    graphics_context.device.reset_fences(&[graphics_context.fence]).unwrap();
+                    graphics_context.device.wait_for_fences(&[graphics_context.in_flight_fences[frame_idx]], true, u64::MAX).unwrap();
+                    graphics_context.device.reset_fences(&[graphics_context.in_flight_fences[frame_idx]]).unwrap();
                 }
 
                 // 2. Acquire Image
                 let swapchain = graphics_context.swapchain.unwrap();
                 let (image_index, _) = unsafe {
                     graphics_context.swapchain_loader.as_ref().unwrap().acquire_next_image(
-                        swapchain, std::u64::MAX, graphics_context.image_available_semaphore.unwrap(), vk::Fence::null()
-                    ).unwrap()
+                        swapchain, u64::MAX, graphics_context.image_available_semaphores[frame_idx], vk::Fence::null()
+                    ).expect("Failed to acquire next image")
                 };
 
                 // 2. Resource Logic (Mesh Uploads)
@@ -1066,7 +1061,7 @@ fn main() {
                 let mut textured_draws: Vec<(usize, InstanceData, vk::DescriptorSet)> = Vec::new();
                 let mut view_proj = glam::Mat4::IDENTITY;
                 let mut player_pos = glam::Vec3::ZERO;
-                let mut camera_fov = std::f32::consts::FRAC_PI_4;
+                let camera_fov = std::f32::consts::FRAC_PI_4;
                 
                 if let Ok(state) = game_state.read() {
                     // Try to find an active camera entity
@@ -1163,7 +1158,7 @@ fn main() {
                         let prev_model = *prev_transforms.get(&entity_id).unwrap_or(&model);
                         prev_transforms.insert(entity_id, model);
                         
-                        let instance = InstanceData { model, prev_model, color };
+                        let instance = InstanceData { model, prev_model, color, metallic: 0.0, roughness: 0.5, _padding: [0.0; 2] };
                         if let Some(desc_set) = tex_info {
                             textured_draws.push((mesh_idx, instance, desc_set));
                         } else {
@@ -1174,7 +1169,7 @@ fn main() {
                     for (entity_id, gpu_mesh, model, color, tex_info) in custom_results {
                         let prev_model = *prev_transforms.get(&entity_id).unwrap_or(&model);
                         prev_transforms.insert(entity_id, model);
-                        custom_draws.push((gpu_mesh, InstanceData { model, prev_model, color }, tex_info));
+                        custom_draws.push((gpu_mesh, InstanceData { model, prev_model, color, metallic: 0.0, roughness: 0.5, _padding: [0.0; 2] }, tex_info));
                     }
 
                     // Lights - Parallelized gathering
@@ -1203,7 +1198,7 @@ fn main() {
                     for gpu_light in light_data {
                         if !light_ubo.add_light(gpu_light) { break; }
                     }
-                    unsafe { *light_ptr = light_ubo; }
+                    unsafe { *light_ptrs[frame_idx] = light_ubo; }
                 }
 
                 // 4. Upload Instances
@@ -1212,14 +1207,14 @@ fn main() {
                 for (mesh_idx, instances) in batch_map {
                     let count = instances.len();
                     if instance_offset + count > max_instances { break; }
-                    unsafe { std::ptr::copy_nonoverlapping(instances.as_ptr(), instance_ptr.add(instance_offset), count); }
+                    unsafe { std::ptr::copy_nonoverlapping(instances.as_ptr(), instance_ptrs[frame_idx].add(instance_offset), count); }
                     draw_calls.push((mesh_idx, instance_offset as u32, count as u32));
                     instance_offset += count;
                 }
                 let mut custom_draw_calls: Vec<(GpuMesh, u32, u32, Option<vk::DescriptorSet>)> = Vec::new();
                 for (mesh, data, tex_info) in custom_draws {
                     if instance_offset + 1 > max_instances { break; }
-                    unsafe { std::ptr::write(instance_ptr.add(instance_offset), data); }
+                    unsafe { std::ptr::write(instance_ptrs[frame_idx].add(instance_offset), data); }
                     custom_draw_calls.push((mesh, instance_offset as u32, 1u32, tex_info));
                     instance_offset += 1;
                 }
@@ -1227,14 +1222,11 @@ fn main() {
                 let mut textured_draw_calls: Vec<(usize, u32, u32, vk::DescriptorSet)> = Vec::new();
                 for (mesh_idx, data, descriptor_set) in textured_draws {
                     if instance_offset + 1 > max_instances { break; }
-                    unsafe { std::ptr::write(instance_ptr.add(instance_offset), data); }
+                    unsafe { std::ptr::write(instance_ptrs[frame_idx].add(instance_offset), data); }
                     textured_draw_calls.push((mesh_idx, instance_offset as u32, 1u32, descriptor_set));
                     instance_offset += 1;
                 }
-                
-                if !draw_calls.is_empty() || !custom_draw_calls.is_empty() || !textured_draw_calls.is_empty() {
-                    // Render batches processed
-                }
+
 
                 // Dynamic shadow frustum based on GroundPlane component
                 // Get ground center and extent for shadow coverage
@@ -1295,13 +1287,14 @@ fn main() {
                 };
                 
                 unsafe {
-                    (*light_ptr).lights[0] = light_data;
-                    (*light_ptr).num_lights = 1;
-                    (*light_ptr).ambient = [0.15, 0.15, 0.15, 1.0];
+                    (*light_ptrs[frame_idx]).lights[0] = light_data;
+                    (*light_ptrs[frame_idx]).num_lights = 1;
+                    (*light_ptrs[frame_idx]).ambient = [0.15, 0.15, 0.15, 1.0];
                 }
 
                 // 5. Record Commands
-                let cmd = graphics_context.command_buffer;
+                let frame_idx = frame_counter % graphics_context.max_frames_in_flight;
+                let cmd = graphics_context.in_flight_command_buffers[frame_idx];
                 unsafe {
                     graphics_context.device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::RELEASE_RESOURCES).unwrap();
                     graphics_context.device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::builder().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).unwrap();
@@ -1322,7 +1315,7 @@ fn main() {
 
                     // Shadow Pass
                     let shadow_rp_begin = vk::RenderPassBeginInfo::builder()
-                        .render_pass(graphics_context.shadow_render_pass).framebuffer(graphics_context.shadow_framebuffer)
+                        .render_pass(graphics_context.shadow_render_pass).framebuffer(graphics_context.shadow_framebuffers[frame_idx])
                         .render_area(vk::Rect2D { offset: vk::Offset2D::default(), extent: graphics_context.shadow_extent })
                         .clear_values(&[vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } }]);  // Shadow uses standard depth (LESS)
                     graphics_context.device.cmd_begin_render_pass(cmd, &shadow_rp_begin, vk::SubpassContents::INLINE);
@@ -1333,7 +1326,7 @@ fn main() {
                     // constant_bias: pushes all depths away, slope_bias: scales with surface angle
                     graphics_context.device.cmd_set_depth_bias(cmd, 200.0, 0.0, 25.0);
                     
-                    graphics_context.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, graphics_context.shadow_pipeline_layout, 0, &[global_descriptor_set], &[]);
+                    graphics_context.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, graphics_context.shadow_pipeline_layout, 0, &[global_descriptor_sets[frame_idx]], &[]);
                     graphics_context.device.cmd_push_constants(cmd, graphics_context.shadow_pipeline_layout, vk::ShaderStageFlags::VERTEX, 0, bytemuck::bytes_of(&light_view_proj));
                     for (mesh_idx, first, count) in &draw_calls {
                         let m = &mesh_library[*mesh_idx];
@@ -1360,14 +1353,15 @@ fn main() {
                         .clear_values(&clear_values);
                     graphics_context.device.cmd_begin_render_pass(cmd, &main_rp_begin, vk::SubpassContents::INLINE);
                     graphics_context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, graphics_context.pipeline);
-                    graphics_context.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, graphics_context.pipeline_layout, 0, &[global_descriptor_set], &[]);
+                    graphics_context.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, graphics_context.pipeline_layout, 0, &[global_descriptor_sets[frame_idx]], &[]);
                     
                     let mut push_data = Vec::new();
                     push_data.extend_from_slice(bytemuck::bytes_of(&view_proj));
                     push_data.extend_from_slice(bytemuck::bytes_of(&prev_view_proj));
                     push_data.extend_from_slice(bytemuck::bytes_of(&light_view_proj));
                     push_data.extend_from_slice(bytemuck::bytes_of(&glam::Vec4::from((player_pos, 1.0))));
-                    graphics_context.device.cmd_push_constants(cmd, graphics_context.pipeline_layout, vk::ShaderStageFlags::VERTEX, 0, &push_data);
+                    push_data.extend_from_slice(bytemuck::bytes_of(&glam::Vec4::from((light_dir, 0.0))));  // light direction for shading
+                    graphics_context.device.cmd_push_constants(cmd, graphics_context.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, &push_data);
 
                     for (mesh_idx, first, count) in &draw_calls {
                         let m = &mesh_library[*mesh_idx];
@@ -1453,8 +1447,9 @@ fn main() {
                 }
 
                 // 6. Submit & Present
-                let wait_semaphores = [graphics_context.image_available_semaphore.unwrap()];
-                let signal_semaphores = [graphics_context.render_finished_semaphore.unwrap()];
+                let frame_idx = frame_counter % graphics_context.max_frames_in_flight;
+                let wait_semaphores = [graphics_context.image_available_semaphores[frame_idx]];
+                let signal_semaphores = [graphics_context.render_finished_semaphores[frame_idx]];
                 let command_buffers = [cmd];
                 let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
 
@@ -1467,10 +1462,10 @@ fn main() {
                 let submit_infos = [submit_info.build()];
                 unsafe {
                     let _lock = graphics_context.queue_mutex.lock().unwrap();
-                    graphics_context.device.queue_submit(graphics_context.queue, &submit_infos, graphics_context.fence).unwrap();
+                    graphics_context.device.queue_submit(graphics_context.queue, &submit_infos, graphics_context.in_flight_fences[frame_idx]).unwrap();
                 }
 
-                let present_wait_semaphores = [graphics_context.render_finished_semaphore.unwrap()];
+                let present_wait_semaphores = [graphics_context.render_finished_semaphores[frame_idx]];
                 let swapchains = [swapchain];
                 let image_indices = [image_index];
 
@@ -1480,10 +1475,31 @@ fn main() {
                     .image_indices(&image_indices);
                 
                 unsafe {
-                    graphics_context.swapchain_loader.as_ref().unwrap().queue_present(graphics_context.queue, &present_info).unwrap();
+                    // Present the frame
+                    let _ = graphics_context.swapchain_loader.as_ref().unwrap().queue_present(graphics_context.queue, &present_info);
                 }
 
                 prev_view_proj = view_proj;
+                frame_counter += 1;
+            }
+            Event::LoopExiting => {
+                info!("Exiting: Cleaning up resources...");
+                unsafe { graphics_context.device.device_wait_idle().unwrap(); }
+                for mesh in &mesh_library {
+                    graphics_context.destroy_mesh(&mesh);
+                }
+                
+                // Cleanup per-frame buffers from main thread
+                for i in 0..instance_buffers.len() {
+                    unsafe {
+                        graphics_context.device.destroy_buffer(instance_buffers[i], None);
+                        graphics_context.device.free_memory(instance_memories[i], None);
+                        graphics_context.device.destroy_buffer(light_buffers[i], None);
+                        graphics_context.device.free_memory(light_memories[i], None);
+                        graphics_context.device.destroy_buffer(bone_buffers[i], None);
+                        graphics_context.device.free_memory(bone_memories[i], None);
+                    }
+                }
             }
             _ => {}
         }
