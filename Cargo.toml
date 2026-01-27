@@ -3,10 +3,14 @@ name = "stfsc_engine"
 version = "0.1.0"
 edition = "2021"
 publish = false
-default-run = "stfsc_engine"
+default-run = "stfsc_engine_windows"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "stfsc_engine_windows"
+path = "src/main.rs"
 
 [dependencies]
 # Core Runtime
@@ -42,20 +46,25 @@ rand = "0.8"
 rayon = "1.8"  # Parallel iteration for game logic
 home = "=0.5.9"
 tobj = "3.2"
+zip = "2.1"  # For creating distributable archives
 
 # Audio (cross-platform)
 rodio = "0.17"  # Audio playback (requires alsa-lib-devel on Fedora)
 fontdue = "0.8"  # Lightweight font rasterization for UI text
 
-# Desktop-only dependencies (Linux/Windows/macOS)
+# Desktop-only dependencies (Generic)
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = "0.27"
-rfd = { version = "0.12", default-features = false, features = ["xdg-portal"] }
 winit = { version = "0.29", features = ["rwh_05"] }
 
-# Linux/Unix-specific clipboard (uses Wayland/X11)
-[target.'cfg(all(not(target_os = "android"), unix))'.dependencies]
+# Linux-only dependencies
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { version = "0.12", default-features = false, features = ["xdg-portal"] }
 smithay-clipboard = "=0.7.2"
+
+# Windows-only dependencies
+[target.'cfg(target_os = "windows")'.dependencies]
+rfd = { version = "0.12", default-features = false }
 
 # Android-only dependencies
 [target.'cfg(target_os = "android")'.dependencies]

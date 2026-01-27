@@ -91,10 +91,11 @@ def compile_shader(glslang: str, shader_path: Path, output_path: Path):
     
     if result.returncode != 0:
         print(f"ERROR compiling {shader_path.name}:")
-        print(result.stderr)
+        print("STDOUT:", result.stdout)
+        print("STDERR:", result.stderr)
         return False
     
-    print(f"  ✓ {shader_path.name} -> {output_path.name}")
+    print(f"  OK {shader_path.name} -> {output_path.name}")
     return True
 
 def main():
@@ -120,6 +121,7 @@ def main():
         sys.exit(1)
     
     shaders = list(SRC_GRAPHICS.glob("*.vert")) + list(SRC_GRAPHICS.glob("*.frag"))
+    # shaders = list(SRC_GRAPHICS.glob("skinned.vert"))  # DEBUG: Compile ONLY skinned.vert
     
     if not shaders:
         print("No shaders found to compile")
