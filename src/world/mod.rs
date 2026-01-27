@@ -1914,6 +1914,12 @@ impl GameWorld {
         let e1 = self.get_entity_from_collider(physics, c1);
         let e2 = self.get_entity_from_collider(physics, c2);
 
+        if started {
+            println!("DEBUG: COLLISION START between {:?} and {:?}", e1, e2);
+        } else {
+            println!("DEBUG: COLLISION STOP between {:?} and {:?}", e1, e2);
+        }
+
         if let Some(ent1) = e1 {
             if let Some(ent2) = e2 {
                 self.call_collision_on_script(physics, ent1, ent2, started);
@@ -1927,8 +1933,13 @@ impl GameWorld {
         let rb_handle = collider.parent()?;
         let rb = physics.rigid_body_set.get(rb_handle)?;
         let bits = rb.user_data as u64;
-        if bits == 0 { return None; }
-        Entity::from_bits(bits)
+        if bits == 0 { 
+            // println!("DEBUG: Collider {:?} has no user_data", handle);
+            return None; 
+        }
+        let entity = Entity::from_bits(bits);
+        // println!("DEBUG: Collider {:?} mapped to entity {:?}", handle, entity);
+        entity
     }
 
     fn call_collision_on_script(&mut self, physics: &mut PhysicsWorld, entity: Entity, other: Entity, started: bool) {

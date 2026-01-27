@@ -514,7 +514,7 @@ impl MenuStack {
     }
 
     /// Iterate through the stack from bottom to top
-    pub fn iter(&self) -> std::slice::Iter<'_, String> {
+    pub fn iter(&self) -> std::slice::Iter<String> {
         self.stack.iter()
     }
 }

@@ -1,4 +1,4 @@
-// use std::io::Write; // Unused
+use std::io::Write;
 use stfsc_engine::graphics::{GraphicsContext, GpuMesh, InstanceData, GlobalData, Texture, calculate_shadow_resolution};
 use stfsc_engine::world::{GameWorld, MeshHandle, Material, Transform, RigidBodyHandle, Mesh, AudioSource};
 use stfsc_engine::audio::{AudioSystem, AudioBuffer, AudioSourceProperties, AttenuationModel, AudioBufferHandle};
@@ -34,22 +34,12 @@ struct TextureEntry {
 }
 
 fn main() {
-    std::env::set_var("RUST_LOG", "info"); // Enable Info logs
     env_logger::init();
     use std::io::Write;
     print!("DEBUG: STFSC Engine Starting..."); std::io::stdout().flush().unwrap();
     println!("Init logger done");
 
-    // Check for bundled project
-    let bundled_project = stfsc_engine::bundle::BundledProject::load();
-    let is_bundled = bundled_project.is_some();
-    if is_bundled {
-        let proj = bundled_project.as_ref().unwrap();
-        info!("Bundled Project Detected: {}", proj.manifest.name);
-        info!("Startup Scene: {}", proj.manifest.startup_scene);
-    } else {
-        info!("STFSC Engine - Default Test Scene");
-    }
+    info!("STFSC Engine - Linux Desktop Target");
 
     let shadow_resolution = calculate_shadow_resolution(GROUND_PLANE_HALF_EXTENT);
     info!("Scene: Ground plane half-extent = {} units", GROUND_PLANE_HALF_EXTENT);
@@ -81,187 +71,72 @@ fn main() {
     let (albedo_tex, normal_tex, mr_tex) = graphics_context.create_default_pbr_textures().expect("Failed to create default textures");
     println!("Done");
 
-    println!("DEBUG: Starting init loop...");
-    
-    // Safety check for swapchain frames
-    let frame_count = graphics_context.swapchain_image_views.len();
-    info!("Init: Configuring for {} frames in flight", frame_count);
-
-    // 1. Instance Buffers (Per Frame)
+    /*
+    // ... REST COMMENTED OUT FOR DEBUGGING ...
+    println!("DEBUG: Exiting normally for test.");
+    return;
+    */
+    println!("DEBUG: Exiting normally for test.");
+}
+/*
+    // Create Global Instance Buffer (10k instances)
     let max_instances = 10000;
-    let mut instance_buffers = Vec::with_capacity(frame_count);
-    let mut instance_memories = Vec::with_capacity(frame_count);
-    let mut instance_ptrs = Vec::with_capacity(frame_count);
+    let (instance_buffer, instance_memory) = graphics_context.create_buffer(
+        (max_instances * std::mem::size_of::<InstanceData>()) as u64,
+        vk::BufferUsageFlags::STORAGE_BUFFER,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    ).expect("Failed to create instance buffer");
 
-    for i in 0..frame_count {
-        let (buf, mem) = graphics_context.create_buffer(
-            (max_instances * std::mem::size_of::<InstanceData>()) as u64,
-            vk::BufferUsageFlags::STORAGE_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        ).expect("Failed to create instance buffer");
-        
-        let ptr = unsafe {
-            graphics_context.device.map_memory(mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
-                .expect("Failed to map instance buffer") as *mut InstanceData
-        };
-        
-        if i == 0 {
-            // Initialize first frame with Safe Defaults to prevent "Mega Triangle" from zero-scale matrices
-            unsafe {
-                for j in 0..max_instances {
-                    let instance = InstanceData {
-                        model: glam::Mat4::IDENTITY,
-                        prev_model: glam::Mat4::IDENTITY,
-                        color: [1.0; 4],
-                        metallic: 0.0,
-                        roughness: 0.5,
-                        _padding: [0.0; 2],
-                    };
-                    std::ptr::write(ptr.add(j), instance);
-                }
-            }
-        } else {
-             // For other frames, just zero it or copy first frame? 
-             // Zeroing `InstanceData` (all zeros) means Model = Zero Matrix -> Scale = 0 -> Degenerate Geometry.
-             // We MUST initialize to Identity.
-             unsafe {
-                for j in 0..max_instances {
-                    let instance = InstanceData {
-                        model: glam::Mat4::IDENTITY,
-                        prev_model: glam::Mat4::IDENTITY,
-                        color: [1.0; 4],
-                        metallic: 0.0,
-                        roughness: 0.5,
-                        _padding: [0.0; 2],
-                    };
-                    std::ptr::write(ptr.add(j), instance);
-                }
-            }
-        }
-        
-        instance_buffers.push(buf);
-        instance_memories.push(mem);
-        instance_ptrs.push(ptr);
-        println!("DEBUG: Frame {} Instance buffer created", i);
-    }
+    println!("DEBUG: Mapping instance buffer...");
+    let instance_ptr = unsafe {
+        graphics_context.device.map_memory(instance_memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).expect("Failed to map instance buffer") as *mut InstanceData
+    };
+    println!("DEBUG: Instance buffer mapped at {:?}", instance_ptr);
 
-    // 2. Light Uniform Buffers (Per Frame)
+    // Create Light Uniform Buffer
     let light_buffer_size = std::mem::size_of::<LightUBO>() as u64;
-    let mut light_buffers = Vec::with_capacity(frame_count);
-    let mut light_memories = Vec::with_capacity(frame_count);
-    let mut light_ptrs = Vec::with_capacity(frame_count);
+    let (light_buffer, light_memory) = graphics_context.create_buffer(
+        light_buffer_size,
+        vk::BufferUsageFlags::UNIFORM_BUFFER,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    ).expect("Failed to create light buffer");
 
-    for i in 0..frame_count {
-        let (buf, mem) = graphics_context.create_buffer(
-            light_buffer_size,
-            vk::BufferUsageFlags::UNIFORM_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        ).expect("Failed to create light buffer");
+    let light_ptr = unsafe {
+        graphics_context.device.map_memory(light_memory, 0, light_buffer_size, vk::MemoryMapFlags::empty()).expect("Failed to map light buffer") as *mut LightUBO
+    };
 
-        let ptr = unsafe {
-            graphics_context.device.map_memory(mem, 0, light_buffer_size, vk::MemoryMapFlags::empty())
-                .expect("Failed to map light buffer") as *mut LightUBO
-        };
-        unsafe { *ptr = LightUBO::default(); } // Init default
+    unsafe { *light_ptr = LightUBO::default(); }
 
-        light_buffers.push(buf);
-        light_memories.push(mem);
-        light_ptrs.push(ptr);
-        println!("DEBUG: Frame {} Light buffer created", i);
-    }
-
-    // 3. Bone Matrices Buffer (Per Frame)
+    // Create Bone Matrices buffer
     let bone_buffer_size = (128 * std::mem::size_of::<glam::Mat4>()) as u64;
-    let mut bone_buffers = Vec::with_capacity(frame_count);
-    let mut bone_memories = Vec::with_capacity(frame_count);
+    let (bone_buffer, _bone_memory) = graphics_context.create_buffer(
+        bone_buffer_size,
+        vk::BufferUsageFlags::UNIFORM_BUFFER,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    ).expect("Failed to create bone buffer");
 
-    for i in 0..frame_count {
-        let (buf, mem) = graphics_context.create_buffer(
-            bone_buffer_size,
-            vk::BufferUsageFlags::UNIFORM_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        ).expect("Failed to create bone buffer");
-        
-        // Map and Initialize Bone Buffer to Identity
-        unsafe {
-            let ptr = graphics_context.device.map_memory(mem, 0, bone_buffer_size, vk::MemoryMapFlags::empty())
-                .expect("Failed to map bone buffer") as *mut glam::Mat4;
-            for j in 0..128 {
-                std::ptr::write(ptr.add(j), glam::Mat4::IDENTITY);
-            }
-            graphics_context.device.unmap_memory(mem);
-        }
-
-        bone_buffers.push(buf);
-        bone_memories.push(mem);
-        println!("DEBUG: Frame {} Bone buffer created", i);
-    }
-
-    // 4. Global Data Buffer (Per Frame)
+    // Create Global Data Buffer (Matrices, Camera, Light)
     let global_buffer_size = std::mem::size_of::<GlobalData>() as u64;
-    let mut global_buffers = Vec::with_capacity(frame_count);
-    let mut global_memories = Vec::with_capacity(frame_count);
-    let mut global_ptrs = Vec::with_capacity(frame_count);
+    let (global_buffer, global_memory) = graphics_context.create_buffer(
+        global_buffer_size,
+        vk::BufferUsageFlags::UNIFORM_BUFFER,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    ).expect("Failed to create global data buffer");
 
-    for i in 0..frame_count {
-        let (buf, mem) = graphics_context.create_buffer(
-            global_buffer_size,
-            vk::BufferUsageFlags::UNIFORM_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        ).expect("Failed to create global data buffer");
+    println!("DEBUG: Mapping global buffer...");
+    let global_ptr = unsafe {
+        graphics_context.device.map_memory(global_memory, 0, global_buffer_size, vk::MemoryMapFlags::empty()).expect("Failed to map global data buffer") as *mut GlobalData
+    };
+    println!("DEBUG: Global buffer mapped at {:?}", global_ptr);
 
-        let ptr = unsafe {
-            graphics_context.device.map_memory(mem, 0, global_buffer_size, vk::MemoryMapFlags::empty())
-                .expect("Failed to map global data buffer") as *mut GlobalData
-        };
-
-        unsafe {
-            std::ptr::write(ptr, GlobalData {
-                view_proj: glam::Mat4::IDENTITY,
-                prev_view_proj: glam::Mat4::IDENTITY,
-                light_space: glam::Mat4::IDENTITY,
-                camera_pos: [0.0, 0.0, 0.0, 1.0],
-                light_dir: [0.0, -1.0, 0.0, 0.0],
-            });
-        }
-
-        global_buffers.push(buf);
-        global_memories.push(mem);
-        global_ptrs.push(ptr);
-        println!("DEBUG: Frame {} Global buffer created", i);
-    }
-
-    // 5. Create Per-Frame Descriptor Sets
-    let mut global_descriptor_sets = Vec::with_capacity(frame_count);
-    let mut shadow_pass_descriptor_sets = Vec::with_capacity(frame_count); // NEW: Safe sets for Shadow Pass
-
-    for i in 0..frame_count {
-        // Standard Global Set (Shadow Map Input -> Main Pass)
-        let set = graphics_context.create_global_descriptor_set(
-            graphics_context.shadow_depth_view,
-            graphics_context.shadow_sampler,
-            instance_buffers[i],
-            light_buffers[i],
-            bone_buffers[i],
-            global_buffers[i],
-        ).expect("Failed to create global descriptor set");
-        global_descriptor_sets.push(set);
-
-        // Shadow Pass Set (Dummy Input -> Shadow Pass)
-        // CRITICAL FIX: Bind ALBEDO as dummy shadow texture to prevent read/write feedback loop
-        // The Shadow Pass WRITES to shadow_depth_view, so it cannot BIND it as input.
-        let shadow_set = graphics_context.create_global_descriptor_set(
-            albedo_tex.image_view, // DUMMY SAFE BINDING
-            albedo_tex.sampler,
-            instance_buffers[i],
-            light_buffers[i],
-            bone_buffers[i],
-            global_buffers[i],
-        ).expect("Failed to create shadow pass descriptor set");
-        shadow_pass_descriptor_sets.push(shadow_set);
-
-        println!("DEBUG: Frame {} Descriptor sets created (Main + ShadowSafe)", i);
-    }
+    let global_descriptor_set = graphics_context.create_global_descriptor_set(
+        graphics_context.shadow_depth_view,
+        graphics_context.shadow_sampler,
+        instance_buffer,
+        light_buffer,
+        bone_buffer,
+        global_buffer,
+    ).expect("Failed to create global descriptor set");
 
     let material_descriptor_set = graphics_context.create_material_descriptor_set(&albedo_tex, &normal_tex, &mr_tex).expect("Failed to create material descriptor set");
 
@@ -309,173 +184,74 @@ fn main() {
     if let Some(body) = physics_world.rigid_body_set.get_mut(player_rb) {
         body.user_data = player_entity.to_bits().get() as u128;
     }
-    // --- SCENE LOADING (Bundled or Test) ---
+
+    // --- TEST SCENE FOR ADVANCED SCRIPTING ---
+
+    // 1. Static Physics Floor (using a Plane)
+    // Plane is at Y=0 relative to pivot. We want it at Y=-0.1.
+    // Scale is [200, 1, 200].
+    let floor_pos = [0.0, -0.1, 0.0];
+    let _floor_half_extents = [GROUND_PLANE_HALF_EXTENT, 0.1, GROUND_PLANE_HALF_EXTENT]; // Physics still needs thickness
+    // For physics, a thin box is safer than a plane to prevent tunneling
+    let collider_pos = [0.0, -1.1, 0.0];
+    let collider_extents = [GROUND_PLANE_HALF_EXTENT, 1.0, GROUND_PLANE_HALF_EXTENT];
+    let floor_rb = physics_world.add_box_rigid_body(0, collider_pos, collider_extents, false, stfsc_engine::world::LAYER_ENVIRONMENT, u32::MAX);
     
-    if let Some(ref bundle) = bundled_project {
-        // Load scene from bundled project
-        info!("Loading bundled scene: {}", bundle.manifest.startup_scene);
-        
-        // Read scene JSON from bundle directory
-        let scene_path = format!("assets/bundle/scenes/{}", bundle.manifest.startup_scene);
-        if let Ok(scene_json) = std::fs::read_to_string(&scene_path) {
-            if let Ok(scene) = serde_json::from_str::<stfsc_engine::project::scene::Scene>(&scene_json) {
-                info!("Loaded scene '{}' with {} entities", scene.name, scene.entities.len());
-                
-                // Spawn entities from scene
-                for entity in &scene.entities {
-                    let position = glam::Vec3::from(entity.position);
-                    let rotation = glam::Quat::from_array(entity.rotation);
-                    let scale = glam::Vec3::from(entity.scale);
-                    
-                    // Determine mesh handle based on entity type
-                    let mesh_handle = match &entity.entity_type {
-                        stfsc_engine::project::scene::EntityType::Primitive(prim) => {
-                            match prim {
-                                stfsc_engine::project::scene::PrimitiveType::Cube => Some(0),
-                                stfsc_engine::project::scene::PrimitiveType::Sphere => Some(1),
-                                stfsc_engine::project::scene::PrimitiveType::Cylinder => Some(2),
-                                stfsc_engine::project::scene::PrimitiveType::Plane => Some(3),
-                                stfsc_engine::project::scene::PrimitiveType::Capsule => Some(4),
-                                stfsc_engine::project::scene::PrimitiveType::Cone => Some(5),
-                            }
-                        }
-                        stfsc_engine::project::scene::EntityType::Ground => Some(3), // Plane
-                        stfsc_engine::project::scene::EntityType::Camera => None, // Skip cameras for rendering
-                        stfsc_engine::project::scene::EntityType::Light { .. } => None, // Lights are handled separately
-                        _ => Some(0), // Default to cube for other types
-                    };
-                    
-                    if let Some(mesh_idx) = mesh_handle {
-                        let color = [
-                            entity.material.albedo_color[0],
-                            entity.material.albedo_color[1],
-                            entity.material.albedo_color[2],
-                            1.0,
-                        ];
-                        
-                        // Add physics if collision enabled
-                        let rb_handle = if entity.collision_enabled {
-                            let is_dynamic = !entity.is_static;
-                            let half_extents = [scale.x / 2.0, scale.y / 2.0, scale.z / 2.0];
-                            let rb = physics_world.add_box_rigid_body(
-                                0,
-                                [position.x, position.y, position.z],
-                                half_extents,
-                                is_dynamic,
-                                entity.layer,
-                                u32::MAX,
-                            );
-                            Some(rb)
-                        } else {
-                            None
-                        };
-                        
-                        // Spawn ECS entity
-                        let ecs_entity = if let Some(rb) = rb_handle {
-                            game_world.ecs.spawn((
-                                stfsc_engine::world::StartupScene,
-                                Transform { position, rotation, scale },
-                                MeshHandle(mesh_idx),
-                                Material { 
-                                    color, 
-                                    albedo_texture: None, 
-                                    metallic: entity.material.metallic, 
-                                    roughness: entity.material.roughness 
-                                },
-                                RigidBodyHandle(rb),
-                            ))
-                        } else {
-                            game_world.ecs.spawn((
-                                stfsc_engine::world::StartupScene,
-                                Transform { position, rotation, scale },
-                                MeshHandle(mesh_idx),
-                                Material { 
-                                    color, 
-                                    albedo_texture: None, 
-                                    metallic: entity.material.metallic, 
-                                    roughness: entity.material.roughness 
-                                },
-                            ))
-                        };
-                        
-                        // Link physics user data
-                        if let Some(rb) = rb_handle {
-                            if let Some(body) = physics_world.rigid_body_set.get_mut(rb) {
-                                body.user_data = ecs_entity.to_bits().get() as u128;
-                            }
-                        }
-                        
-                        info!("Spawned entity: {} at {:?}", entity.name, position);
-                    }
-                }
-            } else {
-                eprintln!("Failed to parse bundled scene JSON");
-            }
-        } else {
-            eprintln!("Failed to read bundled scene file: {}", scene_path);
-        }
-    } else {
-        // --- DEFAULT TEST SCENE FOR ADVANCED SCRIPTING ---
-        
-        // 1. Static Physics Floor (using a Plane)
-        let floor_pos = [0.0, -0.1, 0.0];
-        let collider_pos = [0.0, -0.1, 0.0];
-        let collider_extents = [GROUND_PLANE_HALF_EXTENT, 0.1, GROUND_PLANE_HALF_EXTENT]; 
-        let floor_rb = physics_world.add_box_rigid_body(0, collider_pos, collider_extents, false, stfsc_engine::world::LAYER_ENVIRONMENT, u32::MAX);
-        
-        let ground_scale = GROUND_PLANE_HALF_EXTENT * 2.0;
-        let floor_id = game_world.ecs.spawn((
-            stfsc_engine::world::StartupScene,
-            Transform {
-                position: glam::Vec3::from(floor_pos),
-                rotation: glam::Quat::IDENTITY,
-                scale: glam::Vec3::new(ground_scale, 1.0, ground_scale),
-            },
-            MeshHandle(3), // Plane
-            Material { color: [0.15, 0.15, 0.15, 1.0], albedo_texture: None, metallic: 0.0, roughness: 0.5 },
-            RigidBodyHandle(floor_rb),
-            stfsc_engine::world::GroundPlane::new(GROUND_PLANE_HALF_EXTENT, GROUND_PLANE_HALF_EXTENT),
-        ));
-        physics_world.rigid_body_set.get_mut(floor_rb).unwrap().user_data = floor_id.to_bits().get() as u128;
+    let ground_scale = GROUND_PLANE_HALF_EXTENT * 2.0; // Full size = 2x half-extent
+    let floor_id = game_world.ecs.spawn((
+        stfsc_engine::world::StartupScene, // Marker for ClearScene
+        Transform {
+            position: glam::Vec3::from(floor_pos),
+            rotation: glam::Quat::IDENTITY,
+            scale: glam::Vec3::new(ground_scale, 1.0, ground_scale),
+        },
+        MeshHandle(3), // Plane
+        Material { color: [0.15, 0.15, 0.15, 1.0], albedo_texture: None, metallic: 0.0, roughness: 0.5 },
+        RigidBodyHandle(floor_rb),
+        stfsc_engine::world::GroundPlane::new(GROUND_PLANE_HALF_EXTENT, GROUND_PLANE_HALF_EXTENT),
+    ));
+    physics_world.rigid_body_set.get_mut(floor_rb).unwrap().user_data = floor_id.to_bits().get() as u128;
 
-        // 2. CollisionLogger Sphere
-        let sphere_pos = [2.0, 8.0, 0.0];
-        let sphere_rb = physics_world.add_sphere_rigid_body(0, sphere_pos, 0.5, true, stfsc_engine::world::LAYER_PROP, u32::MAX);
-        let sphere_id = game_world.ecs.spawn((
-            stfsc_engine::world::StartupScene,
-            Transform {
-                position: glam::Vec3::from(sphere_pos),
-                rotation: glam::Quat::IDENTITY,
-                scale: glam::Vec3::splat(1.0),
-            },
-            MeshHandle(1), // Sphere
-            Material { color: [0.3, 0.8, 0.3, 1.0], albedo_texture: None, metallic: 0.0, roughness: 0.5 },
-            RigidBodyHandle(sphere_rb),
-        ));
-        physics_world.rigid_body_set.get_mut(sphere_rb).unwrap().user_data = sphere_id.to_bits().get() as u128;
-        game_world.ecs.insert_one(sphere_id, stfsc_engine::world::DynamicScript::new(
-            game_world.script_registry.create("CollisionLogger").unwrap()
-        )).unwrap();
+    // 2. CollisionLogger Sphere (falls onto floor)
+    let sphere_pos = [2.0, 8.0, 0.0];
+    let sphere_rb = physics_world.add_sphere_rigid_body(0, sphere_pos, 0.5, true, stfsc_engine::world::LAYER_PROP, u32::MAX);
+    let sphere_id = game_world.ecs.spawn((
+        stfsc_engine::world::StartupScene, // Marker for ClearScene
+        Transform {
+            position: glam::Vec3::from(sphere_pos),
+            rotation: glam::Quat::IDENTITY,
+            scale: glam::Vec3::splat(1.0),
+        },
+        MeshHandle(1), // Sphere
+        Material { color: [0.3, 0.8, 0.3, 1.0], albedo_texture: None, metallic: 0.0, roughness: 0.5 },
+        RigidBodyHandle(sphere_rb),
+    ));
+    // Update physics user data with entity bits
+    physics_world.rigid_body_set.get_mut(sphere_rb).unwrap().user_data = sphere_id.to_bits().get() as u128;
+    // Attach Logger Script
+    game_world.ecs.insert_one(sphere_id, stfsc_engine::world::DynamicScript::new(
+        game_world.script_registry.create("CollisionLogger").unwrap()
+    )).unwrap();
 
-        // 3. TouchToDestroy Cube
-        let cube_pos = [-2.0, 5.0, 0.0];
-        let cube_rb = physics_world.add_box_rigid_body(0, cube_pos, [0.5, 0.5, 0.5], true, stfsc_engine::world::LAYER_PROP, stfsc_engine::world::LAYER_ENVIRONMENT | stfsc_engine::world::LAYER_PROP);
-        let cube_id = game_world.ecs.spawn((
-            stfsc_engine::world::StartupScene,
-            Transform {
-                position: glam::Vec3::from(cube_pos),
-                rotation: glam::Quat::IDENTITY,
-                scale: glam::Vec3::splat(1.0),
-            },
-            MeshHandle(0), 
-            Material { color: [0.8, 0.3, 0.3, 1.0], albedo_texture: None, metallic: 0.0, roughness: 0.5 },
-            RigidBodyHandle(cube_rb),
-        ));
-        physics_world.rigid_body_set.get_mut(cube_rb).unwrap().user_data = cube_id.to_bits().get() as u128;
-        game_world.ecs.insert_one(cube_id, stfsc_engine::world::DynamicScript::new(
-            game_world.script_registry.create("TouchToDestroy").unwrap()
-        )).unwrap();
-    }
+    // 3. TouchToDestroy Cube
+    let cube_pos = [-2.0, 5.0, 0.0];
+    let cube_rb = physics_world.add_box_rigid_body(0, cube_pos, [0.5, 0.5, 0.5], true, stfsc_engine::world::LAYER_PROP, stfsc_engine::world::LAYER_ENVIRONMENT | stfsc_engine::world::LAYER_PROP);
+    let cube_id = game_world.ecs.spawn((
+        stfsc_engine::world::StartupScene, // Marker for ClearScene
+        Transform {
+            position: glam::Vec3::from(cube_pos),
+            rotation: glam::Quat::IDENTITY,
+            scale: glam::Vec3::splat(1.0),
+        },
+        MeshHandle(0), 
+        Material { color: [0.8, 0.3, 0.3, 1.0], albedo_texture: None, metallic: 0.0, roughness: 0.5 },
+        RigidBodyHandle(cube_rb),
+    ));
+    physics_world.rigid_body_set.get_mut(cube_rb).unwrap().user_data = cube_id.to_bits().get() as u128;
+    // Attach TouchToDestroy + TestBounce
+    game_world.ecs.insert_one(cube_id, stfsc_engine::world::DynamicScript::new(
+        game_world.script_registry.create("TouchToDestroy").unwrap()
+    )).unwrap();
     // (Optional: Add TestBounce via separate DynamicScript if we supported multiple, 
     // but the current system replaced them. Let's stick to one primary test script per entity for now.)
 
@@ -592,12 +368,12 @@ fn main() {
                     if has_parent {
                         if let Ok(mut lt) = state.world.ecs.get::<&mut stfsc_engine::world::LocalTransform>(player_ent) {
                             lt.position = state.player_position;
-                            lt.rotation = glam::Quat::from_rotation_y(state.player_yaw);
+                            lt.rotation = glam::Quat::from_rotation_y(-state.player_yaw);
                         }
                     } else {
                         if let Ok(mut t) = state.world.ecs.get::<&mut Transform>(player_ent) {
                             t.position = state.player_position;
-                            t.rotation = glam::Quat::from_rotation_y(state.player_yaw);
+                            t.rotation = glam::Quat::from_rotation_y(-state.player_yaw);
                         }
                     }
 
@@ -750,7 +526,7 @@ fn main() {
                 if cursor_captured {
                     if let Ok(mut state) = game_state.write() {
                         let sensitivity = 0.002;
-                        state.player_yaw -= delta.0 as f32 * sensitivity; // Standard horizontal rotation
+                        state.player_yaw += delta.0 as f32 * sensitivity; // Fixed: was -= (inverted)
                         state.player_pitch = (state.player_pitch - delta.1 as f32 * sensitivity).clamp(-1.5, 1.5);
                     }
                 }
@@ -987,9 +763,10 @@ fn main() {
                             || key_event.logical_key == Key::Character("`".into());
 
                         if (is_escape || is_grave) && !key_event.repeat {
-                            ui_state.toggle_pause();
+                            // ui_state.toggle_pause();
                             
                             // Sync UI layer visibility with pause state
+                            /*
                             if let Ok(mut state) = game_state.write() {
                                 if ui_state.paused {
                                     // Show pause menu layer
@@ -1016,6 +793,7 @@ fn main() {
                                 let _ = window.set_cursor_grab(CursorGrabMode::Locked)
                                     .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
                             }
+                            */
                         }
 
                         // Handle dynamic keybinds (only when NOT paused and NOT escape/grave)
@@ -1097,14 +875,19 @@ fn main() {
                 // 0. Update Player Velocity - only when cursor is captured
                 if cursor_captured {
                     if let Ok(mut state) = game_state.write() {
-                        let (forward_basis, right_basis) = {
-                            let yaw_rot = glam::Quat::from_rotation_y(state.player_yaw);
-                            (yaw_rot * glam::Vec3::NEG_Z, yaw_rot * glam::Vec3::X)
-                        };
-
                         let mut move_dir = glam::Vec3::ZERO;
-                        // If parented (e.g. on a moving platform), rotated movement basis would go here
-                        // For now we use the global horizontal basis derived from yaw.
+                        let mut forward_basis = glam::Vec3::new(state.player_yaw.sin(), 0.0, -state.player_yaw.cos()).normalize();
+                        let mut right_basis = glam::Vec3::new(state.player_yaw.cos(), 0.0, state.player_yaw.sin()).normalize();
+
+                        // If parented, rotate movement basis by parent's rotation
+                        if let Ok(hierarchy) = state.world.ecs.get::<&stfsc_engine::world::Hierarchy>(state.player_entity) {
+                            if let Some(parent) = hierarchy.parent {
+                                if let Ok(pt) = state.world.ecs.get::<&Transform>(parent) {
+                                    forward_basis = pt.rotation * forward_basis;
+                                    right_basis = pt.rotation * right_basis;
+                                }
+                            }
+                        }
 
                         if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyW)) { move_dir += forward_basis; }
                         if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyS)) { move_dir -= forward_basis; }
@@ -1240,19 +1023,7 @@ fn main() {
                         swapchain, std::u64::MAX, graphics_context.image_available_semaphore.unwrap(), vk::Fence::null()
                     ).unwrap()
                 };
-                let frame_index = image_index as usize;
-                // println!("DEBUG: Acquired image {} (Frame Index {})", image_index, frame_index);
-                
-                // Select Per-Frame Resources
-                let instance_ptr = instance_ptrs[frame_index];
-                let instance_memory = instance_memories[frame_index];
-                let light_ptr = light_ptrs[frame_index];
-                let light_memory = light_memories[frame_index];
-                let global_ptr = global_ptrs[frame_index];
-                let global_memory = global_memories[frame_index];
-                let global_memory = global_memories[frame_index];
-                let global_descriptor_set = global_descriptor_sets[frame_index];
-                let shadow_safe_descriptor_set = shadow_pass_descriptor_sets[frame_index]; // Select safe set for this frame
+                println!("DEBUG: Acquired image {}", image_index);
 
                 // 2. Resource Logic (Mesh Uploads)
 
@@ -1285,55 +1056,62 @@ fn main() {
                             // Create descriptor set with custom albedo + default normal/mr
                             match graphics_context.create_material_descriptor_set(&texture, &normal_tex, &mr_tex) {
                                 Ok(descriptor_set) => {
-                                    texture_cache.insert(texture_id, TextureEntry { texture, material_descriptor_set: descriptor_set });
+                                    // Texture loaded
+                                    texture_cache.insert(texture_id, TextureEntry {
+                                        texture,
+                                        material_descriptor_set: descriptor_set,
+                                    });
                                 }
-                                Err(e) => println!("Failed to create material set for texture: {}", e),
+                                Err(e) => {
+                                    println!("TEXTURE ERROR: Failed to create descriptor set for background load '{}': {:?}", texture_id, e);
+                                }
                             }
                         }
                     }
                 }
 
-                // 3. Prepare Instances
+                // 3. Prepare Draw Data
                 let mut batch_map: HashMap<usize, Vec<InstanceData>> = HashMap::new();
                 let mut custom_draws: Vec<(GpuMesh, InstanceData, Option<vk::DescriptorSet>)> = Vec::new();
                 let mut textured_draws: Vec<(usize, InstanceData, vk::DescriptorSet)> = Vec::new();
-
-                let (view_proj, _old_proj, observer_pos, _observer_rot) = {
-                    let mut state = game_state.write().unwrap(); // Use write lock to update camera/player
-                    
-
-                    
-                    // Apply camera rotation from input events
-                    let yaw_rotation = glam::Quat::from_rotation_y(state.player_yaw);
-                    let pitch_rotation = glam::Quat::from_rotation_x(state.player_pitch);
-                    let rotation = yaw_rotation * pitch_rotation;
-
-                    // Camera follow player (First Person) - Add eye height
-                    let eye_height = 0.8; // Camera slightly above center
-                    let cam_pos = state.player_position + glam::Vec3::Y * eye_height;
-                    
-                    let view = glam::Mat4::look_at_rh(cam_pos, cam_pos + (rotation * glam::Vec3::NEG_Z), glam::Vec3::Y);
-
-
-
-                    // Perspective projection
-                    let mut proj = glam::Mat4::perspective_rh(
-                        45.0f32.to_radians(),
-                        graphics_context.swapchain_extent.unwrap().width as f32 / graphics_context.swapchain_extent.unwrap().height as f32,
-                        1000.0, // Reversed-Z: Far
-                        0.1,    // Reversed-Z: Near
-                    );
-                    
-                    // Flip Y for Vulkan
-                    proj.col_mut(1).y *= -1.0;
-                    
-                    let mut view_proj = proj * view;
-
-                    // NaN check for security and to prevent "mega-triangle" driver crashes
-                    if view_proj.is_nan() || !view_proj.is_finite() {
-                        view_proj = glam::Mat4::IDENTITY;
-                        println!("WARNING: view_proj contains NaN or non-finite values! Falling back to Identity.");
+                let mut view_proj = glam::Mat4::IDENTITY;
+                let mut player_pos = glam::Vec3::ZERO;
+                let camera_fov = std::f32::consts::FRAC_PI_4;
+                
+                if let Ok(state) = game_state.read() {
+                    // Try to find an active camera entity
+                    let mut active_camera = None;
+                    for (entity, (camera, transform)) in state.world.ecs.query::<(&stfsc_engine::world::Camera, &Transform)>().iter() {
+                        if camera.active {
+                            active_camera = Some((entity, *transform, camera.fov));
+                            break;
+                        }
                     }
+
+                    let (cam_pos, cam_rot, fov) = if let Some((_, transform, fov)) = active_camera {
+                        (transform.position, transform.rotation, fov)
+                    } else {
+                        // Fallback to default player controller
+                        (state.player_position, glam::Quat::from_rotation_y(-state.player_yaw) * glam::Quat::from_rotation_x(state.player_pitch), camera_fov)
+                    };
+
+                    player_pos = cam_pos;
+                    let view_matrix = glam::Mat4::look_at_rh(cam_pos, cam_pos + (cam_rot * -glam::Vec3::Z), cam_rot * glam::Vec3::Y);
+                    
+                    let extent = graphics_context.swapchain_extent.unwrap_or(vk::Extent2D { width: 1920, height: 1080 });
+                    let aspect = extent.width as f32 / (extent.height as f32).max(1.0);
+                    
+                    let near = 0.1;
+                    let f = 1.0 / (fov / 2.0).tan();
+                    
+                    let proj_matrix = glam::Mat4::from_cols(
+                        glam::Vec4::new(f / aspect, 0.0, 0.0, 0.0),
+                        glam::Vec4::new(0.0, -f, 0.0, 0.0),
+                        glam::Vec4::new(0.0, 0.0, 0.0, -1.0),
+                        glam::Vec4::new(0.0, 0.0, near, 0.0),
+                    );
+
+                    view_proj = proj_matrix * view_matrix;
 
                     occlusion_culler.update_frustum(view_proj);
 
@@ -1397,28 +1175,18 @@ fn main() {
                         let prev_model = *prev_transforms.get(&entity_id).unwrap_or(&model);
                         prev_transforms.insert(entity_id, model);
                         
-                        // Robustness: Skip singular or invalid matrices that cause vertex shader NaNs
-                        if !model.is_finite() || model.determinant().abs() < 1e-6 { continue; }
-
                         let instance = InstanceData { model, prev_model, color, metallic, roughness, _padding: [0.0; 2] };
                         if let Some(desc_set) = tex_info {
-                            if textured_draws.len() < max_instances {
-                                textured_draws.push((mesh_idx, instance, desc_set));
-                            }
+                            textured_draws.push((mesh_idx, instance, desc_set));
                         } else {
                             batch_map.entry(mesh_idx).or_default().push(instance);
                         }
                     }
 
                     for (entity_id, gpu_mesh, model, color, metallic, roughness, tex_info) in custom_results {
-                        // Robustness: Skip singular or invalid matrices
-                        if !model.is_finite() || model.determinant().abs() < 1e-6 { continue; }
-
                         let prev_model = *prev_transforms.get(&entity_id).unwrap_or(&model);
                         prev_transforms.insert(entity_id, model);
-                        if custom_draws.len() < max_instances {
-                            custom_draws.push((gpu_mesh, InstanceData { model, prev_model, color, metallic, roughness, _padding: [0.0; 2] }, tex_info));
-                        }
+                        custom_draws.push((gpu_mesh, InstanceData { model, prev_model, color, metallic, roughness, _padding: [0.0; 2] }, tex_info));
                     }
 
                     // Lights - Parallelized gathering
@@ -1448,17 +1216,7 @@ fn main() {
                         if !light_ubo.add_light(gpu_light) { break; }
                     }
                     unsafe { *light_ptr = light_ubo; }
-                    
-                    // Explicit Flush for Light Buffer
-                    let light_range = vk::MappedMemoryRange::builder()
-                        .memory(light_memory)
-                        .offset(0)
-                        .size(vk::WHOLE_SIZE)
-                        .build();
-                    unsafe { graphics_context.device.flush_mapped_memory_ranges(&[light_range]).unwrap(); }
-
-                    (view_proj, prev_view_proj, cam_pos, rotation)
-                }; // End of GameState Lock
+                }
 
                 // 4. Upload Instances
                 let mut instance_offset = 0;
@@ -1485,18 +1243,6 @@ fn main() {
                     textured_draw_calls.push((mesh_idx, instance_offset as u32, 1u32, descriptor_set));
                     instance_offset += 1;
                 }
-
-                // Explicit Flush for Instance Buffer
-                let instance_range = vk::MappedMemoryRange::builder()
-                    .memory(instance_memory)
-                    .offset(0)
-                    .size(vk::WHOLE_SIZE)
-                    .build();
-                unsafe { graphics_context.device.flush_mapped_memory_ranges(&[instance_range]).unwrap(); }
-
-                // Check Sphere Physics (only in test scene mode)
-                // This debug check is disabled for bundled projects
-                // since sphere_id is only defined for test scenes.
                 
                 if !draw_calls.is_empty() || !custom_draw_calls.is_empty() || !textured_draw_calls.is_empty() {
                     // Render batches processed
@@ -1534,7 +1280,7 @@ fn main() {
                 let shadow_proj_base = glam::Mat4::orthographic_rh(
                     -frustum_half, frustum_half, 
                     -frustum_half, frustum_half, 
-                    frustum_half * 4.0, 0.1 // Reversed-Z swap
+                    0.1, frustum_half * 4.0  // Far plane for full depth coverage
                 );
                 let mut shadow_proj = shadow_proj_base;
                 shadow_proj.col_mut(1).y *= -1.0; // Matrix Y flip
@@ -1564,10 +1310,6 @@ fn main() {
                     (*light_ptr).lights[0] = light_data;
                     (*light_ptr).num_lights = 1;
                     (*light_ptr).ambient = [0.15, 0.15, 0.15, 1.0];
-
-                    // Explicit Flush for Light Buffer (Redundant but safe)
-                    let light_range = vk::MappedMemoryRange::builder().memory(light_memory).offset(0).size(vk::WHOLE_SIZE).build();
-                    graphics_context.device.flush_mapped_memory_ranges(&[light_range]).unwrap();
                 }
 
                 // 5. Record Commands
@@ -1590,63 +1332,21 @@ fn main() {
                     graphics_context.device.cmd_set_viewport(cmd, 0, &[viewport]);
                     graphics_context.device.cmd_set_scissor(cmd, 0, &[scissor]);
 
-                    // Global UBO Update (Before any rendering)
-                    {
-                        // Update Global UBO
-                        std::ptr::write(global_ptr, GlobalData {
-                            view_proj,
-                            prev_view_proj,
-                            light_space: light_view_proj,
-                            camera_pos: [observer_pos.x, observer_pos.y, observer_pos.z, 1.0],
-                            light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
-                        });
-
-                        // Explicit Flush for Global Buffer
-                        let global_range = vk::MappedMemoryRange::builder()
-                            .memory(global_memory)
-                            .offset(0)
-                            .size(vk::WHOLE_SIZE)
-                            .build();
-                        graphics_context.device.flush_mapped_memory_ranges(&[global_range]).unwrap();
-                    }
-
-                    // Standard Shadow Pass Execution
-                    // if false { // DEBUG: DISABLE EXECUTION
+                    // Shadow Pass
                     let shadow_rp_begin = vk::RenderPassBeginInfo::builder()
                         .render_pass(graphics_context.shadow_render_pass).framebuffer(graphics_context.shadow_framebuffer)
                         .render_area(vk::Rect2D { offset: vk::Offset2D::default(), extent: graphics_context.shadow_extent })
-                        .clear_values(&[vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 0.0, stencil: 0 } }]);  // Shadow uses Reversed-Z depth (GREATER)
+                        .clear_values(&[vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } }]);  // Shadow uses standard depth (LESS)
                     graphics_context.device.cmd_begin_render_pass(cmd, &shadow_rp_begin, vk::SubpassContents::INLINE);
                     graphics_context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, graphics_context.shadow_pipeline);
                     
-                    // Set Viewport and Scissor for Shadow Pass
-                    let shadow_viewport = vk::Viewport {
-                        x: 0.0, y: 0.0,
-                        width: graphics_context.shadow_extent.width as f32,
-                        height: graphics_context.shadow_extent.height as f32,
-                        min_depth: 0.0, max_depth: 1.0,
-                    };
-                    let shadow_scissor = vk::Rect2D {
-                        offset: vk::Offset2D { x: 0, y: 0 },
-                        extent: graphics_context.shadow_extent,
-                    };
-                    graphics_context.device.cmd_set_viewport(cmd, 0, &[shadow_viewport]);
-                    graphics_context.device.cmd_set_scissor(cmd, 0, &[shadow_scissor]);
-
-                    // Set depth bias (DISABLED DEBUG)
-                    // graphics_context.device.cmd_set_depth_bias(cmd, 2.0, 0.0, 2.5);
-                    graphics_context.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, graphics_context.shadow_pipeline_layout, 0, &[shadow_safe_descriptor_set], &[]);
+                    // Set depth bias to prevent shadow acne (constant, clamp, slope)
+                    // Much higher values needed for large 200+ unit ground planes with 2048 shadow map
+                    // constant_bias: pushes all depths away, slope_bias: scales with surface angle
+                    graphics_context.device.cmd_set_depth_bias(cmd, 200.0, 0.0, 25.0);
                     
-                    // Upload Shadow Projection Matrix
-                    let shadow_push_data = {
-                        std::slice::from_raw_parts(
-                            &light_view_proj as *const _ as *const u8,
-                            std::mem::size_of::<glam::Mat4>(),
-                        )
-                    };
-                    graphics_context.device.cmd_push_constants(cmd, graphics_context.shadow_pipeline_layout, vk::ShaderStageFlags::VERTEX, 0, shadow_push_data);
-                    // Debug: Disable Shadow Drawing to isolate artifact source
-                    // /*
+                    graphics_context.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, graphics_context.shadow_pipeline_layout, 0, &[global_descriptor_set], &[]);
+                    graphics_context.device.cmd_push_constants(cmd, graphics_context.shadow_pipeline_layout, vk::ShaderStageFlags::VERTEX, 0, bytemuck::bytes_of(&light_view_proj));
                     for (mesh_idx, first, count) in &draw_calls {
                         let m = &mesh_library[*mesh_idx];
                         graphics_context.device.cmd_bind_vertex_buffers(cmd, 0, &[m.vertex_buffer], &[0]);
@@ -1658,41 +1358,7 @@ fn main() {
                         graphics_context.device.cmd_bind_index_buffer(cmd, m.index_buffer, 0, vk::IndexType::UINT32);
                         graphics_context.device.cmd_draw_indexed(cmd, m.index_count, *count, 0, 0, *first);
                     }
-                    // */
                     graphics_context.device.cmd_end_render_pass(cmd);
-                    // } // END DEBUG DISABLE
-
-                    // ============================================================
-                    // SYNCHRONIZATION BARRIER: Shadow Map -> Main Pass Fragment Sampling
-                    // ============================================================
-                    // (Disable the standard barrier since we did it manually or skipped it)
-                    if false {
-                    let shadow_to_main_barrier = vk::ImageMemoryBarrier::builder()
-                        .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                        .image(graphics_context.shadow_depth_image)
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::DEPTH,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        })
-                        .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
-                        .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                        .build();
-
-                    graphics_context.device.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                        vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[shadow_to_main_barrier],
-                    );
-                    } // End Barrier Disablement
-                    // ============================================================
 
                     // Main Pass
                     let clear_values = [
@@ -1706,26 +1372,19 @@ fn main() {
                         .clear_values(&clear_values);
                     graphics_context.device.cmd_begin_render_pass(cmd, &main_rp_begin, vk::SubpassContents::INLINE);
                     graphics_context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, graphics_context.pipeline);
-                    graphics_context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, graphics_context.pipeline);
-                    // Revert to Standard Global Set (Shadow Map)
                     graphics_context.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, graphics_context.pipeline_layout, 0, &[global_descriptor_set], &[]);
                     
-                    // Reset Depth Bias for Main Pass
-                    graphics_context.device.cmd_set_depth_bias(cmd, 0.0, 0.0, 0.0);
-
-                    // Set Viewport and Scissor for Main Pass
-                    let main_viewport = vk::Viewport {
-                        x: 0.0, y: 0.0,
-                        width: graphics_context.swapchain_extent.unwrap().width as f32,
-                        height: graphics_context.swapchain_extent.unwrap().height as f32,
-                        min_depth: 0.0, max_depth: 1.0,
-                    };
-                    let main_scissor = vk::Rect2D {
-                        offset: vk::Offset2D { x: 0, y: 0 },
-                        extent: graphics_context.swapchain_extent.unwrap(),
-                    };
-                    graphics_context.device.cmd_set_viewport(cmd, 0, &[main_viewport]);
-                    graphics_context.device.cmd_set_scissor(cmd, 0, &[main_scissor]);
+                    {
+                        print!("DEBUG: Writing global data..."); std::io::stdout().flush().unwrap();
+                        std::ptr::write(global_ptr, GlobalData {
+                            view_proj,
+                            prev_view_proj,
+                            light_space: light_view_proj,
+                            camera_pos: [player_pos.x, player_pos.y, player_pos.z, 1.0],
+                            light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
+                        });
+                        println!("DONE");
+                    }
 
                     for (mesh_idx, first, count) in &draw_calls {
                         let m = &mesh_library[*mesh_idx];

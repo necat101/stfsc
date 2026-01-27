@@ -22,13 +22,13 @@ layout(set = 1, binding = 1) uniform sampler2D normalMap;
 layout(set = 1, binding = 2) uniform sampler2D metallicRoughnessMap;
 layout(set = 0, binding = 0) uniform sampler2D shadowMap;
 
-layout(push_constant) uniform PushConstants {
+layout(set = 0, binding = 4) uniform GlobalUBO {
     mat4 viewProj;
     mat4 prevViewProj;
     mat4 lightSpace;
-    vec4 cameraPos; // xyz = pos, w = ambient
-    vec4 lightDir;  // xyz = dir, w = unused
-} pushConstants;
+    vec4 cameraPos; // xyz = camera position, w = ambient
+    vec4 lightDir;  // xyz = light direction, w unused
+} globalData;
 
 // Dynamic Lighting - Maximum lights for mobile VR
 const int MAX_LIGHTS = 32;
@@ -61,41 +61,39 @@ float ShadowCalculation(vec4 fragPosLightSpace) {
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     // Map NDC XY from [-1, 1] to [0, 1] for texture sampling
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
-    // Z is already in [0, 1] thanks to Vulkan-specific projection correction in Rust
+    // Z is already in [0, 1] in Vulkan, but Reversed-Z means Near=1, Far=0
     
     // Check if fragment is outside shadow map frustum - return fully lit
+    // In Reversed-Z, projCoords.z < 0.0 or > 1.0 is still outside
     if(projCoords.z > 1.0 || projCoords.z < 0.0)
         return 0.0;
     if(projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0)
         return 0.0;
     
-    // Edge falloff - smoothly reduce shadow influence near frustum edges to prevent artifacts
-    // This prevents z-fighting at the corners of large ground planes
+    // Edge falloff
     float edgeFalloff = 1.0;
-    float edgeMargin = 0.05; // 5% margin from edge
+    float edgeMargin = 0.05;
     edgeFalloff *= smoothstep(0.0, edgeMargin, projCoords.x);
     edgeFalloff *= smoothstep(0.0, edgeMargin, 1.0 - projCoords.x);
     edgeFalloff *= smoothstep(0.0, edgeMargin, projCoords.y);
     edgeFalloff *= smoothstep(0.0, edgeMargin, 1.0 - projCoords.y);
         
     float closestDepth = texture(shadowMap, projCoords.xy).r; 
-    
-    // If shadow map is nearly zero (cleared to far plane in Reversed-Z)
-    // or nearly 1.0 (empty in non-reversed), it might be uninitialized/empty for editor
-    // In Reversed-Z, 0.0 is FAR. If everything is 0.0, we are "behind" shadow.
-    // Let's assume if the sample is exactly 0.0, it's an empty shadow map.
+
+    // Empty shadow map check (In Reversed-Z, 0.0 is empty/far)
     if (closestDepth < 0.0001) {
         return 0.0;
     }
 
     float currentDepth = projCoords.z;
     vec3 normal = normalize(inNormal);
-    vec3 lightDir = normalize(pushConstants.lightDir.xyz);
+    vec3 lightDir = normalize(globalData.lightDir.xyz);
     
     float slopeBias = 1.0 - abs(dot(normal, lightDir));
-    float bias = max(0.007 + 0.01 * slopeBias, 0.007); 
+    float bias = max(0.0005 + 0.001 * slopeBias, 0.0005); 
     
-    // PCF
+    // PCF with Reversed-Z comparison: currentDepth < closestDepth (Nearer is larger)
+    // Wait, in Reversed-Z, Near=1, Far=0. So "Behind" shadow means currentDepth < closestDepth.
     float shadow = 0.0;
     vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
     for(int x = -1; x <= 1; ++x)
@@ -103,14 +101,16 @@ float ShadowCalculation(vec4 fragPosLightSpace) {
         for(int y = -1; y <= 1; ++y)
         {
             float pcfDepth = texture(shadowMap, projCoords.xy + vec2(x, y) * texelSize).r; 
-            shadow += currentDepth > pcfDepth + bias ? 1.0 : 0.0;        
+            // In Reversed-Z, distance to light is 1.0 - z.
+            // Near = 1.0, Far = 0.0.
+            // If current < pcf - bias, it's shadowed (further from light).
+            shadow += currentDepth < pcfDepth - bias ? 1.0 : 0.0;        
         }    
     }
     shadow /= 9.0;
     
-    return shadow; 
+    return shadow * edgeFalloff; 
 }
-
 // Function to calculate directional light manually (used as fallback)
 vec3 calculateDirectionalLight(vec3 normal, vec3 viewDir, vec3 lightDir, vec3 albedo, float ambientFactor) {
     float diff = max(dot(normal, lightDir), 0.0);
@@ -329,7 +329,7 @@ void main() {
     
     // Fallback: If no dynamic lights, use push constant light matching editor
     if (numLights == 0) {
-        vec3 L = normalize(pushConstants.lightDir.xyz);
+        vec3 L = normalize(globalData.lightDir.xyz);
         vec3 H = normalize(V + L);
         float NdotL = max(dot(N, L), 0.0);
         
@@ -350,7 +350,7 @@ void main() {
         float shadow = 1.0 - (shadowFactor * 0.8); // 0.2 min light
         
         Lo = (kD * albedo / PI + specular) * vec3(2.5) * NdotL * shadow;
-        ambient = (pushConstants.cameraPos.w * 0.8 + 0.1) * albedo; // Boost fallback ambient
+        ambient = (globalData.cameraPos.w * 0.8 + 0.1) * albedo; // Boost fallback ambient
     } else {
         // For dynamic lights, apply shadow to first directional light if present
         if (lightData.lights[0].position_type.w == float(LIGHT_DIRECTIONAL)) {

@@ -21,13 +21,13 @@ layout(std430, set = 0, binding = 1) readonly buffer InstanceBuffer {
     InstanceData instances[];
 } instanceData;
 
-layout(push_constant) uniform PushConstants {
+layout(set = 0, binding = 4) uniform GlobalUBO {
     mat4 viewProj;
     mat4 prevViewProj;
     mat4 lightSpace;
     vec4 cameraPos; // xyz = camera position, w = ambient
     vec4 lightDir;  // xyz = light direction, w unused
-} viewData;
+} globalData;
 
 layout(location = 0) out vec3 outWorldPos;
 layout(location = 1) out vec3 outNormal;
@@ -44,27 +44,34 @@ layout(location = 11) out float outMetallic;
 layout(location = 12) out float outRoughness;
 
 void main() {
+    // mat4 model = instanceData.instances[gl_InstanceIndex].model;
     mat4 model = instanceData.instances[gl_InstanceIndex].model;
+    // mat4 model = mat4(1.0); // DEBUG: Force Identity to isolate Instance Buffer Corruption
     mat4 prevModel = instanceData.instances[gl_InstanceIndex].prevModel;
     vec4 instanceColor = instanceData.instances[gl_InstanceIndex].color;
     outMetallic = instanceData.instances[gl_InstanceIndex].metallic;
     outRoughness = instanceData.instances[gl_InstanceIndex].roughness;
 
     vec4 worldPos = model * vec4(position, 1.0);
-    gl_Position = viewData.viewProj * worldPos;
+    gl_Position = globalData.viewProj * worldPos;
+    // gl_Position = vec4(position.x * 0.0001, position.y * 0.0001, 0.5, 1.0); // DEBUG: SQUASH TEST (Ignore ViewProj)
     
     outClipPos = gl_Position;
     
     vec4 prevWorldPos = prevModel * vec4(position, 1.0);
-    outPrevClipPos = viewData.prevViewProj * prevWorldPos;
+    outPrevClipPos = globalData.prevViewProj * prevWorldPos;
 
     outWorldPos = worldPos.xyz;
     outUV = uv;
     outColor = color * instanceColor.rgb; // Multiply vertex color with instance color
-    outLightSpacePos = viewData.lightSpace * worldPos;
+    outLightSpacePos = globalData.lightSpace * worldPos;
 
-    // Normal Matrix
-    mat3 normalMatrix = transpose(inverse(mat3(model)));
+    // Normal Matrix - Guard against singular matrices (zero scale) which cause NaNs
+    // Normal Matrix - SIMPLIFIED FOR DEBUGGING
+    // We suspect inverse() is causing NaNs on Windows with singular matrices
+    mat3 m3 = mat3(model);
+    // float d = determinant(m3); // Unused in this debug path
+    mat3 normalMatrix = m3; // Direct cast - acceptable for uniform scaling, safe against NaNs from inverse()
     vec3 N = normalize(normalMatrix * normal);
 
     // Normal Offset Shadow Mapping: Push shadow sampling point slightly along normal
@@ -72,7 +79,8 @@ void main() {
     // Use a larger offset for open-world scale scenes (556 Downtown)
     float shadowOffset = 0.5;  // Increased for large 200+ unit ground planes
     vec4 offsetWorldPos = vec4(worldPos.xyz + N * shadowOffset, 1.0);
-    outNormalOffsetShadowPos = viewData.lightSpace * offsetWorldPos;
+    outNormalOffsetShadowPos = globalData.lightSpace * offsetWorldPos;
+    // outNormalOffsetShadowPos = vec4(0.0); // DEBUG: Force Zero to prevent NaNs from Light Matrix
     
     // Safe tangent calculation - handle zero/degenerate tangent input
     vec3 rawT = normalMatrix * tangent.xyz;
@@ -97,5 +105,5 @@ void main() {
     outNormal = N;
     outTangent = T;
     outBitangent = B;
-    outCameraPos = viewData.cameraPos.xyz;
+    outCameraPos = globalData.cameraPos.xyz;
 }

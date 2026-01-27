@@ -4,25 +4,12 @@
 //! for various target platforms (Linux, Quest, etc.)
 
 use std::fs;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 
 use super::{Project, TargetPlatform, OptLevel};
-
-// Cross-platform file permission helper
-#[cfg(unix)]
-fn make_executable(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-}
-
-#[cfg(windows)]
-fn make_executable(_path: &Path) -> io::Result<()> {
-    // Windows .exe files are inherently executable
-    Ok(())
-}
 
 /// Result of an export operation
 #[derive(Debug)]
@@ -128,10 +115,7 @@ impl ProjectExporter {
             TargetPlatform::Quest3 | TargetPlatform::QuestPro => {
                 self.export_quest(project, &export_path, opt_level, platform)
             }
-            TargetPlatform::PC => {
-                // Windows desktop export
-                self.export_windows(project, &export_path, opt_level)
-            }
+            TargetPlatform::PC => self.export_windows(project, &export_path, opt_level),
         }
     }
     
@@ -259,7 +243,11 @@ impl ProjectExporter {
         }
 
         // Make executable
-        let _ = make_executable(&binary_dst);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&binary_dst, fs::Permissions::from_mode(0o755));
+        }
 
         log.push_str(&format!("Binary created: {}\n", binary_dst.display()));
 
@@ -272,7 +260,11 @@ impl ProjectExporter {
         if let Err(e) = fs::write(&script_path, script_content) {
             log.push_str(&format!("Warning: Failed to create launch script: {}\n", e));
         } else {
-            let _ = make_executable(&script_path);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755));
+            }
         }
 
         log.push_str("\n=== Export complete ===\n");
@@ -351,7 +343,11 @@ impl ProjectExporter {
             };
         }
 
-        let _ = make_executable(&binary_dst);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&binary_dst, fs::Permissions::from_mode(0o755));
+        }
 
         // Create launch script
         let script_path = export_path.join("run.sh");
@@ -360,7 +356,11 @@ impl ProjectExporter {
             project.metadata.name
         );
         let _ = fs::write(&script_path, script_content);
-        let _ = make_executable(&script_path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755));
+        }
 
         let _ = progress_tx.send(format!("✅ Linux export complete: {}", export_path.display()));
 
@@ -370,6 +370,465 @@ impl ProjectExporter {
             log,
             error: None,
         }
+    }
+    
+    /// Export for Windows PC
+    fn export_windows(
+        &self,
+        project: &Project,
+        export_path: &Path,
+        opt_level: OptLevel,
+    ) -> ExportResult {
+        let mut log = String::new();
+        
+        log.push_str(&format!("=== Exporting {} for Windows ===\n", project.metadata.name));
+        
+        // Step 1: Create bundle directory structure (matches what engine expects)
+        log.push_str("Creating bundle structure...\n");
+        let assets_dir = export_path.join("assets");
+        let bundle_dir = assets_dir.join("bundle");
+        let scenes_dir = bundle_dir.join("scenes");
+        let models_dir = bundle_dir.join("models");
+        let textures_dir = bundle_dir.join("textures");
+        
+        for dir in [&assets_dir, &bundle_dir, &scenes_dir, &models_dir, &textures_dir] {
+            if let Err(e) = fs::create_dir_all(dir) {
+                return ExportResult {
+                    success: false,
+                    output_path: export_path.to_path_buf(),
+                    log,
+                    error: Some(format!("Failed to create directory: {}", e)),
+                };
+            }
+        }
+        
+        // Step 2: Create project manifest
+        log.push_str("Creating project manifest...\n");
+        let startup_scene = if !project.assets.scenes.is_empty() {
+            project.assets.scenes.first()
+                .map(|s| {
+                    let name = Path::new(&s.path).file_stem()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "scene".into());
+                    format!("{}.json", name)
+                })
+                .unwrap_or_else(|| "main.json".into())
+        } else {
+            "main.json".into()
+        };
+        
+        let manifest = crate::bundle::BundledProjectManifest {
+            name: project.metadata.name.clone(),
+            startup_scene,
+            scenes: project.assets.scenes.iter()
+                .map(|s| {
+                    let name = Path::new(&s.path).file_stem()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "scene".into());
+                    format!("{}.json", name)
+                })
+                .collect(),
+            models: project.assets.models.iter()
+                .filter_map(|m| Path::new(&m.path).file_name().map(|n| n.to_string_lossy().to_string()))
+                .collect(),
+            textures: project.assets.textures.iter()
+                .filter_map(|t| Path::new(&t.path).file_name().map(|n| n.to_string_lossy().to_string()))
+                .collect(),
+        };
+        
+        let manifest_path = bundle_dir.join("project.json");
+        if let Ok(json) = serde_json::to_string_pretty(&manifest) {
+            if let Err(e) = fs::write(&manifest_path, json) {
+                log.push_str(&format!("Warning: Failed to write manifest: {}\n", e));
+            }
+        }
+        
+        // Step 3: Bundle scenes
+        log.push_str("Bundling scenes...\n");
+        for scene_entry in &project.assets.scenes {
+            let src_path = project.root_path.join(&scene_entry.path);
+            if src_path.exists() {
+                let scene_name = Path::new(&scene_entry.path).file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "scene".into());
+                let dst_path = scenes_dir.join(format!("{}.json", scene_name));
+                if let Err(e) = fs::copy(&src_path, &dst_path) {
+                    log.push_str(&format!("Warning: Failed to copy scene {}: {}\n", scene_name, e));
+                } else {
+                    log.push_str(&format!("  Bundled scene: {}\n", scene_name));
+                }
+            }
+        }
+        
+        // Step 4: Bundle models
+        log.push_str("Bundling models...\n");
+        for model in &project.assets.models {
+            let src = project.root_path.join(&model.path);
+            if let Some(filename) = Path::new(&model.path).file_name() {
+                let dst = models_dir.join(filename);
+                if src.exists() {
+                    if let Err(e) = fs::copy(&src, &dst) {
+                        log.push_str(&format!("Warning: Failed to copy model: {}\n", e));
+                    }
+                }
+            }
+        }
+        
+        // Step 5: Bundle textures
+        log.push_str("Bundling textures...\n");
+        for texture in &project.assets.textures {
+            let src = project.root_path.join(&texture.path);
+            if let Some(filename) = Path::new(&texture.path).file_name() {
+                let dst = textures_dir.join(filename);
+                if src.exists() {
+                    if let Err(e) = fs::copy(&src, &dst) {
+                        log.push_str(&format!("Warning: Failed to copy texture: {}\n", e));
+                    }
+                }
+            }
+        }
+        
+        log.push_str(&format!("  Bundled {} models, {} textures\n", 
+            project.assets.models.len(), project.assets.textures.len()));
+
+        // Step 6: Build the engine binary for Windows
+        log.push_str("Building Windows binary...\n");
+        
+        let cargo_args = match opt_level {
+            OptLevel::Debug => vec!["build", "--bin", "stfsc_engine_windows"],
+            OptLevel::Release => vec!["build", "--release", "--bin", "stfsc_engine_windows"],
+            OptLevel::ReleaseLTO => vec!["build", "--release", "--bin", "stfsc_engine_windows"],
+        };
+
+        let target_dir = match opt_level {
+            OptLevel::Debug => "debug",
+            OptLevel::Release | OptLevel::ReleaseLTO => "release",
+        };
+
+        let output = Command::new("cargo")
+            .args(&cargo_args)
+            .current_dir(&self.engine_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+
+        match output {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log.push_str(&stdout);
+                log.push_str(&stderr);
+
+                if !output.status.success() {
+                    return ExportResult {
+                        success: false,
+                        output_path: export_path.to_path_buf(),
+                        log,
+                        error: Some("Cargo build failed".into()),
+                    };
+                }
+            }
+            Err(e) => {
+                return ExportResult {
+                    success: false,
+                    output_path: export_path.to_path_buf(),
+                    log,
+                    error: Some(format!("Failed to run cargo: {}", e)),
+                };
+            }
+        }
+
+        // Step 7: Copy binary to export directory
+        let exe_name = format!("{}.exe", project.metadata.name.replace(" ", "_"));
+        let binary_src = self.engine_root.join("target").join(target_dir).join("stfsc_engine_windows.exe");
+        let binary_dst = export_path.join(&exe_name);
+
+        if let Err(e) = fs::copy(&binary_src, &binary_dst) {
+            return ExportResult {
+                success: false,
+                output_path: export_path.to_path_buf(),
+                log,
+                error: Some(format!("Failed to copy binary: {}", e)),
+            };
+        }
+
+        log.push_str(&format!("Executable created: {}\n", binary_dst.display()));
+        
+        // Step 8: Bundle any required DLLs (Vulkan loader is typically system-provided)
+        let vulkan_dll_src = self.engine_root.join("vulkan-1.dll");
+        if vulkan_dll_src.exists() {
+            let _ = fs::copy(&vulkan_dll_src, export_path.join("vulkan-1.dll"));
+            log.push_str("Bundled vulkan-1.dll\n");
+        }
+
+        // Step 9: Create launch script
+        let script_path = export_path.join("run.bat");
+        let script_content = format!(
+            "@echo off\r\ncd /d \"%~dp0\"\r\nstart \"\" \"{}\"\r\n",
+            exe_name
+        );
+        if let Err(e) = fs::write(&script_path, script_content) {
+            log.push_str(&format!("Warning: Failed to create launch script: {}\n", e));
+        }
+        
+        // Step 10: Create ZIP archive for distribution
+        log.push_str("Creating distribution archive...\n");
+        let zip_name = format!("{}-windows.zip", project.metadata.name.replace(" ", "_"));
+        let zip_path = export_path.parent().unwrap_or(export_path).join(&zip_name);
+        
+        if let Err(e) = self.create_zip_archive(export_path, &zip_path) {
+            log.push_str(&format!("Warning: Failed to create ZIP archive: {}\n", e));
+        } else {
+            log.push_str(&format!("Distribution archive: {}\n", zip_path.display()));
+        }
+
+        log.push_str("\n=== Export complete ===\n");
+
+        ExportResult {
+            success: true,
+            output_path: export_path.to_path_buf(),
+            log,
+            error: None,
+        }
+    }
+    
+    /// Export for Windows PC with streaming output
+    fn export_windows_streaming(
+        &self,
+        project: &Project,
+        export_path: &Path,
+        opt_level: OptLevel,
+        progress_tx: &Sender<String>,
+    ) -> ExportResult {
+        let mut log = String::new();
+        
+        let _ = progress_tx.send(format!("=== Exporting {} for Windows ===", project.metadata.name));
+        
+        // Step 1: Create bundle directory structure
+        let _ = progress_tx.send("📁 Creating bundle structure...".into());
+        let assets_dir = export_path.join("assets");
+        let bundle_dir = assets_dir.join("bundle");
+        let scenes_dir = bundle_dir.join("scenes");
+        let models_dir = bundle_dir.join("models");
+        let textures_dir = bundle_dir.join("textures");
+        
+        for dir in [&assets_dir, &bundle_dir, &scenes_dir, &models_dir, &textures_dir] {
+            if let Err(e) = fs::create_dir_all(dir) {
+                return ExportResult {
+                    success: false,
+                    output_path: export_path.to_path_buf(),
+                    log,
+                    error: Some(format!("Failed to create directory: {}", e)),
+                };
+            }
+        }
+        
+        // Step 2: Create project manifest
+        let _ = progress_tx.send("📝 Creating project manifest...".into());
+        let startup_scene = if !project.assets.scenes.is_empty() {
+            project.assets.scenes.first()
+                .map(|s| {
+                    let name = Path::new(&s.path).file_stem()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "scene".into());
+                    format!("{}.json", name)
+                })
+                .unwrap_or_else(|| "main.json".into())
+        } else {
+            "main.json".into()
+        };
+        
+        let manifest = crate::bundle::BundledProjectManifest {
+            name: project.metadata.name.clone(),
+            startup_scene,
+            scenes: project.assets.scenes.iter()
+                .map(|s| {
+                    let name = Path::new(&s.path).file_stem()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "scene".into());
+                    format!("{}.json", name)
+                })
+                .collect(),
+            models: project.assets.models.iter()
+                .filter_map(|m| Path::new(&m.path).file_name().map(|n| n.to_string_lossy().to_string()))
+                .collect(),
+            textures: project.assets.textures.iter()
+                .filter_map(|t| Path::new(&t.path).file_name().map(|n| n.to_string_lossy().to_string()))
+                .collect(),
+        };
+        
+        let manifest_path = bundle_dir.join("project.json");
+        if let Ok(json) = serde_json::to_string_pretty(&manifest) {
+            let _ = fs::write(&manifest_path, json);
+        }
+        
+        // Step 3: Bundle scenes
+        let _ = progress_tx.send("📦 Bundling scenes...".into());
+        for scene_entry in &project.assets.scenes {
+            let src_path = project.root_path.join(&scene_entry.path);
+            if src_path.exists() {
+                let scene_name = Path::new(&scene_entry.path).file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "scene".into());
+                let dst_path = scenes_dir.join(format!("{}.json", scene_name));
+                let _ = fs::copy(&src_path, &dst_path);
+            }
+        }
+        let _ = progress_tx.send(format!("✓ Bundled {} scenes", project.assets.scenes.len()));
+        
+        // Step 4: Bundle models
+        let _ = progress_tx.send("📦 Bundling models...".into());
+        for model in &project.assets.models {
+            let src = project.root_path.join(&model.path);
+            if let Some(filename) = Path::new(&model.path).file_name() {
+                let dst = models_dir.join(filename);
+                if src.exists() {
+                    let _ = fs::copy(&src, &dst);
+                }
+            }
+        }
+        
+        // Step 5: Bundle textures
+        let _ = progress_tx.send("📦 Bundling textures...".into());
+        for texture in &project.assets.textures {
+            let src = project.root_path.join(&texture.path);
+            if let Some(filename) = Path::new(&texture.path).file_name() {
+                let dst = textures_dir.join(filename);
+                if src.exists() {
+                    let _ = fs::copy(&src, &dst);
+                }
+            }
+        }
+        let _ = progress_tx.send(format!("✓ Bundled {} models, {} textures", 
+            project.assets.models.len(), project.assets.textures.len()));
+
+        // Step 6: Build with streaming
+        let _ = progress_tx.send("🔨 Compiling Windows binary...".into());
+        
+        let cargo_args: Vec<&str> = match opt_level {
+            OptLevel::Debug => vec!["build", "--bin", "stfsc_engine_windows"],
+            OptLevel::Release => vec!["build", "--release", "--bin", "stfsc_engine_windows"],
+            OptLevel::ReleaseLTO => vec!["build", "--release", "--bin", "stfsc_engine_windows"],
+        };
+
+        let target_dir = match opt_level {
+            OptLevel::Debug => "debug",
+            OptLevel::Release | OptLevel::ReleaseLTO => "release",
+        };
+
+        match self.run_cargo_streaming(&cargo_args, Some(progress_tx)) {
+            Ok(output) => {
+                log.push_str(&output);
+            }
+            Err(e) => {
+                return ExportResult {
+                    success: false,
+                    output_path: export_path.to_path_buf(),
+                    log,
+                    error: Some(e),
+                };
+            }
+        }
+
+        // Step 7: Copy binary
+        let _ = progress_tx.send("📋 Copying executable...".into());
+        let exe_name = format!("{}.exe", project.metadata.name.replace(" ", "_"));
+        let binary_src = self.engine_root.join("target").join(target_dir).join("stfsc_engine_windows.exe");
+        let binary_dst = export_path.join(&exe_name);
+
+        if let Err(e) = fs::copy(&binary_src, &binary_dst) {
+            return ExportResult {
+                success: false,
+                output_path: export_path.to_path_buf(),
+                log,
+                error: Some(format!("Failed to copy binary: {}", e)),
+            };
+        }
+
+        // Step 8: Bundle DLLs
+        let _ = progress_tx.send("📦 Bundling runtime libraries...".into());
+        let vulkan_dll_src = self.engine_root.join("vulkan-1.dll");
+        if vulkan_dll_src.exists() {
+            let _ = fs::copy(&vulkan_dll_src, export_path.join("vulkan-1.dll"));
+        }
+
+        // Step 9: Create launch script
+        let script_path = export_path.join("run.bat");
+        let script_content = format!(
+            "@echo off\r\ncd /d \"%~dp0\"\r\nstart \"\" \"{}\"\r\n",
+            exe_name
+        );
+        let _ = fs::write(&script_path, script_content);
+
+        // Step 10: Create ZIP archive
+        let _ = progress_tx.send("📦 Creating distribution archive...".into());
+        let zip_name = format!("{}-windows.zip", project.metadata.name.replace(" ", "_"));
+        let zip_path = export_path.parent().unwrap_or(export_path).join(&zip_name);
+        
+        if let Err(e) = self.create_zip_archive(export_path, &zip_path) {
+            let _ = progress_tx.send(format!("⚠ Warning: Failed to create ZIP: {}", e));
+        } else {
+            let _ = progress_tx.send(format!("✓ Archive created: {}", zip_path.display()));
+        }
+
+        let _ = progress_tx.send(format!("✅ Windows export complete: {}", export_path.display()));
+
+        ExportResult {
+            success: true,
+            output_path: export_path.to_path_buf(),
+            log,
+            error: None,
+        }
+    }
+    
+    /// Create a ZIP archive of a directory
+    fn create_zip_archive(&self, source_dir: &Path, zip_path: &Path) -> Result<(), String> {
+        let file = fs::File::create(zip_path)
+            .map_err(|e| format!("Failed to create ZIP file: {}", e))?;
+        let mut zip = zip::ZipWriter::new(file);
+        
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        
+        self.add_dir_to_zip(&mut zip, source_dir, source_dir, options)?;
+        
+        zip.finish().map_err(|e| format!("Failed to finalize ZIP: {}", e))?;
+        Ok(())
+    }
+    
+    /// Recursively add directory contents to ZIP
+    fn add_dir_to_zip<W: Write + std::io::Seek>(
+        &self,
+        zip: &mut zip::ZipWriter<W>,
+        base_dir: &Path,
+        current_dir: &Path,
+        options: zip::write::SimpleFileOptions,
+    ) -> Result<(), String> {
+        let entries = fs::read_dir(current_dir)
+            .map_err(|e| format!("Failed to read directory: {}", e))?;
+        
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+            let path = entry.path();
+            let relative = path.strip_prefix(base_dir)
+                .map_err(|e| format!("Failed to get relative path: {}", e))?;
+            let name = relative.to_string_lossy().replace("\\", "/");
+            
+            if path.is_dir() {
+                zip.add_directory(&name, options)
+                    .map_err(|e| format!("Failed to add directory to ZIP: {}", e))?;
+                self.add_dir_to_zip(zip, base_dir, &path, options)?;
+            } else {
+                zip.start_file(&name, options)
+                    .map_err(|e| format!("Failed to start file in ZIP: {}", e))?;
+                let content = fs::read(&path)
+                    .map_err(|e| format!("Failed to read file: {}", e))?;
+                zip.write_all(&content)
+                    .map_err(|e| format!("Failed to write to ZIP: {}", e))?;
+            }
+        }
+        
+        Ok(())
     }
     
     /// Export for Quest VR with streaming output  
@@ -768,196 +1227,6 @@ impl ProjectExporter {
         log.push_str("\n=== Export complete ===\n");
         log.push_str("\nInstall with:\n");
         log.push_str(&format!("  adb install \"{}\"\n", apk_dst.display()));
-
-        ExportResult {
-            success: true,
-            output_path: export_path.to_path_buf(),
-            log,
-            error: None,
-        }
-    }
-
-    /// Export for Windows desktop
-    fn export_windows(
-        &self,
-        project: &Project,
-        export_path: &Path,
-        opt_level: OptLevel,
-    ) -> ExportResult {
-        let mut log = String::new();
-        
-        log.push_str(&format!("=== Exporting {} for Windows ===\n", project.metadata.name));
-        
-        // Step 1: Copy assets
-        log.push_str("Copying assets...\n");
-        if let Err(e) = self.copy_assets(project, export_path) {
-            return ExportResult {
-                success: false,
-                output_path: export_path.to_path_buf(),
-                log,
-                error: Some(format!("Failed to copy assets: {}", e)),
-            };
-        }
-        log.push_str(&format!("  Copied {} assets\n", project.assets.total_count()));
-
-        // Step 2: Build the engine binary
-        log.push_str("Building Windows binary...\n");
-        
-        let cargo_args = match opt_level {
-            OptLevel::Debug => vec!["build", "--bin", "stfsc_engine"],
-            OptLevel::Release => vec!["build", "--release", "--bin", "stfsc_engine"],
-            OptLevel::ReleaseLTO => vec!["build", "--release", "--bin", "stfsc_engine"],
-        };
-
-        let target_dir = match opt_level {
-            OptLevel::Debug => "debug",
-            OptLevel::Release | OptLevel::ReleaseLTO => "release",
-        };
-
-        let output = Command::new("cargo")
-            .args(&cargo_args)
-            .current_dir(&self.engine_root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
-
-        match output {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log.push_str(&stdout);
-                log.push_str(&stderr);
-
-                if !output.status.success() {
-                    return ExportResult {
-                        success: false,
-                        output_path: export_path.to_path_buf(),
-                        log,
-                        error: Some("Cargo build failed".into()),
-                    };
-                }
-            }
-            Err(e) => {
-                return ExportResult {
-                    success: false,
-                    output_path: export_path.to_path_buf(),
-                    log,
-                    error: Some(format!("Failed to run cargo: {}", e)),
-                };
-            }
-        }
-
-        // Step 3: Copy binary to export directory
-        let binary_src = self.engine_root.join("target").join(target_dir).join("stfsc_engine.exe");
-        let binary_dst = export_path.join(format!("{}.exe", project.metadata.name));
-
-        if let Err(e) = fs::copy(&binary_src, &binary_dst) {
-            return ExportResult {
-                success: false,
-                output_path: export_path.to_path_buf(),
-                log,
-                error: Some(format!("Failed to copy binary: {}", e)),
-            };
-        }
-
-        // Windows .exe files are already executable, no need to set permissions
-        log.push_str(&format!("Binary created: {}\n", binary_dst.display()));
-
-        // Step 4: Create launch script (Windows batch file)
-        let script_path = export_path.join("run.bat");
-        let script_content = format!(
-            "@echo off\r\ncd /D \"%~dp0\"\r\n\"{}.exe\"\r\n",
-            project.metadata.name
-        );
-        if let Err(e) = fs::write(&script_path, script_content) {
-            log.push_str(&format!("Warning: Failed to create launch script: {}\n", e));
-        }
-
-        log.push_str("\n=== Export complete ===\n");
-
-        ExportResult {
-            success: true,
-            output_path: export_path.to_path_buf(),
-            log,
-            error: None,
-        }
-    }
-    
-    /// Export for Windows desktop with streaming output
-    fn export_windows_streaming(
-        &self,
-        project: &Project,
-        export_path: &Path,
-        opt_level: OptLevel,
-        progress_tx: &Sender<String>,
-    ) -> ExportResult {
-        let mut log = String::new();
-        
-        let _ = progress_tx.send(format!("=== Exporting {} for Windows ===", project.metadata.name));
-        
-        // Step 1: Copy assets
-        let _ = progress_tx.send("📦 Copying assets...".into());
-        if let Err(e) = self.copy_assets(project, export_path) {
-            return ExportResult {
-                success: false,
-                output_path: export_path.to_path_buf(),
-                log,
-                error: Some(format!("Failed to copy assets: {}", e)),
-            };
-        }
-        let _ = progress_tx.send(format!("✓ Copied {} assets", project.assets.total_count()));
-
-        // Step 2: Build with streaming
-        let _ = progress_tx.send("🔨 Compiling Windows binary...".into());
-        
-        let cargo_args: Vec<&str> = match opt_level {
-            OptLevel::Debug => vec!["build", "--bin", "stfsc_engine"],
-            OptLevel::Release => vec!["build", "--release", "--bin", "stfsc_engine"],
-            OptLevel::ReleaseLTO => vec!["build", "--release", "--bin", "stfsc_engine"],
-        };
-
-        let target_dir = match opt_level {
-            OptLevel::Debug => "debug",
-            OptLevel::Release | OptLevel::ReleaseLTO => "release",
-        };
-
-        match self.run_cargo_streaming(&cargo_args, Some(progress_tx)) {
-            Ok(output) => {
-                log.push_str(&output);
-            }
-            Err(e) => {
-                return ExportResult {
-                    success: false,
-                    output_path: export_path.to_path_buf(),
-                    log,
-                    error: Some(e),
-                };
-            }
-        }
-
-        // Step 3: Copy binary
-        let _ = progress_tx.send("📋 Copying binary...".into());
-        let binary_src = self.engine_root.join("target").join(target_dir).join("stfsc_engine.exe");
-        let binary_dst = export_path.join(format!("{}.exe", project.metadata.name));
-
-        if let Err(e) = fs::copy(&binary_src, &binary_dst) {
-            return ExportResult {
-                success: false,
-                output_path: export_path.to_path_buf(),
-                log,
-                error: Some(format!("Failed to copy binary: {}", e)),
-            };
-        }
-
-        // Create launch script (Windows batch file)
-        let script_path = export_path.join("run.bat");
-        let script_content = format!(
-            "@echo off\r\ncd /D \"%~dp0\"\r\n\"{}.exe\"\r\n",
-            project.metadata.name
-        );
-        let _ = fs::write(&script_path, script_content);
-
-        let _ = progress_tx.send(format!("✅ Windows export complete: {}", export_path.display()));
 
         ExportResult {
             success: true,

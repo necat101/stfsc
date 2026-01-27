@@ -21,7 +21,7 @@ pub struct Texture {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct InstanceData {
     pub model: glam::Mat4,
     pub prev_model: glam::Mat4,
@@ -29,6 +29,16 @@ pub struct InstanceData {
     pub metallic: f32,
     pub roughness: f32,
     pub _padding: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GlobalData {
+    pub view_proj: glam::Mat4,
+    pub prev_view_proj: glam::Mat4,
+    pub light_space: glam::Mat4,
+    pub camera_pos: [f32; 4], // xyz = pos, w = ambient
+    pub light_dir: [f32; 4],  // xyz = dir, w = unused
 }
 
 #[derive(Clone, Debug)]
@@ -56,12 +66,8 @@ pub struct GraphicsContext {
     pub queue_family_index: u32,
     pub queue: vk::Queue,
     pub command_pool: vk::CommandPool,
-    pub in_flight_command_buffers: Vec<vk::CommandBuffer>,
-    pub in_flight_fences: Vec<vk::Fence>,
-    pub image_available_semaphores: Vec<vk::Semaphore>,
-    pub render_finished_semaphores: Vec<vk::Semaphore>,
-    pub current_frame: usize,
-    pub max_frames_in_flight: usize,
+    pub command_buffer: vk::CommandBuffer,
+    pub fence: vk::Fence,
     pub render_pass: vk::RenderPass,
     pub pipeline_layout: vk::PipelineLayout,
     pub pipeline: vk::Pipeline,
@@ -77,10 +83,10 @@ pub struct GraphicsContext {
     pub shadow_render_pass: vk::RenderPass,
     pub shadow_pipeline_layout: vk::PipelineLayout,
     pub shadow_pipeline: vk::Pipeline,
-    pub shadow_depth_images: Vec<vk::Image>,
-    pub shadow_depth_memories: Vec<vk::DeviceMemory>,
-    pub shadow_depth_views: Vec<vk::ImageView>,
-    pub shadow_framebuffers: Vec<vk::Framebuffer>,
+    pub shadow_depth_image: vk::Image,
+    pub shadow_depth_memory: vk::DeviceMemory,
+    pub shadow_depth_view: vk::ImageView,
+    pub shadow_framebuffer: vk::Framebuffer,
     pub shadow_sampler: vk::Sampler,
     pub shadow_extent: vk::Extent2D,
 
@@ -102,18 +108,23 @@ pub struct GraphicsContext {
     #[cfg(not(target_os = "android"))]
     pub swapchain_framebuffers: Vec<vk::Framebuffer>,
     #[cfg(not(target_os = "android"))]
-    pub desktop_depth_images: Vec<vk::Image>,
+    pub desktop_depth_image: Option<vk::Image>,
     #[cfg(not(target_os = "android"))]
-    pub desktop_depth_memories: Vec<vk::DeviceMemory>,
+    pub desktop_depth_memory: Option<vk::DeviceMemory>,
     #[cfg(not(target_os = "android"))]
-    pub desktop_depth_views: Vec<vk::ImageView>,
+    pub desktop_depth_view: Option<vk::ImageView>,
     #[cfg(not(target_os = "android"))]
-    pub desktop_motion_images: Vec<vk::Image>,
+    pub desktop_motion_image: Option<vk::Image>,
     #[cfg(not(target_os = "android"))]
-    pub desktop_motion_memories: Vec<vk::DeviceMemory>,
+    pub desktop_motion_memory: Option<vk::DeviceMemory>,
     #[cfg(not(target_os = "android"))]
-    pub desktop_motion_views: Vec<vk::ImageView>,
+    pub desktop_motion_view: Option<vk::ImageView>,
+    #[cfg(not(target_os = "android"))]
     pub swapchain_extent: Option<vk::Extent2D>,
+    #[cfg(not(target_os = "android"))]
+    pub image_available_semaphore: Option<vk::Semaphore>,
+    #[cfg(not(target_os = "android"))]
+    pub render_finished_semaphore: Option<vk::Semaphore>,
 }
 
 /// Calculate optimal shadow map resolution based on ground plane extent.
@@ -166,7 +177,7 @@ impl GraphicsContext {
             .application_version(0)
             .engine_name(&engine_name)
             .engine_version(0)
-            .api_version(vk::make_api_version(0, 1, 1, 0));
+            .api_version(vk::make_api_version(0, 1, 0, 0));
 
         // Use vulkan_legacy_instance_extensions as suggested by compiler
         let xr_extensions = xr_instance.vulkan_legacy_instance_extensions(xr_system)?;
@@ -227,26 +238,23 @@ impl GraphicsContext {
         let device = unsafe { instance.create_device(physical_device, &device_create_info, None)? };
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
-        // 5. Synchronization & Command Buffers
-        let max_frames_in_flight = 1; // Android stays with 1 for now
-        let mut in_flight_fences = Vec::new();
-        let mut image_available_semaphores = Vec::new();
-        let mut render_finished_semaphores = Vec::new();
-        for _ in 0..max_frames_in_flight {
-             in_flight_fences.push(unsafe { device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None)? });
-             image_available_semaphores.push(unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? });
-             render_finished_semaphores.push(unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? });
-        }
-
+        // 5. Create Command Pool
         let pool_create_info = vk::CommandPoolCreateInfo::builder()
             .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let command_pool = unsafe { device.create_command_pool(&pool_create_info, None)? };
-        
-        let mut in_flight_command_buffers = Vec::new();
-        for _ in 0..max_frames_in_flight {
-            in_flight_command_buffers.push(unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::builder().command_pool(command_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1))?[0] });
-        }
+
+        // 6. Allocate Command Buffer
+        let buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let command_buffer = unsafe { device.allocate_command_buffers(&buffer_allocate_info)?[0] };
+
+        // 7. Create Fence
+        let fence_create_info =
+            vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
+        let fence = unsafe { device.create_fence(&fence_create_info, None)? };
 
         // Find Depth Format
         let depth_format = Self::find_depth_format(&instance, physical_device)?;
@@ -359,6 +367,13 @@ impl GraphicsContext {
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .build(),
+            // Global Data UBO (Matrices, Camera, Light)
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(4)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
                 .build(),
         ];
         let global_layout_info =
@@ -503,12 +518,8 @@ impl GraphicsContext {
             queue_family_index,
             queue,
             command_pool,
-            in_flight_command_buffers,
-            in_flight_fences,
-            image_available_semaphores,
-            render_finished_semaphores,
-            current_frame: 0,
-            max_frames_in_flight,
+            command_buffer,
+            fence,
             render_pass,
             pipeline_layout,
             pipeline,
@@ -522,10 +533,10 @@ impl GraphicsContext {
             shadow_render_pass,
             shadow_pipeline_layout,
             shadow_pipeline,
-            shadow_depth_images: vec![shadow_depth_image],
-            shadow_depth_memories: vec![shadow_depth_memory],
-            shadow_depth_views: vec![shadow_depth_view],
-            shadow_framebuffers: vec![shadow_framebuffer],
+            shadow_depth_image,
+            shadow_depth_memory,
+            shadow_depth_view,
+            shadow_framebuffer,
             shadow_sampler,
             shadow_extent,
             queue_mutex: std::sync::Mutex::new(()),
@@ -536,7 +547,7 @@ impl GraphicsContext {
             #[cfg(not(target_os = "android"))]
             swapchain_loader: None,
             #[cfg(not(target_os = "android"))]
-            swapchain: None,
+            swapchain: vk::SwapchainKHR::null(),
             #[cfg(not(target_os = "android"))]
             swapchain_images: Vec::new(),
             #[cfg(not(target_os = "android"))]
@@ -544,19 +555,23 @@ impl GraphicsContext {
             #[cfg(not(target_os = "android"))]
             swapchain_framebuffers: Vec::new(),
             #[cfg(not(target_os = "android"))]
-            desktop_depth_images: Vec::new(),
+            desktop_depth_image: None,
             #[cfg(not(target_os = "android"))]
-            desktop_depth_memories: Vec::new(),
+            desktop_depth_memory: None,
             #[cfg(not(target_os = "android"))]
-            desktop_depth_views: Vec::new(),
+            desktop_depth_view: None,
             #[cfg(not(target_os = "android"))]
-            desktop_motion_images: Vec::new(),
+            desktop_motion_image: None,
             #[cfg(not(target_os = "android"))]
-            desktop_motion_memories: Vec::new(),
+            desktop_motion_memory: None,
             #[cfg(not(target_os = "android"))]
-            desktop_motion_views: Vec::new(),
+            desktop_motion_view: None,
             #[cfg(not(target_os = "android"))]
             swapchain_extent: None,
+            #[cfg(not(target_os = "android"))]
+            image_available_semaphore: None,
+            #[cfg(not(target_os = "android"))]
+            render_finished_semaphore: None,
         };
 
         let (albedo, normal, mr) = ctx.create_default_pbr_textures()?;
@@ -588,7 +603,7 @@ impl GraphicsContext {
             .application_version(0)
             .engine_name(&engine_name)
             .engine_version(0)
-            .api_version(vk::make_api_version(0, 1, 1, 0));
+            .api_version(vk::make_api_version(0, 1, 0, 0));
 
         let display_handle = window.raw_display_handle();
         let window_handle = window.raw_window_handle();
@@ -624,16 +639,9 @@ impl GraphicsContext {
             .queue_priorities(&queue_priorities);
 
         let device_extensions = [ash::extensions::khr::Swapchain::name().as_ptr()];
-        
-        // Enable device features (samplerAnisotropy for textures, independentBlend for UI overlay)
-        let device_features = vk::PhysicalDeviceFeatures::builder()
-            .sampler_anisotropy(true)
-            .independent_blend(true);
-            
         let device_create_info = vk::DeviceCreateInfo::builder()
             .queue_create_infos(std::slice::from_ref(&queue_create_info))
-            .enabled_extension_names(&device_extensions)
-            .enabled_features(&device_features);
+            .enabled_extension_names(&device_extensions);
 
         let device = unsafe { instance.create_device(physical_device, &device_create_info, None)? };
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
@@ -642,17 +650,26 @@ impl GraphicsContext {
 
         // 4. Swapchain
         let surface_capabilities = unsafe { surface_loader.get_physical_device_surface_capabilities(physical_device, surface)? };
-        let available_formats = unsafe { surface_loader.get_physical_device_surface_formats(physical_device, surface)? };
-        
-        // Select preferred surface format: prefer B8G8R8A8_UNORM or B8G8R8A8_SRGB for Windows compatibility
-        let surface_format = available_formats.iter()
-            .find(|f| f.format == vk::Format::B8G8R8A8_UNORM && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
-            .or_else(|| available_formats.iter().find(|f| f.format == vk::Format::B8G8R8A8_SRGB))
-            .or_else(|| available_formats.iter().find(|f| f.format == vk::Format::R8G8B8A8_UNORM))
-            .unwrap_or(&available_formats[0])
-            .clone();
-        let extent = surface_capabilities.current_extent;
+        let surface_format = unsafe { surface_loader.get_physical_device_surface_formats(physical_device, surface)?[0] };
+        let mut extent = surface_capabilities.current_extent;
+        if extent.width == 0xFFFFFFFF {
+            let window_size = window.inner_size();
+            extent = vk::Extent2D {
+                width: window_size.width.clamp(
+                    surface_capabilities.min_image_extent.width,
+                    surface_capabilities.max_image_extent.width,
+                ),
+                height: window_size.height.clamp(
+                    surface_capabilities.min_image_extent.height,
+                    surface_capabilities.max_image_extent.height,
+                ),
+            };
+        }
 
+        // Final safety: ensures extent is at least 1x1 to prevent driver crashes
+        extent.width = extent.width.max(1);
+        extent.height = extent.height.max(1);
+        
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
             .surface(surface)
             .min_image_count(std::cmp::max(surface_capabilities.min_image_count, 2))
@@ -678,46 +695,17 @@ impl GraphicsContext {
             unsafe { device.create_image_view(&create_info, None) }
         }).collect::<Result<Vec<_>, _>>()?;
 
-        // 5. Synchronization & Command Buffers
-        let max_frames_in_flight = 2;
-        let mut in_flight_fences = Vec::new();
-        let mut image_available_semaphores = Vec::new();
-        let mut render_finished_semaphores = Vec::new();
-        for _ in 0..max_frames_in_flight {
-             in_flight_fences.push(unsafe { device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None)? });
-             image_available_semaphores.push(unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? });
-             render_finished_semaphores.push(unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? });
-        }
-
+        // 5. Command Pool & Buffer
         let pool_create_info = vk::CommandPoolCreateInfo::builder()
             .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let command_pool = unsafe { device.create_command_pool(&pool_create_info, None)? };
-        
-        let mut in_flight_command_buffers = Vec::new();
-        for _ in 0..max_frames_in_flight {
-            in_flight_command_buffers.push(unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::builder().command_pool(command_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1))?[0] });
-        }
+        let command_buffer = unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::builder().command_pool(command_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1))?[0] };
+        let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None)? };
 
-        // 6. Depth & Motion Vector Resources (Per swapchain image)
-        let mut desktop_depth_images = Vec::new();
-        let mut desktop_depth_memories = Vec::new();
-        let mut desktop_depth_views = Vec::new();
-        let mut desktop_motion_images = Vec::new();
-        let mut desktop_motion_memories = Vec::new();
-        let mut desktop_motion_views = Vec::new();
-
-        for _ in 0..swapchain_images.len() {
-            let (d_img, d_mem, d_view) = Self::create_image_resources_internal(&instance, &device, physical_device, extent.width, extent.height, depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
-            desktop_depth_images.push(d_img);
-            desktop_depth_memories.push(d_mem);
-            desktop_depth_views.push(d_view);
-
-            let (m_img, m_mem, m_view) = Self::create_image_resources_internal(&instance, &device, physical_device, extent.width, extent.height, vk::Format::R16G16_SFLOAT, vk::ImageUsageFlags::COLOR_ATTACHMENT, vk::ImageAspectFlags::COLOR)?;
-            desktop_motion_images.push(m_img);
-            desktop_motion_memories.push(m_mem);
-            desktop_motion_views.push(m_view);
-        }
+        // 6. Depth & Motion Vector Resources
+        let (desktop_depth_image, desktop_depth_memory, desktop_depth_view) = Self::create_image_resources_internal(&instance, &device, physical_device, extent.width, extent.height, depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
+        let (desktop_motion_image, desktop_motion_memory, desktop_motion_view) = Self::create_image_resources_internal(&instance, &device, physical_device, extent.width, extent.height, vk::Format::R16G16_SFLOAT, vk::ImageUsageFlags::COLOR_ATTACHMENT, vk::ImageAspectFlags::COLOR)?;
 
         // 7. Render Pass (Desktop version)
         let render_pass_attachments = [
@@ -731,12 +719,29 @@ impl GraphicsContext {
         ];
         let depth_attachment = vk::AttachmentReference::builder().attachment(1).layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL).build();
         let subpasses = [vk::SubpassDescription::builder().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&color_attachments).depth_stencil_attachment(&depth_attachment).build()];
-        let dependencies = [vk::SubpassDependency::builder().src_subpass(vk::SUBPASS_EXTERNAL).dst_subpass(0).src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS).dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS).dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE).build()];
+        let dependencies = [
+            vk::SubpassDependency::builder()
+                .src_subpass(vk::SUBPASS_EXTERNAL)
+                .dst_subpass(0)
+                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
+                .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .build(),
+            // Extra dependency to ensure shadow map (transitioned externally) is ready for fragment sampling
+            vk::SubpassDependency::builder()
+                .src_subpass(vk::SUBPASS_EXTERNAL)
+                .dst_subpass(0)
+                .src_stage_mask(vk::PipelineStageFlags::LATE_FRAGMENT_TESTS) // Shadow finish
+                .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)     // Main sampling
+                .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .build(),
+        ];
         let render_pass = unsafe { device.create_render_pass(&vk::RenderPassCreateInfo::builder().attachments(&render_pass_attachments).subpasses(&subpasses).dependencies(&dependencies), None)? };
 
-        // 8. Framebuffers (mapping to per-swapchain depth/motion)
-        let swapchain_framebuffers = swapchain_image_views.iter().enumerate().map(|(i, &view)| {
-            let attachments = [view, desktop_depth_views[i], desktop_motion_views[i]];
+        // 8. Framebuffers
+        let swapchain_framebuffers = swapchain_image_views.iter().map(|&view| {
+            let attachments = [view, desktop_depth_view, desktop_motion_view];
             let create_info = vk::FramebufferCreateInfo::builder()
                 .render_pass(render_pass)
                 .attachments(&attachments)
@@ -752,6 +757,7 @@ impl GraphicsContext {
             vk::DescriptorSetLayoutBinding::builder().binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX).build(),
             vk::DescriptorSetLayoutBinding::builder().binding(2).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
             vk::DescriptorSetLayoutBinding::builder().binding(3).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX).build(),
+            vk::DescriptorSetLayoutBinding::builder().binding(4).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT).build(),
         ];
         let global_set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::builder().bindings(&global_bindings), None)? };
         let material_bindings = [
@@ -760,53 +766,55 @@ impl GraphicsContext {
             vk::DescriptorSetLayoutBinding::builder().binding(2).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
         ];
         let material_set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::builder().bindings(&material_bindings), None)? };
-        let descriptor_pool = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::builder().pool_sizes(&[vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 300 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 100 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 10 }]).max_sets(100), None)? };
+        let descriptor_pool = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::builder().pool_sizes(&[vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 300 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 100 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 300 }]).max_sets(100), None)? };
 
-        // 10. Pipeline Layout
-        let push_constant_ranges = [vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT).offset(0).size(192 + 32).build()];
-        let pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&push_constant_ranges).set_layouts(&[global_set_layout, material_set_layout]), None)? };
+        // 10. Pipeline Layouts
+        let main_push_constant_ranges = [vk::PushConstantRange::builder()
+            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+            .offset(0)
+            .size(224) // 192 (matrices) + 32 (vec4s)
+            .build()];
 
-        // 11. Shadow Resources (Per frame in flight)
+        let pipeline_layout = unsafe {
+            device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::builder()
+                    .push_constant_ranges(&main_push_constant_ranges)
+                    .set_layouts(&[global_set_layout, material_set_layout]),
+                None,
+            )?
+        };
+
+        let skinned_pipeline_layout = unsafe {
+            device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::builder()
+                    .push_constant_ranges(&main_push_constant_ranges)
+                    .set_layouts(&[global_set_layout, material_set_layout]),
+                None,
+            )?
+        };
+
+        // 11. Shadow Resources
         let shadow_res = shadow_resolution.unwrap_or(4096);
         let shadow_extent = vk::Extent2D { width: shadow_res, height: shadow_res };
         let shadow_render_pass = Self::create_shadow_render_pass_internal(&device)?;
         let shadow_pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&[vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::VERTEX).offset(0).size(64).build()]).set_layouts(&[global_set_layout]), None)? };
         let shadow_pipeline = Self::create_shadow_pipeline_internal(&device, shadow_pipeline_layout, shadow_render_pass)?;
-        
-        let mut shadow_depth_images = Vec::new();
-        let mut shadow_depth_memories = Vec::new();
-        let mut shadow_depth_views = Vec::new();
-        let mut shadow_framebuffers = Vec::new();
+        let (shadow_depth_image, shadow_depth_memory, shadow_depth_view) = Self::create_shadow_image_resources_internal(&instance, &device, physical_device, shadow_extent)?;
+        let shadow_framebuffer = unsafe { device.create_framebuffer(&vk::FramebufferCreateInfo::builder().render_pass(shadow_render_pass).attachments(&[shadow_depth_view]).width(shadow_extent.width).height(shadow_extent.height).layers(1), None)? };
+        let shadow_sampler = unsafe { device.create_sampler(&vk::SamplerCreateInfo::builder().mag_filter(vk::Filter::NEAREST).min_filter(vk::Filter::NEAREST).address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER).address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER).address_mode_w(vk::SamplerAddressMode::CLAMP_TO_BORDER).border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE).build(), None)? };
 
-        for _ in 0..max_frames_in_flight {
-            let (s_img, s_mem, s_view) = Self::create_shadow_image_resources_internal(&instance, &device, physical_device, shadow_extent)?;
-            let s_fb = unsafe { device.create_framebuffer(&vk::FramebufferCreateInfo::builder().render_pass(shadow_render_pass).attachments(&[s_view]).width(shadow_extent.width).height(shadow_extent.height).layers(1), None)? };
-            shadow_depth_images.push(s_img);
-            shadow_depth_memories.push(s_mem);
-            shadow_depth_views.push(s_view);
-            shadow_framebuffers.push(s_fb);
-        }
-
-        let shadow_sampler = unsafe { device.create_sampler(&vk::SamplerCreateInfo::builder().mag_filter(vk::Filter::LINEAR).min_filter(vk::Filter::LINEAR).address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER).address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER).address_mode_w(vk::SamplerAddressMode::CLAMP_TO_BORDER).border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE).build(), None)? };
-
-        unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? };
-        unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? };
+        let image_available_semaphore = unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? };
+        let render_finished_semaphore = unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? };
 
         let pipeline = Self::create_graphics_pipeline_internal(&device, pipeline_layout, render_pass)?;
-        let skinned_pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&push_constant_ranges).set_layouts(&[global_set_layout, material_set_layout]), None)? };
         let skinned_pipeline = Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
 
         let mut ctx = Self {
-            entry, instance, physical_device, device, queue_family_index, queue, command_pool, 
-            in_flight_command_buffers,
-            in_flight_fences, image_available_semaphores, render_finished_semaphores, current_frame: 0, max_frames_in_flight,
-            render_pass, 
+            entry, instance, physical_device, device, queue_family_index, queue, command_pool, command_buffer, fence, render_pass, 
             pipeline_layout, pipeline, skinned_pipeline_layout, skinned_pipeline,
             depth_format, global_set_layout, material_set_layout, descriptor_pool,
             default_material_descriptor_set: vk::DescriptorSet::null(),
-            shadow_render_pass, shadow_pipeline_layout, shadow_pipeline, 
-            shadow_depth_images, shadow_depth_memories, shadow_depth_views, shadow_framebuffers, 
-            shadow_sampler, shadow_extent,
+            shadow_render_pass, shadow_pipeline_layout, shadow_pipeline, shadow_depth_image, shadow_depth_memory, shadow_depth_view, shadow_framebuffer, shadow_sampler, shadow_extent,
             queue_mutex: std::sync::Mutex::new(()),
             surface_loader: Some(surface_loader),
             surface: Some(surface),
@@ -815,9 +823,15 @@ impl GraphicsContext {
             swapchain_images,
             swapchain_image_views,
             swapchain_framebuffers,
-            desktop_depth_images, desktop_depth_memories, desktop_depth_views,
-            desktop_motion_images, desktop_motion_memories, desktop_motion_views,
+            desktop_depth_image: Some(desktop_depth_image),
+            desktop_depth_memory: Some(desktop_depth_memory),
+            desktop_depth_view: Some(desktop_depth_view),
+            desktop_motion_image: Some(desktop_motion_image),
+            desktop_motion_memory: Some(desktop_motion_memory),
+            desktop_motion_view: Some(desktop_motion_view),
             swapchain_extent: Some(extent),
+            image_available_semaphore: Some(image_available_semaphore),
+            render_finished_semaphore: Some(render_finished_semaphore),
         };
 
         let (albedo, normal, mr) = ctx.create_default_pbr_textures()?;
@@ -830,9 +844,11 @@ impl GraphicsContext {
     /// Used by the editor for GPU-accelerated viewport rendering.
     #[cfg(not(target_os = "android"))]
     pub fn new_headless() -> Result<Self> {
+        // 1. Create Vulkan Instance
+        println!("DEBUG: Headless Vulkan - Creating Entry");
         let entry = unsafe { Entry::load()? };
 
-        // 1. Create Vulkan Instance (no surface extensions needed for headless)
+        println!("DEBUG: Headless Vulkan - Creating Instance (v1.0.0)");
         let app_name = CString::new("STFSC Editor")?;
         let engine_name = CString::new("STFSC")?;
         let app_info = vk::ApplicationInfo::builder()
@@ -840,7 +856,7 @@ impl GraphicsContext {
             .application_version(0)
             .engine_name(&engine_name)
             .engine_version(0)
-            .api_version(vk::make_api_version(0, 1, 1, 0));
+            .api_version(vk::make_api_version(0, 1, 0, 0));
 
         let create_info = vk::InstanceCreateInfo::builder()
             .application_info(&app_info);
@@ -848,10 +864,16 @@ impl GraphicsContext {
         let instance = unsafe { entry.create_instance(&create_info, None)? };
 
         // 2. Pick Physical Device
+        println!("DEBUG: Headless Vulkan - Enumerating Physical Devices");
         let physical_devices = unsafe { instance.enumerate_physical_devices()? };
-        let physical_device = physical_devices[0]; // Simplification
+        if physical_devices.is_empty() {
+             anyhow::bail!("Vulkan: No physical devices found");
+        }
+        let physical_device = physical_devices[0];
+        println!("DEBUG: Headless Vulkan - Selected Physical Device: {:?}", physical_device);
 
         // 3. Create Logical Device (no swapchain extension needed)
+        println!("DEBUG: Headless Vulkan - Creating Logical Device");
         let queue_family_index = unsafe {
             instance
                 .get_physical_device_queue_family_properties(physical_device)
@@ -875,89 +897,147 @@ impl GraphicsContext {
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
         let depth_format = Self::find_depth_format(&instance, physical_device)?;
 
+        // 4. Command Pool & Buffer
+        println!("DEBUG: Headless Vulkan - Creating Command Pool");
         let pool_create_info = vk::CommandPoolCreateInfo::builder()
             .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let command_pool = unsafe { device.create_command_pool(&pool_create_info, None)? };
+        let command_buffer = unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::builder().command_pool(command_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1))?[0] };
         
-        let max_frames_in_flight = 1; // Headless only needs 1 frame in flight usually
-        let mut in_flight_fences = Vec::new();
-        let mut image_available_semaphores = Vec::new();
-        let mut render_finished_semaphores = Vec::new();
-        for _ in 0..max_frames_in_flight {
-             in_flight_fences.push(unsafe { device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None)? });
-             image_available_semaphores.push(unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? });
-             render_finished_semaphores.push(unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? });
-        }
-
-        let mut in_flight_command_buffers = Vec::new();
-        for _ in 0..max_frames_in_flight {
-            in_flight_command_buffers.push(unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::builder().command_pool(command_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1))?[0] });
-        }
+        println!("DEBUG: Headless Vulkan - Creating Fence");
+        let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None)? };
 
         // 5. Create offscreen render pass (renders to texture, not swapchain)
+        println!("DEBUG: Headless Vulkan - Creating Render Pass (3 Attachments to match pipeline)");
         let render_pass_attachments = [
-            vk::AttachmentDescription::builder().format(vk::Format::R8G8B8A8_UNORM).samples(vk::SampleCountFlags::TYPE_1).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).initial_layout(vk::ImageLayout::UNDEFINED).final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).build(),
-            vk::AttachmentDescription::builder().format(depth_format).samples(vk::SampleCountFlags::TYPE_1).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).initial_layout(vk::ImageLayout::UNDEFINED).final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL).build(),
-            vk::AttachmentDescription::builder().format(vk::Format::R16G16_SFLOAT).samples(vk::SampleCountFlags::TYPE_1).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).initial_layout(vk::ImageLayout::UNDEFINED).final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).build(),
+            // 0: Color (Main)
+            vk::AttachmentDescription::builder()
+                .format(vk::Format::R8G8B8A8_UNORM)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .build(),
+            // 1: Depth
+            vk::AttachmentDescription::builder()
+                .format(depth_format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .build(),
+            // 2: Motion Vectors
+            vk::AttachmentDescription::builder()
+                .format(vk::Format::R16G16_SFLOAT)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .build(),
         ];
+        
         let color_attachments = [
             vk::AttachmentReference::builder().attachment(0).layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).build(), 
-            vk::AttachmentReference::builder().attachment(2).layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).build()
+            vk::AttachmentReference::builder().attachment(2).layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).build(), 
         ];
         let depth_attachment = vk::AttachmentReference::builder().attachment(1).layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL).build();
-        let subpasses = [vk::SubpassDescription::builder().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&color_attachments).depth_stencil_attachment(&depth_attachment).build()];
-        let dependencies = [vk::SubpassDependency::builder().src_subpass(vk::SUBPASS_EXTERNAL).dst_subpass(0).src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS).dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS).dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE).build()];
+
+        let subpasses = [
+            vk::SubpassDescription::builder()
+                .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                .color_attachments(&color_attachments)
+                .depth_stencil_attachment(&depth_attachment)
+                .build()
+        ];
+
+        let dependencies = [
+            vk::SubpassDependency::builder()
+                .src_subpass(vk::SUBPASS_EXTERNAL)
+                .dst_subpass(0)
+                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
+                .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .build(),
+            // Dependency to ensure shadow map is ready for fragment sampling
+            vk::SubpassDependency::builder()
+                .src_subpass(vk::SUBPASS_EXTERNAL)
+                .dst_subpass(0)
+                .src_stage_mask(vk::PipelineStageFlags::LATE_FRAGMENT_TESTS) // Shadow finish
+                .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)     // Main sampling
+                .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .build(),
+        ];
+
         let render_pass = unsafe { device.create_render_pass(&vk::RenderPassCreateInfo::builder().attachments(&render_pass_attachments).subpasses(&subpasses).dependencies(&dependencies), None)? };
+        println!("DEBUG: Headless Vulkan - Render Pass Created Successfully");
 
         // 6. Descriptor Set Layouts
+        println!("DEBUG: Headless Vulkan - Creating Descriptor Set Layouts");
         let global_bindings = [
             vk::DescriptorSetLayoutBinding::builder().binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
             vk::DescriptorSetLayoutBinding::builder().binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX).build(),
             vk::DescriptorSetLayoutBinding::builder().binding(2).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
             vk::DescriptorSetLayoutBinding::builder().binding(3).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX).build(),
+            vk::DescriptorSetLayoutBinding::builder().binding(4).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT).build(),
         ];
         let global_set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::builder().bindings(&global_bindings), None)? };
+        
         let material_bindings = [
             vk::DescriptorSetLayoutBinding::builder().binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
             vk::DescriptorSetLayoutBinding::builder().binding(1).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
             vk::DescriptorSetLayoutBinding::builder().binding(2).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
         ];
         let material_set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::builder().bindings(&material_bindings), None)? };
-        let descriptor_pool = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::builder().pool_sizes(&[vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 300 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 100 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 10 }]).max_sets(100), None)? };
+        
+        println!("DEBUG: Headless Vulkan - Creating Descriptor Pool");
+        let descriptor_pool = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::builder().pool_sizes(&[vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 300 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 100 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 300 }]).max_sets(100), None)? };
 
         // 7. Pipeline Layout
-        let push_constant_ranges = [vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT).offset(0).size(192 + 32).build()];
+        println!("DEBUG: Headless Vulkan - Creating Pipeline Layouts");
+        let push_constant_ranges = []; // Moved global data to UBO
         let pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&push_constant_ranges).set_layouts(&[global_set_layout, material_set_layout]), None)? };
         
         let skinned_pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&push_constant_ranges).set_layouts(&[global_set_layout, material_set_layout]), None)? };
+        println!("DEBUG: Headless Vulkan - Pipeline Layouts Created Successfully");
 
         // 8. Shadow Resources (minimal for headless)
+        println!("DEBUG: Headless Vulkan - Creating Shadow Render Pass");
         let shadow_extent = vk::Extent2D { width: 1024, height: 1024 };
         let shadow_render_pass = Self::create_shadow_render_pass_internal(&device)?;
+        
+        println!("DEBUG: Headless Vulkan - Creating Shadow Pipeline Layout");
         let shadow_pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&[vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::VERTEX).offset(0).size(64).build()]).set_layouts(&[global_set_layout]), None)? };
+        
+        println!("DEBUG: Headless Vulkan - Creating Shadow Pipeline");
         let shadow_pipeline = Self::create_shadow_pipeline_internal(&device, shadow_pipeline_layout, shadow_render_pass)?;
+        
+        println!("DEBUG: Headless Vulkan - Creating Shadow Image Resources");
         let (shadow_depth_image, shadow_depth_memory, shadow_depth_view) = Self::create_shadow_image_resources_internal(&instance, &device, physical_device, shadow_extent)?;
+        
+        println!("DEBUG: Headless Vulkan - Creating Shadow Framebuffer");
         let shadow_framebuffer = unsafe { device.create_framebuffer(&vk::FramebufferCreateInfo::builder().render_pass(shadow_render_pass).attachments(&[shadow_depth_view]).width(shadow_extent.width).height(shadow_extent.height).layers(1), None)? };
+        
+        println!("DEBUG: Headless Vulkan - Creating Shadow Sampler");
         let shadow_sampler = unsafe { device.create_sampler(&vk::SamplerCreateInfo::builder().mag_filter(vk::Filter::LINEAR).min_filter(vk::Filter::LINEAR).address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER).address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER).address_mode_w(vk::SamplerAddressMode::CLAMP_TO_BORDER).border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE).build(), None)? };
 
+        println!("DEBUG: Headless Vulkan - Creating Main Pipeline");
         let pipeline = Self::create_graphics_pipeline_internal(&device, pipeline_layout, render_pass)?;
+        
+        println!("DEBUG: Headless Vulkan - Creating Skinned Pipeline");
         let skinned_pipeline = Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
+        println!("DEBUG: Headless Vulkan - All Pipelines Created Successfully");
 
         let mut ctx = Self {
-            entry, instance, physical_device, device, queue_family_index, queue, command_pool, 
-            in_flight_command_buffers,
-            in_flight_fences, image_available_semaphores, render_finished_semaphores, current_frame: 0, max_frames_in_flight,
-            render_pass, 
+            entry, instance, physical_device, device, queue_family_index, queue, command_pool, command_buffer, fence, render_pass, 
             pipeline_layout, pipeline, skinned_pipeline_layout, skinned_pipeline,
             depth_format, global_set_layout, material_set_layout, descriptor_pool,
             default_material_descriptor_set: vk::DescriptorSet::null(),
-            shadow_render_pass, shadow_pipeline_layout, shadow_pipeline, 
-            shadow_depth_images: vec![shadow_depth_image],
-            shadow_depth_memories: vec![shadow_depth_memory],
-            shadow_depth_views: vec![shadow_depth_view],
-            shadow_framebuffers: vec![shadow_framebuffer],
-            shadow_sampler, shadow_extent,
+            shadow_render_pass, shadow_pipeline_layout, shadow_pipeline, shadow_depth_image, shadow_depth_memory, shadow_depth_view, shadow_framebuffer, shadow_sampler, shadow_extent,
             queue_mutex: std::sync::Mutex::new(()),
             surface_loader: None,
             surface: None,
@@ -966,13 +1046,15 @@ impl GraphicsContext {
             swapchain_images: Vec::new(),
             swapchain_image_views: Vec::new(),
             swapchain_framebuffers: Vec::new(),
-            desktop_depth_images: Vec::new(),
-            desktop_depth_memories: Vec::new(),
-            desktop_depth_views: Vec::new(),
-            desktop_motion_images: Vec::new(),
-            desktop_motion_memories: Vec::new(),
-            desktop_motion_views: Vec::new(),
+            desktop_depth_image: None,
+            desktop_depth_memory: None,
+            desktop_depth_view: None,
+            desktop_motion_image: None,
+            desktop_motion_memory: None,
+            desktop_motion_view: None,
             swapchain_extent: None,
+            image_available_semaphore: None,
+            render_finished_semaphore: None,
         };
 
         let (albedo, normal, mr) = ctx.create_default_pbr_textures()?;
@@ -1052,7 +1134,7 @@ impl GraphicsContext {
             .depth_test_enable(true)
             .depth_write_enable(true)
             .depth_compare_op(vk::CompareOp::GREATER);
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR, vk::DynamicState::DEPTH_BIAS];
         let dynamic_state = vk::PipelineDynamicStateCreateInfo::builder()
             .dynamic_states(&dynamic_states);
 
@@ -1134,7 +1216,7 @@ impl GraphicsContext {
             .depth_test_enable(true)
             .depth_write_enable(true)
             .depth_compare_op(vk::CompareOp::GREATER);
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR, vk::DynamicState::DEPTH_BIAS];
         let dynamic_state = vk::PipelineDynamicStateCreateInfo::builder()
             .dynamic_states(&dynamic_states);
 
@@ -1779,13 +1861,20 @@ impl GraphicsContext {
     }
 
     pub fn create_default_pbr_textures(&self) -> Result<(Texture, Texture, Texture)> {
-        // Albedo: Solid White
+        // Albedo: 8x8 Checkerboard
         let width = 256;
         let height = 256;
         let mut albedo_img = image::RgbaImage::new(width, height);
         for x in 0..width {
             for y in 0..height {
-                albedo_img.put_pixel(x, y, image::Rgba([255, 255, 255, 255])); 
+                // Use a larger checker size (32x32 pixels) for visibility
+                let checker_x = (x / 32) % 2;
+                let checker_y = (y / 32) % 2;
+                if checker_x == checker_y {
+                    albedo_img.put_pixel(x, y, image::Rgba([200, 200, 200, 255])); // Gray
+                } else {
+                    albedo_img.put_pixel(x, y, image::Rgba([60, 60, 60, 255]));    // Dark Gray
+                }
             }
         }
         let albedo = self.create_texture_from_image(&albedo_img)?;
@@ -2049,6 +2138,7 @@ impl GraphicsContext {
         instance_buffer: vk::Buffer,
         light_buffer: vk::Buffer,
         bone_buffer: vk::Buffer,
+        global_buffer: vk::Buffer,
     ) -> Result<vk::DescriptorSet> {
         let layouts = [self.global_set_layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::builder()
@@ -2074,6 +2164,11 @@ impl GraphicsContext {
 
         let bone_buffer_info = vk::DescriptorBufferInfo::builder()
             .buffer(bone_buffer)
+            .offset(0)
+            .range(vk::WHOLE_SIZE);
+
+        let global_buffer_info = vk::DescriptorBufferInfo::builder()
+            .buffer(global_buffer)
             .offset(0)
             .range(vk::WHOLE_SIZE);
 
@@ -2105,6 +2200,13 @@ impl GraphicsContext {
                 .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .buffer_info(std::slice::from_ref(&bone_buffer_info))
+                .build(),
+            vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(4)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(std::slice::from_ref(&global_buffer_info))
                 .build(),
         ];
 
@@ -2318,12 +2420,15 @@ impl GraphicsContext {
             stride: std::mem::size_of::<crate::world::Vertex>() as u32,
             input_rate: vk::VertexInputRate::VERTEX,
         }];
-        let attribute_descriptions = [vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
-            offset: 0,
-        }];
+        let attribute_descriptions = [
+            vk::VertexInputAttributeDescription { location: 0, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 0 },
+            vk::VertexInputAttributeDescription { location: 1, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 12 },
+            vk::VertexInputAttributeDescription { location: 2, binding: 0, format: vk::Format::R32G32_SFLOAT, offset: 24 },
+            vk::VertexInputAttributeDescription { location: 3, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 32 },
+            vk::VertexInputAttributeDescription { location: 4, binding: 0, format: vk::Format::R32G32B32A32_SFLOAT, offset: 44 },
+            vk::VertexInputAttributeDescription { location: 5, binding: 0, format: vk::Format::R32G32B32A32_UINT, offset: 60 },
+            vk::VertexInputAttributeDescription { location: 6, binding: 0, format: vk::Format::R32G32B32A32_SFLOAT, offset: 76 },
+        ];
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::builder()
             .vertex_binding_descriptions(&binding_descriptions)
             .vertex_attribute_descriptions(&attribute_descriptions);
@@ -2340,11 +2445,9 @@ impl GraphicsContext {
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::FRONT) // Front face culling uses back faces for shadows (classic acne fix)
-            .front_face(vk::FrontFace::CLOCKWISE) 
-            .depth_bias_enable(true)
-            .depth_bias_constant_factor(4.0) // Reduced bias since face culling does the heavy lifting
-            .depth_bias_slope_factor(2.0);
+            .cull_mode(vk::CullModeFlags::FRONT)
+            .front_face(vk::FrontFace::CLOCKWISE)
+            .depth_bias_enable(false); // DEBUG: Disable HW Bias to isolate artifact
 
         let multisample = vk::PipelineMultisampleStateCreateInfo::builder()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
@@ -2352,7 +2455,7 @@ impl GraphicsContext {
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::builder()
             .depth_test_enable(true)
             .depth_write_enable(true)
-            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
+            .depth_compare_op(vk::CompareOp::GREATER_OR_EQUAL);
 
         // No Color Blend State
         let color_blend = vk::PipelineColorBlendStateCreateInfo::builder(); // Empty
@@ -2598,21 +2701,6 @@ impl GraphicsContext {
             pipeline_layout,
         })
     }
-
-    pub fn destroy_mesh(&self, mesh: &GpuMesh) {
-        unsafe {
-            self.device.destroy_buffer(mesh.vertex_buffer, None);
-            self.device.free_memory(mesh.vertex_memory, None);
-            self.device.destroy_buffer(mesh.index_buffer, None);
-            self.device.free_memory(mesh.index_memory, None);
-            for tex in &mesh.custom_textures {
-                self.device.destroy_sampler(tex.sampler, None);
-                self.device.destroy_image_view(tex.image_view, None);
-                self.device.destroy_image(tex.image, None);
-                self.device.free_memory(tex.image_memory, None);
-            }
-        }
-    }
 }
 
 impl Drop for GraphicsContext {
@@ -2626,46 +2714,36 @@ impl Drop for GraphicsContext {
             self.device.destroy_descriptor_set_layout(self.material_set_layout, None);
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device.destroy_pipeline(self.skinned_pipeline, None);
-            self.device.destroy_pipeline_layout(self.skinned_pipeline_layout, None);
             self.device.destroy_render_pass(self.render_pass, None);
-            
-            for &fence in &self.in_flight_fences {
-                self.device.destroy_fence(fence, None);
-            }
-            for &sem in &self.image_available_semaphores {
-                self.device.destroy_semaphore(sem, None);
-            }
-            for &sem in &self.render_finished_semaphores {
-                self.device.destroy_semaphore(sem, None);
-            }
-
+            self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
 
             // Shadow resources
             self.device.destroy_sampler(self.shadow_sampler, None);
-            for &fb in &self.shadow_framebuffers { self.device.destroy_framebuffer(fb, None); }
-            for &view in &self.shadow_depth_views { self.device.destroy_image_view(view, None); }
-            for &img in &self.shadow_depth_images { self.device.destroy_image(img, None); }
-            for &mem in &self.shadow_depth_memories { self.device.free_memory(mem, None); }
+            self.device.destroy_framebuffer(self.shadow_framebuffer, None);
+            self.device.destroy_image_view(self.shadow_depth_view, None);
+            self.device.destroy_image(self.shadow_depth_image, None);
+            self.device.free_memory(self.shadow_depth_memory, None);
             self.device.destroy_pipeline(self.shadow_pipeline, None);
             self.device.destroy_pipeline_layout(self.shadow_pipeline_layout, None);
             self.device.destroy_render_pass(self.shadow_render_pass, None);
 
-            #[cfg(not(target_os = "android"))]
+            #[cfg(target_os = "linux")]
             {
+                if let Some(sem) = self.image_available_semaphore { self.device.destroy_semaphore(sem, None); }
+                if let Some(sem) = self.render_finished_semaphore { self.device.destroy_semaphore(sem, None); }
                 for &fb in &self.swapchain_framebuffers { self.device.destroy_framebuffer(fb, None); }
                 for &view in &self.swapchain_image_views { self.device.destroy_image_view(view, None); }
                 if let Some(sw) = self.swapchain { self.swapchain_loader.as_ref().unwrap().destroy_swapchain(sw, None); }
                 if let Some(surf) = self.surface { self.surface_loader.as_ref().unwrap().destroy_surface(surf, None); }
                 
-                for &img in &self.desktop_depth_images { self.device.destroy_image(img, None); }
-                for &mem in &self.desktop_depth_memories { self.device.free_memory(mem, None); }
-                for &view in &self.desktop_depth_views { self.device.destroy_image_view(view, None); }
+                if let Some(view) = self.desktop_depth_view { self.device.destroy_image_view(view, None); }
+                if let Some(img) = self.desktop_depth_image { self.device.destroy_image(img, None); }
+                if let Some(mem) = self.desktop_depth_memory { self.device.free_memory(mem, None); }
 
-                for &img in &self.desktop_motion_images { self.device.destroy_image(img, None); }
-                for &mem in &self.desktop_motion_memories { self.device.free_memory(mem, None); }
-                for &view in &self.desktop_motion_views { self.device.destroy_image_view(view, None); }
+                if let Some(view) = self.desktop_motion_view { self.device.destroy_image_view(view, None); }
+                if let Some(img) = self.desktop_motion_image { self.device.destroy_image(img, None); }
+                if let Some(mem) = self.desktop_motion_memory { self.device.free_memory(mem, None); }
             }
 
             self.device.destroy_device(None);

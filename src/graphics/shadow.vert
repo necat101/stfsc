@@ -5,6 +5,10 @@ layout(location = 0) in vec3 position;
 struct InstanceData {
     mat4 model;
     mat4 prevModel;
+    vec4 color;
+    float metallic;
+    float roughness;
+    vec2 _padding;
 };
 
 layout(std430, set = 0, binding = 1) readonly buffer InstanceBuffer {

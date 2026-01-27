@@ -469,6 +469,7 @@ struct EditorApp {
     // Project Export
     show_export_dialog: bool,
     export_target_linux: bool,
+    export_target_windows: bool,
     export_target_quest3: bool,
     export_target_quest_pro: bool,
     export_output_dir: String,
@@ -696,6 +697,7 @@ impl EditorApp {
             // Export dialog
             show_export_dialog: false,
             export_target_linux: true,
+            export_target_windows: true,
             export_target_quest3: true,
             export_target_quest_pro: false,
             export_output_dir: String::new(),
@@ -1957,6 +1959,9 @@ impl EditorApp {
                 }
                 
                 // Convert to egui texture using direct Color32 copy (optimized path)
+                // We use the slice directly if possible, but egui needs an owned Vec.
+                // However, we can use std::mem::take/replace if we modify the renderer.
+                // For now, let's just make sure we're not doing it twice.
                 let image = egui::ColorImage {
                     size: [render_w, render_h],
                     pixels: pixels.to_vec(),
@@ -3692,7 +3697,9 @@ impl EditorApp {
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut event_received = false;
         while let Ok(ev) = self.event_rx.try_recv() {
+            event_received = true;
             match ev {
                 AppEvent::Connected => {
                     self.status = "Connected ✓".into();
@@ -5636,6 +5643,7 @@ impl eframe::App for EditorApp {
                         ui.heading("Target Platforms");
                         ui.add_space(4.0);
                         ui.checkbox(&mut self.export_target_linux, "🐧 Linux Desktop");
+                        ui.checkbox(&mut self.export_target_windows, "🪟 Windows PC");
                         ui.checkbox(&mut self.export_target_quest3, "🥽 Meta Quest 3");
                         ui.checkbox(&mut self.export_target_quest_pro, "🥽 Meta Quest Pro");
                         
@@ -5704,7 +5712,7 @@ impl eframe::App for EditorApp {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             let can_export = !self.export_in_progress && 
-                                (self.export_target_linux || self.export_target_quest3 || self.export_target_quest_pro);
+                                (self.export_target_linux || self.export_target_windows || self.export_target_quest3 || self.export_target_quest_pro);
                             
                             if ui.add_enabled(can_export, egui::Button::new("🚀 Export")).clicked() {
                                 self.export_in_progress = true;
@@ -5721,6 +5729,7 @@ impl eframe::App for EditorApp {
                                 let output_dir = std::path::PathBuf::from(&self.export_output_dir);
                                 let opt_level = self.export_opt_level;
                                 let target_linux = self.export_target_linux;
+                                let target_windows = self.export_target_windows;
                                 let target_quest3 = self.export_target_quest3;
                                 let target_quest_pro = self.export_target_quest_pro;
                                 
@@ -5757,6 +5766,24 @@ impl eframe::App for EditorApp {
                                         if result.success {
                                             let _ = tx.send(ExportMessage::Complete {
                                                 platform: "Linux".into(),
+                                                output_path: result.output_path.display().to_string(),
+                                            });
+                                        } else {
+                                            let _ = tx.send(ExportMessage::Error(result.error.unwrap_or_else(|| "Unknown error".into())));
+                                            had_error = true;
+                                        }
+                                    }
+                                    
+                                    if target_windows && !had_error {
+                                        let result = exporter.export_with_sender(
+                                            &project_clone, 
+                                            stfsc_engine::project::TargetPlatform::PC, 
+                                            opt_level,
+                                            &stream_tx
+                                        );
+                                        if result.success {
+                                            let _ = tx.send(ExportMessage::Complete {
+                                                platform: "Windows".into(),
                                                 output_path: result.output_path.display().to_string(),
                                             });
                                         } else {
@@ -6910,6 +6937,15 @@ impl eframe::App for EditorApp {
                 });
         }
 
-        ctx.request_repaint();
+        // ADAPTIVE REPAINT: Only request repaint if something is actually happening
+        // to save CPU/GPU when idle. Egui usually repaints on its own for most interactions.
+        let needs_repaint = self.animation_editor_state.is_playing 
+            || self.viewport_idle_frames < 20 // Keep viewport active for a bit after interaction
+            || event_received // New TCP event arrived
+            || self.scene_dirty;
+
+        if needs_repaint {
+            ctx.request_repaint();
+        }
     }
 }

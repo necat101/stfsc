@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::ffi::CString;
 
-use super::GraphicsContext;
+use super::{GraphicsContext, GlobalData};
 use crate::world::{Mesh, Vertex};
 use eframe::egui::Color32;
 
@@ -40,6 +40,9 @@ struct GpuInstanceData {
     model: Mat4,
     prev_model: Mat4,
     color: Vec4,
+    metallic: f32,
+    roughness: f32,
+    _padding: [f32; 2],
 }
 
 /// Instance data for rendering a mesh at a specific transform
@@ -74,16 +77,7 @@ impl Default for ViewportRenderParams {
     }
 }
 
-/// Push constants for viewport rendering (matches shader layout exactly)
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ViewportPushConstants {
-    view_proj: Mat4,
-    prev_view_proj: Mat4,
-    light_space: Mat4,     // Now used for shadow sampling if shadowMap is bound
-    camera_pos: Vec4,      // xyz = pos, w = ambient
-    light_dir: Vec4,       // xyz = dir, w = unused
-}
+// ViewportPushConstants replaced by GlobalData
 
 /// Offscreen viewport renderer that renders to a texture for egui display
 pub struct ViewportRenderer {
@@ -119,12 +113,10 @@ pub struct ViewportRenderer {
     pub width: u32,
     pub height: u32,
     
-    // Pixel buffer for egui texture upload
-    pixels: Vec<Color32>,
-    
     // Persistently mapped pointers
     instance_mapped: *mut GpuInstanceData,
     bone_mapped: *mut Mat4,
+    global_mapped: *mut GlobalData,
     staging_mapped: [*mut u8; 2],
     
     // Reference to graphics context
@@ -154,6 +146,10 @@ pub struct ViewportRenderer {
     // Bone matrices buffer (updated per draw call for simplicity in viewport)
     bone_buffer: vk::Buffer,
     bone_memory: vk::DeviceMemory,
+
+    // Global data buffer (matrices, camera, light)
+    global_buffer: vk::Buffer,
+    global_memory: vk::DeviceMemory,
 
     // GPU Sharpening (RCAS) resources
     sharpening_amount: f32,
@@ -251,14 +247,6 @@ impl ViewportRenderer {
         let cmd_buffers = unsafe { device.allocate_command_buffers(&alloc_info)? };
         let command_buffers = [cmd_buffers[0], cmd_buffers[1]];
         
-        // 9. Allocate pixel buffer
-        // Initialize with opaque sky blue for debugging visibility
-        let pixel_count = (width * height) as usize;
-        let mut pixels = Vec::with_capacity(pixel_count);
-        for _ in 0..pixel_count {
-            pixels.push(Color32::from_rgba_unmultiplied(82, 127, 175, 255)); // Sky blue, fully opaque
-        }
-        
         let mut staging_mapped = [std::ptr::null_mut(); 2];
         for i in 0..2 {
              staging_mapped[i] = unsafe { 
@@ -295,14 +283,25 @@ impl ViewportRenderer {
         let bone_mapped = unsafe {
             device.map_memory(bone_memory, 0, 8192, vk::MemoryMapFlags::empty())? as *mut Mat4
         };
+
+        // 12. Create global data buffer
+        let (global_buffer, global_memory) = graphics.create_buffer(
+            std::mem::size_of::<GlobalData>() as u64,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        let global_mapped = unsafe {
+            device.map_memory(global_memory, 0, std::mem::size_of::<GlobalData>() as u64, vk::MemoryMapFlags::empty())? as *mut GlobalData
+        };
         
-        // 12. Create descriptor sets
+        // 13. Create descriptor sets
         let global_descriptor_set = graphics.create_global_descriptor_set(
-            graphics.shadow_depth_views[0],
+            graphics.shadow_depth_view,
             graphics.shadow_sampler,
             instance_buffer,
             light_buffer,
             bone_buffer,
+            global_buffer,
         ).ok();
         
         // Create default textures and material descriptor set
@@ -455,7 +454,6 @@ impl ViewportRenderer {
             command_buffers,
             width,
             height,
-            pixels,
             graphics,
             mesh_cache: HashMap::new(),
             next_mesh_handle: 0,
@@ -472,6 +470,9 @@ impl ViewportRenderer {
             bone_buffer,
             bone_memory,
             bone_mapped,
+            global_buffer,
+            global_memory,
+            global_mapped,
             staging_mapped,
             // GPU Sharpening fields
             sharpening_amount: 0.0,
@@ -775,12 +776,6 @@ impl ViewportRenderer {
         self.post_framebuffer = post_framebuffer;
         self.width = new_width;
         self.height = new_height;
-        // Initialize with opaque sky blue for debugging visibility
-        let pixel_count = (new_width * new_height) as usize;
-        self.pixels = Vec::with_capacity(pixel_count);
-        for _ in 0..pixel_count {
-            self.pixels.push(Color32::from_rgba_unmultiplied(82, 127, 175, 255)); // Sky blue, fully opaque
-        }
         self.readback_pending = [false, false];
         self.current_frame = 0;
         self.frame_count = 0; // Reset to trigger sync readback after resize
@@ -829,28 +824,24 @@ impl ViewportRenderer {
     pub fn render_and_readback(&mut self) -> Result<&[Color32]> {
         let device = &self.graphics.device;
         
-        // 1. ASYNC READBACK: Check if previous frame's copy is ready (NON-BLOCKING)
         let prev_frame = (self.current_frame + 1) % 2;
-        if self.readback_pending[prev_frame] {
-            unsafe {
-                // Non-blocking fence check - only copy if GPU is done
-                let fence_status = device.get_fence_status(self.fences[prev_frame]);
-                if fence_status.is_ok() {
-                    // Fence signaled - GPU finished, safe to read
-                    // DO NOT reset fence here - the next frame that reuses this index will wait/reset it
-                    
-                    // Copy result to CPU pixel buffer using persistent mapping
-                    std::ptr::copy_nonoverlapping(self.staging_mapped[prev_frame], self.pixels.as_mut_ptr() as *mut u8, self.pixels.len() * 4);
-                    self.readback_pending[prev_frame] = false;
-                }
-                // If fence not ready, skip - we'll use stale pixels (still valid from last frame)
-            }
-        }
+        // No heavy CPU copy here anymore, we'll return a slice from mapped memory at the end.
         
         // 2. PREPARE CURRENT FRAME  
         // Get command buffer for this frame (double-buffered to avoid stalls)
         let cmd = self.command_buffers[self.current_frame];
         
+        // --- Update Global UBO ---
+        unsafe {
+            *self.global_mapped = GlobalData {
+                view_proj: self.render_params.view_proj,
+                prev_view_proj: self.render_params.view_proj, // Viewport doesn't track prev frame yet
+                light_space: self.render_params.light_view_proj,
+                camera_pos: [self.render_params.camera_pos.x, self.render_params.camera_pos.y, self.render_params.camera_pos.z, self.render_params.ambient],
+                light_dir: [self.render_params.light_dir.x, self.render_params.light_dir.y, self.render_params.light_dir.z, 0.0],
+            };
+        }
+
         // Wait for this frame's previous work to complete before reusing its command buffer
         unsafe {
             // Fences are initialized as signaled, so this will pass on first use.
@@ -872,6 +863,9 @@ impl ViewportRenderer {
                     model: instance.model_matrix,
                     prev_model: instance.model_matrix,
                     color: Vec4::new(instance.color.x, instance.color.y, instance.color.z, 1.0),
+                    metallic: 0.0, // Default for viewport
+                    roughness: 0.5,
+                    _padding: [0.0; 2],
                 });
             }
             unsafe {
@@ -908,15 +902,7 @@ impl ViewportRenderer {
                 // Bind Global Set (Set 0)
                 device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, current_layout, 0, &[global_ds], &[]);
                 
-                // Push constants
-                let push_constants = ViewportPushConstants {
-                    view_proj: self.render_params.view_proj,
-                    prev_view_proj: self.render_params.view_proj,
-                    light_space: self.render_params.light_view_proj,
-                    camera_pos: Vec4::new(self.render_params.camera_pos.x, self.render_params.camera_pos.y, self.render_params.camera_pos.z, self.render_params.ambient),
-                    light_dir: Vec4::new(self.render_params.light_dir.x, self.render_params.light_dir.y, self.render_params.light_dir.z, 0.0),
-                };
-                device.cmd_push_constants(cmd, current_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, std::slice::from_raw_parts(&push_constants as *const _ as *const u8, std::mem::size_of::<ViewportPushConstants>()));
+                // Viewport now uses Global UBO instead of push constants
                 
                 let mut instance_idx: u32 = 0;
                 for instance in &self.pending_instances {
@@ -1022,28 +1008,19 @@ impl ViewportRenderer {
         
         self.readback_pending[self.current_frame] = true;
         
-        // On first few frames, do synchronous readback to avoid returning stale init data
-        // After frame 2, switch to async double-buffered for performance
-        if self.frame_count < 2 {
-            unsafe {
-                // Wait for the current frame to complete
-                device.wait_for_fences(&[self.fences[self.current_frame]], true, u64::MAX)?;
-                // DO NOT reset fence here - let the start of the next frame using this index do it
-                
-                // Read back immediately using persistent mapping
-                std::ptr::copy_nonoverlapping(self.staging_mapped[self.current_frame], self.pixels.as_mut_ptr() as *mut u8, self.pixels.len() * 4);
-                let _ = current_staging; // silence warning
-            }
-            self.readback_pending[self.current_frame] = false;
-        }
-        
         self.current_frame = (self.current_frame + 1) % 2;
         self.frame_count += 1;
         
         // Clear pending instances for next frame
         self.pending_instances.clear();
         
-        Ok(&self.pixels)
+        // Return a slice directly from the GPU-mapped staging buffer that was just filled (or is being filled)
+        // For standard double-buffering, we return the frame that just finished rendering.
+        // We use prev_frame here because current_frame was just incremented.
+        unsafe {
+            let data_ptr = self.staging_mapped[prev_frame] as *const Color32;
+            Ok(std::slice::from_raw_parts(data_ptr, (self.width * self.height) as usize))
+        }
     }
     
     /// Helper to transition image layout within command buffer
@@ -1146,6 +1123,10 @@ impl Drop for ViewportRenderer {
             device.unmap_memory(self.bone_memory);
             device.destroy_buffer(self.bone_buffer, None);
             device.free_memory(self.bone_memory, None);
+
+            device.unmap_memory(self.global_memory);
+            device.destroy_buffer(self.global_buffer, None);
+            device.free_memory(self.global_memory, None);
 
             for mesh_data in self.mesh_cache.values() {
                 device.destroy_buffer(mesh_data.vertex_buffer, None);
