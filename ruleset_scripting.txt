@@ -15,14 +15,22 @@ This is where we get Intimate with the engine, hence the name "Fuck Script" :3
     - `on_update(&mut self, ctx: &mut ScriptContext)`: Called every logic frame.
     - `on_enable(&mut self, ctx: &mut ScriptContext)`: Called when the script/entity is enabled.
     - `on_disable(&mut self, ctx: &mut ScriptContext)`: Called when disabled or removed (cleanup).
+    - `on_fixed_update(&mut self, ctx: &mut ScriptContext)`: Called on the fixed game-logic tick before `on_update`.
+    - `on_late_update(&mut self, ctx: &mut ScriptContext)`: Called after `on_update`, useful for XR pose followers.
     - `on_collision_start(&mut self, ctx: &mut ScriptContext, other: Entity)`: Collision begins.
     - `on_collision_end(&mut self, ctx: &mut ScriptContext, other: Entity)`: Collision ends.
     - `on_trigger_start(&mut self, ctx: &mut ScriptContext, other: Entity)`: Trigger volume overlap starts.
+    - `on_xr_frame(&mut self, ctx: &mut ScriptContext, xr: &XrInputSnapshot)`: Called with the latest HMD/controller snapshot.
+    - `on_xr_input(&mut self, ctx: &mut ScriptContext, event: &XrInputEvent)`: Called for XR action/button edges and analog changes.
 - **ScriptContext Helpers**:
     - `get_component<T>()`: Get a read-only ref to a component.
     - `get_component_mut<T>()`: Get a mutable ref to a component.
     - `transform()` / `transform_mut()`: Quick access to the entity's transform.
     - `despawn_self()`: Safely remove the current entity from the world.
+    - `head_pose()`, `controller(hand)`, `xr_pose(space)`: Query tracked XR poses.
+    - `action_pressed(name)`, `action_just_pressed(name)`, `action_value(name)`: Query abstract XR actions.
+    - `request_haptic(hand, amplitude, duration_seconds)`: Queue a platform haptic pulse.
+    - `track_transform_to_xr_pose(space, position_offset, rotation_offset)`: Attach an entity transform to an XR pose.
 
 ## 3. ECS Integration
 - **DynamicScript Component**: Holds the script in an `Option<Box<dyn FuckScript>>`.
@@ -51,6 +59,8 @@ This is where we get Intimate with the engine, hence the name "Fuck Script" :3
 - **PoliceAgent**: Chases the player within a 30m radius using steering.
 - **TrafficAI**: Vehicle AI that handles physics-based suspensions and uses raycasts (5m) to **Stop for Obstacles** or other cars.
 - **WeaponNPC**: Basic combat logic that makes the entity rotate smoothly to face the player.
+- **HeadAnchor / LeftHandAnchor / RightHandAnchor / LeftAimAnchor / RightAimAnchor**: Follow tracked XR poses.
+- **TriggerHaptics**: Test script that pulses the active controller when its trigger crosses the press threshold.
 
 ## 6. Registration & Deployment
 - **ScriptRegistry**: Maps string names to script constructors in `GameWorld::new()`.
@@ -83,4 +93,3 @@ Use the `ScriptContext` helpers for ergonomic ECS manipulation:
 
 ---
 *Note: Always remember to handle the 'Take Pattern' when calling functions that might re-borrow the world.*
-

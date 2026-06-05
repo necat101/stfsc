@@ -65,8 +65,10 @@ STFSC is the foundation for **556**—an upcoming open-world crime simulator aim
 ### Scripting — "Fuck Script" 🔥
 - **Native Rust scripting** via `FuckScript` trait
 - **Lifecycle hooks**: `on_start`, `on_update`, `on_enable`, `on_disable`
+- **Fixed/late update hooks** for physics-step logic and post-update pose following
 - **Collision callbacks**: `on_collision_start`, `on_collision_end`, `on_trigger_start`
-- **Built-in scripts**: CrowdAgent, PoliceAgent, TrafficAI, VehicleAI, WeaponNPC
+- **XR callbacks and helpers**: HMD/controller poses, abstract actions, edge events, and haptic requests through `ScriptContext`
+- **Built-in scripts**: CrowdAgent, PoliceAgent, TrafficAI, VehicleAI, WeaponNPC, HeadAnchor, LeftHandAnchor, RightHandAnchor, TriggerHaptics
 
 ### Engine Architecture
 - **Entity Component System (ECS)** via `hecs`

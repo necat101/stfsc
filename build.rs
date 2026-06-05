@@ -55,12 +55,12 @@ fn main() {
 
     if src_dir.exists() {
         println!("cargo:rerun-if-changed=src/graphics");
-        
+
         for entry in std::fs::read_dir(src_dir).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
             let filename = path.file_name().unwrap().to_str().unwrap();
-            
+
             if filename.ends_with(".spv") {
                 // Convert underscore naming to dot naming: vert_vert.spv -> vert.vert.spv
                 let out_name = filename.replace("_", ".");
