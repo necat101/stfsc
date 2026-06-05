@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-use std::fs;
 use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub mod export;
@@ -33,7 +33,7 @@ impl OptLevel {
             OptLevel::ReleaseLTO => "Release (LTO)",
         }
     }
-    
+
     pub fn all() -> Vec<OptLevel> {
         vec![OptLevel::Debug, OptLevel::Release, OptLevel::ReleaseLTO]
     }
@@ -57,9 +57,31 @@ impl GraphicsQuality {
             GraphicsQuality::Ultra => "Ultra",
         }
     }
-    
+
     pub fn all() -> Vec<GraphicsQuality> {
-        vec![GraphicsQuality::Low, GraphicsQuality::Medium, GraphicsQuality::High, GraphicsQuality::Ultra]
+        vec![
+            GraphicsQuality::Low,
+            GraphicsQuality::Medium,
+            GraphicsQuality::High,
+            GraphicsQuality::Ultra,
+        ]
+    }
+
+    pub fn optimization_settings(&self) -> crate::graphics::GraphicsOptimizationSettings {
+        match self {
+            GraphicsQuality::Low => {
+                crate::graphics::GraphicsOptimizationSettings::mobile_optimized()
+            }
+            GraphicsQuality::Medium => crate::graphics::GraphicsOptimizationSettings::balanced(),
+            GraphicsQuality::High => crate::graphics::GraphicsOptimizationSettings::high_quality(),
+            GraphicsQuality::Ultra => crate::graphics::GraphicsOptimizationSettings {
+                texture_anisotropy: 16.0,
+                max_mesh_uploads_per_frame: 48,
+                max_texture_uploads_per_frame: 16,
+                max_completed_uploads_per_frame: 48,
+                ..crate::graphics::GraphicsOptimizationSettings::high_quality()
+            },
+        }
     }
 }
 
@@ -97,6 +119,10 @@ impl Default for BuildConfiguration {
 }
 
 impl BuildConfiguration {
+    pub fn graphics_optimization_settings(&self) -> crate::graphics::GraphicsOptimizationSettings {
+        self.graphics_quality.optimization_settings()
+    }
+
     pub fn for_linux() -> Self {
         Self {
             target_fps: 144,
@@ -107,7 +133,7 @@ impl BuildConfiguration {
             ..Default::default()
         }
     }
-    
+
     pub fn for_quest3() -> Self {
         Self {
             target_fps: 90,
@@ -115,7 +141,7 @@ impl BuildConfiguration {
             ..Default::default()
         }
     }
-    
+
     pub fn for_quest_pro() -> Self {
         Self {
             target_fps: 90,
@@ -124,7 +150,7 @@ impl BuildConfiguration {
             ..Default::default()
         }
     }
-    
+
     pub fn for_pc() -> Self {
         Self {
             target_fps: 120,
@@ -192,33 +218,73 @@ pub struct InputMappings {
 impl InputMappings {
     pub fn default_vr_mappings() -> Self {
         let mut actions = HashMap::new();
-        
+
         // Common VR game actions
-        actions.insert("jump".to_string(), vec![
-            InputBinding { source: InputSource::ButtonA, threshold: 0.5, enabled: true },
-        ]);
-        actions.insert("interact".to_string(), vec![
-            InputBinding { source: InputSource::TriggerRight, threshold: 0.7, enabled: true },
-        ]);
-        actions.insert("grab".to_string(), vec![
-            InputBinding { source: InputSource::GripRight, threshold: 0.7, enabled: true },
-        ]);
-        actions.insert("grab_left".to_string(), vec![
-            InputBinding { source: InputSource::GripLeft, threshold: 0.7, enabled: true },
-        ]);
-        actions.insert("pause".to_string(), vec![
-            InputBinding { source: InputSource::MenuButton, threshold: 0.5, enabled: true },
-        ]);
-        actions.insert("fire".to_string(), vec![
-            InputBinding { source: InputSource::TriggerRight, threshold: 0.9, enabled: true },
-        ]);
-        actions.insert("aim".to_string(), vec![
-            InputBinding { source: InputSource::TriggerLeft, threshold: 0.5, enabled: true },
-        ]);
-        actions.insert("sprint".to_string(), vec![
-            InputBinding { source: InputSource::ThumbstickLeftClick, threshold: 0.5, enabled: true },
-        ]);
-        
+        actions.insert(
+            "jump".to_string(),
+            vec![InputBinding {
+                source: InputSource::ButtonA,
+                threshold: 0.5,
+                enabled: true,
+            }],
+        );
+        actions.insert(
+            "interact".to_string(),
+            vec![InputBinding {
+                source: InputSource::TriggerRight,
+                threshold: 0.7,
+                enabled: true,
+            }],
+        );
+        actions.insert(
+            "grab".to_string(),
+            vec![InputBinding {
+                source: InputSource::GripRight,
+                threshold: 0.7,
+                enabled: true,
+            }],
+        );
+        actions.insert(
+            "grab_left".to_string(),
+            vec![InputBinding {
+                source: InputSource::GripLeft,
+                threshold: 0.7,
+                enabled: true,
+            }],
+        );
+        actions.insert(
+            "pause".to_string(),
+            vec![InputBinding {
+                source: InputSource::MenuButton,
+                threshold: 0.5,
+                enabled: true,
+            }],
+        );
+        actions.insert(
+            "fire".to_string(),
+            vec![InputBinding {
+                source: InputSource::TriggerRight,
+                threshold: 0.9,
+                enabled: true,
+            }],
+        );
+        actions.insert(
+            "aim".to_string(),
+            vec![InputBinding {
+                source: InputSource::TriggerLeft,
+                threshold: 0.5,
+                enabled: true,
+            }],
+        );
+        actions.insert(
+            "sprint".to_string(),
+            vec![InputBinding {
+                source: InputSource::ThumbstickLeftClick,
+                threshold: 0.5,
+                enabled: true,
+            }],
+        );
+
         Self { actions }
     }
 }
@@ -259,41 +325,50 @@ impl AssetManifest {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        
+
         // Scan models
-        manifest.models = Self::scan_directory(root, "assets/models", &["glb", "gltf", "obj", "fbx"]);
-        
+        manifest.models =
+            Self::scan_directory(root, "assets/models", &["glb", "gltf", "obj", "fbx"]);
+
         // Scan textures
-        manifest.textures = Self::scan_directory(root, "assets/textures", &["png", "jpg", "jpeg", "ktx2", "dds"]);
-        
+        manifest.textures = Self::scan_directory(
+            root,
+            "assets/textures",
+            &["png", "jpg", "jpeg", "ktx2", "dds"],
+        );
+
         // Scan audio
         manifest.audio = Self::scan_directory(root, "audio", &["wav", "ogg", "mp3"]);
-        manifest.audio.extend(Self::scan_directory(root, "assets/audio", &["wav", "ogg", "mp3"]));
-        
+        manifest.audio.extend(Self::scan_directory(
+            root,
+            "assets/audio",
+            &["wav", "ogg", "mp3"],
+        ));
+
         // Scan scenes
         manifest.scenes = Self::scan_directory(root, "scenes", &["json"]);
-        
+
         // Scan scripts
         manifest.scripts = Self::scan_directory(root, "scripts", &["lua", "rhai", "json"]);
-        
+
         // Scan UI layouts
         manifest.ui_layouts = Self::scan_directory(root, "ui", &["json"]);
-        
+
         manifest
     }
-    
+
     fn scan_directory(root: &Path, subdir: &str, extensions: &[&str]) -> Vec<AssetEntry> {
         let mut entries = Vec::new();
         let dir = root.join(subdir);
-        
+
         if !dir.exists() {
             return entries;
         }
-        
+
         Self::scan_recursive(&dir, root, extensions, &mut entries);
         entries
     }
-    
+
     fn scan_recursive(dir: &Path, root: &Path, extensions: &[&str], entries: &mut Vec<AssetEntry>) {
         if let Ok(read_dir) = fs::read_dir(dir) {
             for entry in read_dir.flatten() {
@@ -308,7 +383,8 @@ impl AssetManifest {
                             entries.push(AssetEntry {
                                 path: relative.to_string_lossy().to_string(),
                                 size: metadata.len(),
-                                modified: metadata.modified()
+                                modified: metadata
+                                    .modified()
                                     .ok()
                                     .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
                                     .map(|d| d.as_secs())
@@ -321,18 +397,26 @@ impl AssetManifest {
             }
         }
     }
-    
+
     /// Get total asset count
     pub fn total_count(&self) -> usize {
-        self.models.len() + self.textures.len() + self.audio.len() 
-            + self.scenes.len() + self.scripts.len() + self.ui_layouts.len()
+        self.models.len()
+            + self.textures.len()
+            + self.audio.len()
+            + self.scenes.len()
+            + self.scripts.len()
+            + self.ui_layouts.len()
     }
-    
+
     /// Get total size of all assets
     pub fn total_size(&self) -> u64 {
         let sum_size = |entries: &[AssetEntry]| entries.iter().map(|e| e.size).sum::<u64>();
-        sum_size(&self.models) + sum_size(&self.textures) + sum_size(&self.audio)
-            + sum_size(&self.scenes) + sum_size(&self.scripts) + sum_size(&self.ui_layouts)
+        sum_size(&self.models)
+            + sum_size(&self.textures)
+            + sum_size(&self.audio)
+            + sum_size(&self.scenes)
+            + sum_size(&self.scripts)
+            + sum_size(&self.ui_layouts)
     }
 }
 
@@ -368,11 +452,16 @@ impl TargetPlatform {
             TargetPlatform::QuestPro => "Meta Quest Pro",
         }
     }
-    
+
     pub fn all() -> Vec<TargetPlatform> {
-        vec![TargetPlatform::Linux, TargetPlatform::PC, TargetPlatform::Quest3, TargetPlatform::QuestPro]
+        vec![
+            TargetPlatform::Linux,
+            TargetPlatform::PC,
+            TargetPlatform::Quest3,
+            TargetPlatform::QuestPro,
+        ]
     }
-    
+
     pub fn default_build_config(&self) -> BuildConfiguration {
         match self {
             TargetPlatform::Linux => BuildConfiguration::for_linux(),
@@ -381,12 +470,12 @@ impl TargetPlatform {
             TargetPlatform::QuestPro => BuildConfiguration::for_quest_pro(),
         }
     }
-    
+
     /// Check if this is a VR platform
     pub fn is_vr(&self) -> bool {
         matches!(self, TargetPlatform::Quest3 | TargetPlatform::QuestPro)
     }
-    
+
     /// Get the cargo target triple for cross-compilation
     pub fn cargo_target(&self) -> Option<&'static str> {
         match self {
@@ -447,7 +536,7 @@ impl Default for ProjectMetadata {
         for platform in TargetPlatform::all() {
             build_configs.insert(platform, platform.default_build_config());
         }
-        
+
         Self {
             version: PROJECT_FORMAT_VERSION.to_string(),
             engine_version: ENGINE_VERSION.to_string(),
@@ -468,32 +557,42 @@ impl Default for ProjectMetadata {
 /// Simple timestamp generation without external chrono dependency
 fn chrono_lite_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = duration.as_secs();
-    
+
     // Convert to rough ISO 8601 format
     let days_since_epoch = secs / 86400;
     let remaining_secs = secs % 86400;
     let hours = remaining_secs / 3600;
     let minutes = (remaining_secs % 3600) / 60;
     let seconds = remaining_secs % 60;
-    
+
     // Approximate year/month/day calculation (not accounting for leap years perfectly)
     let mut year = 1970;
     let mut remaining_days = days_since_epoch;
     loop {
-        let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 366 } else { 365 };
+        let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+            366
+        } else {
+            365
+        };
         if remaining_days < days_in_year {
             break;
         }
         remaining_days -= days_in_year;
         year += 1;
     }
-    
+
     let days_in_months = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut month = 1;
     for &days in &days_in_months {
-        let days = if month == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 29 } else { days };
+        let days = if month == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+            29
+        } else {
+            days
+        };
         if remaining_days < days {
             break;
         }
@@ -501,8 +600,11 @@ fn chrono_lite_now() -> String {
         month += 1;
     }
     let day = remaining_days + 1;
-    
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, hours, minutes, seconds)
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hours, minutes, seconds
+    )
 }
 
 // ============================================================================
@@ -542,7 +644,7 @@ impl Project {
             name: name.to_string(),
             ..Default::default()
         };
-        
+
         Project {
             root_path: root,
             metadata,
@@ -553,20 +655,31 @@ impl Project {
     pub fn save(&mut self) -> Result<(), String> {
         // Update modified timestamp
         self.metadata.modified_at = chrono_lite_now();
-        
+
         let project_file = self.root_path.join("project.json");
         let json = serde_json::to_string_pretty(&self.metadata)
             .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
-        
-        fs::create_dir_all(&self.root_path).map_err(|e| format!("Failed to create project directory: {}", e))?;
-        fs::write(project_file, json).map_err(|e| format!("Failed to write project file: {}", e))?;
-        
+
+        fs::create_dir_all(&self.root_path)
+            .map_err(|e| format!("Failed to create project directory: {}", e))?;
+        fs::write(project_file, json)
+            .map_err(|e| format!("Failed to write project file: {}", e))?;
+
         // Ensure standard folders exist
-        let dirs = ["assets", "assets/models", "assets/textures", "assets/audio", "scenes", "scripts", "ui"];
+        let dirs = [
+            "assets",
+            "assets/models",
+            "assets/textures",
+            "assets/audio",
+            "scenes",
+            "scripts",
+            "ui",
+        ];
         for dir in dirs {
-            fs::create_dir_all(self.root_path.join(dir)).map_err(|e| format!("Failed to create directory '{}': {}", dir, e))?;
+            fs::create_dir_all(self.root_path.join(dir))
+                .map_err(|e| format!("Failed to create directory '{}': {}", dir, e))?;
         }
-        
+
         Ok(())
     }
 
@@ -575,9 +688,10 @@ impl Project {
         if !project_file.exists() {
             return Err("Not a valid project directory (project.json missing)".into());
         }
-        
-        let contents = fs::read_to_string(&project_file).map_err(|e| format!("Failed to read project file: {}", e))?;
-        
+
+        let contents = fs::read_to_string(&project_file)
+            .map_err(|e| format!("Failed to read project file: {}", e))?;
+
         // Try to load as new format first, then migrate if needed
         let metadata: ProjectMetadata = match serde_json::from_str(&contents) {
             Ok(m) => m,
@@ -586,19 +700,19 @@ impl Project {
                 Self::migrate_legacy_metadata(&contents)?
             }
         };
-        
+
         let mut project = Project {
             root_path: root,
             metadata,
             assets: AssetManifest::default(),
         };
-        
+
         // Refresh assets on load
         project.refresh_assets();
-        
+
         Ok(project)
     }
-    
+
     /// Migrate from older project.json format
     fn migrate_legacy_metadata(contents: &str) -> Result<ProjectMetadata, String> {
         #[derive(Deserialize)]
@@ -607,16 +721,16 @@ impl Project {
             target_platform: TargetPlatform,
             procedural_gen: ProceduralGenSettings,
         }
-        
+
         let legacy: LegacyMetadata = serde_json::from_str(contents)
             .map_err(|e| format!("Failed to parse legacy project file: {}", e))?;
-        
+
         let now = chrono_lite_now();
         let mut build_configs = HashMap::new();
         for platform in TargetPlatform::all() {
             build_configs.insert(platform, platform.default_build_config());
         }
-        
+
         Ok(ProjectMetadata {
             version: PROJECT_FORMAT_VERSION.to_string(),
             engine_version: ENGINE_VERSION.to_string(),
@@ -632,34 +746,36 @@ impl Project {
             input_mappings: InputMappings::default_vr_mappings(),
         })
     }
-    
+
     /// Refresh the asset manifest by scanning the project directory
     pub fn refresh_assets(&mut self) {
         self.assets = AssetManifest::scan_from_path(&self.root_path);
     }
-    
+
     /// Validate project integrity
     pub fn validate(&self) -> (Vec<ProjectWarning>, Vec<ProjectError>) {
         let mut warnings = Vec::new();
         let errors = Vec::new();
-        
+
         // Check for scenes
         if self.assets.scenes.is_empty() {
             warnings.push(ProjectWarning::NoScenes);
         }
-        
+
         // Check format version
         if self.metadata.version != PROJECT_FORMAT_VERSION {
-            warnings.push(ProjectWarning::OldFormatVersion(self.metadata.version.clone()));
+            warnings.push(ProjectWarning::OldFormatVersion(
+                self.metadata.version.clone(),
+            ));
         }
-        
+
         (warnings, errors)
     }
-    
+
     pub fn get_asset_path(&self, relative_path: &str) -> PathBuf {
         self.root_path.join(relative_path)
     }
-    
+
     pub fn resolve_path(&self, path: &str) -> PathBuf {
         let p = Path::new(path);
         if p.is_absolute() {
@@ -668,19 +784,21 @@ impl Project {
             self.root_path.join(path)
         }
     }
-    
+
     /// Get the build configuration for the target platform (cloned for safety)
     pub fn get_build_config(&self) -> BuildConfiguration {
-        self.metadata.build_configs
+        self.metadata
+            .build_configs
             .get(&self.metadata.target_platform)
             .cloned()
             .unwrap_or_else(|| self.metadata.target_platform.default_build_config())
     }
-    
+
     /// Get mutable build configuration for the target platform
     pub fn get_build_config_mut(&mut self) -> &mut BuildConfiguration {
         let platform = self.metadata.target_platform;
-        self.metadata.build_configs
+        self.metadata
+            .build_configs
             .entry(platform)
             .or_insert_with(|| platform.default_build_config())
     }
@@ -704,12 +822,12 @@ pub struct RecentProjects {
 
 impl RecentProjects {
     const MAX_RECENT: usize = 10;
-    
+
     /// Get the path to the recent projects file
     pub fn config_path() -> Option<PathBuf> {
         home::home_dir().map(|h| h.join(".stfsc").join("recent_projects.json"))
     }
-    
+
     /// Load recent projects from disk
     pub fn load() -> Self {
         if let Some(path) = Self::config_path() {
@@ -721,7 +839,7 @@ impl RecentProjects {
         }
         Self::default()
     }
-    
+
     /// Save recent projects to disk
     pub fn save(&self) -> Result<(), String> {
         if let Some(path) = Self::config_path() {
@@ -733,28 +851,31 @@ impl RecentProjects {
         }
         Ok(())
     }
-    
+
     /// Add a project to the recent list (moves to front if already present)
     pub fn add(&mut self, name: &str, path: &str) {
         // Remove if already exists
         self.projects.retain(|p| p.path != path);
-        
+
         // Add to front
-        self.projects.insert(0, RecentProject {
-            name: name.to_string(),
-            path: path.to_string(),
-            last_opened: chrono_lite_now(),
-        });
-        
+        self.projects.insert(
+            0,
+            RecentProject {
+                name: name.to_string(),
+                path: path.to_string(),
+                last_opened: chrono_lite_now(),
+            },
+        );
+
         // Trim to max size
         self.projects.truncate(Self::MAX_RECENT);
     }
-    
+
     /// Remove a project from the recent list
     pub fn remove(&mut self, path: &str) {
         self.projects.retain(|p| p.path != path);
     }
-    
+
     /// Clear all recent projects
     pub fn clear(&mut self) {
         self.projects.clear();
@@ -770,7 +891,7 @@ pub fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
-    
+
     if bytes >= GB {
         format!("{:.2} GB", bytes as f64 / GB as f64)
     } else if bytes >= MB {

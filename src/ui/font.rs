@@ -103,7 +103,7 @@ impl FontAtlas {
                     let dst_idx = ((dst_y * atlas_size + dst_x) * 4) as usize;
 
                     let alpha = bitmap[src_idx];
-                    atlas_data[dst_idx] = 255;     // R
+                    atlas_data[dst_idx] = 255; // R
                     atlas_data[dst_idx + 1] = 255; // G
                     atlas_data[dst_idx + 2] = 255; // B
                     atlas_data[dst_idx + 3] = alpha; // A
@@ -111,28 +111,32 @@ impl FontAtlas {
             }
 
             // Store glyph metrics
-            glyphs.insert(c, GlyphMetrics {
-                uv_min: [
-                    cursor_x as f32 / atlas_size as f32,
-                    cursor_y as f32 / atlas_size as f32,
-                ],
-                uv_max: [
-                    (cursor_x + metrics.width as u32) as f32 / atlas_size as f32,
-                    (cursor_y + metrics.height as u32) as f32 / atlas_size as f32,
-                ],
-                width: metrics.width as f32,
-                height: metrics.height as f32,
-                x_offset: metrics.xmin as f32,
-                y_offset: metrics.ymin as f32,
-                advance: metrics.advance_width,
-            });
+            glyphs.insert(
+                c,
+                GlyphMetrics {
+                    uv_min: [
+                        cursor_x as f32 / atlas_size as f32,
+                        cursor_y as f32 / atlas_size as f32,
+                    ],
+                    uv_max: [
+                        (cursor_x + metrics.width as u32) as f32 / atlas_size as f32,
+                        (cursor_y + metrics.height as u32) as f32 / atlas_size as f32,
+                    ],
+                    width: metrics.width as f32,
+                    height: metrics.height as f32,
+                    x_offset: metrics.xmin as f32,
+                    y_offset: metrics.ymin as f32,
+                    advance: metrics.advance_width,
+                },
+            );
 
             cursor_x += metrics.width as u32 + 1;
             row_height = row_height.max(metrics.height as u32);
         }
 
         // Create GPU texture
-        let texture = graphics.create_texture_from_raw(atlas_size, atlas_size, &atlas_data)
+        let texture = graphics
+            .create_texture_from_raw(atlas_size, atlas_size, &atlas_data)
             .context("Failed to create font atlas texture")?;
 
         let line_height = font_size * 1.2;

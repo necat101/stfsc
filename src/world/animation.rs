@@ -122,7 +122,6 @@ impl Animator {
         self.ik_chains.push(ik);
     }
 
-
     /// Start playing a specific animation clip by index
     pub fn play(&mut self, clip_index: usize) {
         if clip_index < self.clips.len() {
@@ -216,14 +215,15 @@ impl Animator {
         // For now, treat blend tree as infinite or use its root clip duration if possible
         if let AnimResource::Clip(idx) = &self.current_resource {
             let current_clip = &self.clips[*idx];
-            
+
             // Extract root motion
             let duration = current_clip.duration;
             if duration > 0.0 {
                 let t_start = old_time % duration;
                 let t_end = new_time % duration;
 
-                let (pos_start, rot_start, _) = current_clip.sample_bone(self.root_bone_index, t_start);
+                let (pos_start, rot_start, _) =
+                    current_clip.sample_bone(self.root_bone_index, t_start);
                 let (pos_end, rot_end, _) = current_clip.sample_bone(self.root_bone_index, t_end);
 
                 if t_end >= t_start {
@@ -231,13 +231,14 @@ impl Animator {
                     self.root_motion.delta_rotation = rot_end * rot_start.inverse();
                 } else {
                     // Wrapped (looping)
-                    let (pos_max, rot_max, _) = current_clip.sample_bone(self.root_bone_index, duration);
+                    let (pos_max, rot_max, _) =
+                        current_clip.sample_bone(self.root_bone_index, duration);
                     let (pos_min, rot_min, _) = current_clip.sample_bone(self.root_bone_index, 0.0);
-                    
+
                     let d1 = pos_max - pos_start;
                     let d2 = pos_end - pos_min;
                     self.root_motion.delta_position = d1 + d2;
-                    
+
                     let r1 = rot_max * rot_start.inverse();
                     let r2 = rot_end * rot_min.inverse();
                     self.root_motion.delta_rotation = r2 * r1;
@@ -264,7 +265,7 @@ impl Animator {
         // Handle crossfade blending
         if let Some(target_resource) = self.blend_target.clone() {
             self.blend_factor += dt / self.blend_duration;
-            
+
             if self.blend_factor >= 1.0 {
                 // Blend complete, switch to target
                 self.current_resource = target_resource;
@@ -283,15 +284,15 @@ impl Animator {
             for layer in &mut self.layers {
                 // Update layer time and weight interpolation
                 layer.update(dt, base_time);
-                
+
                 // Skip layers with zero weight
                 if layer.weight <= 0.0 {
                     continue;
                 }
-                
+
                 // Sample layer pose
                 let layer_pose = layer.sample(&self.skeleton);
-                
+
                 // Blend layer onto base using additive or override mode
                 base_pose = blend_layer_onto_base(&base_pose, layer, &layer_pose);
             }
@@ -299,7 +300,6 @@ impl Animator {
 
         base_pose
     }
-
 
     /// Check and fire events for a clip
     fn check_events(
@@ -312,7 +312,9 @@ impl Animator {
         if let Some(q) = queue {
             let clip = &self.clips[clip_idx];
             let duration = clip.duration;
-            if duration <= 0.0 { return; }
+            if duration <= 0.0 {
+                return;
+            }
 
             // Normalize times to [0, duration]
             let t_start = old_time % duration;
@@ -323,7 +325,8 @@ impl Animator {
                     event.time > t_start && event.time <= t_end
                 } else {
                     // Wrapped around (looping)
-                    (event.time > t_start && event.time <= duration) || (event.time >= 0.0 && event.time <= t_end)
+                    (event.time > t_start && event.time <= duration)
+                        || (event.time >= 0.0 && event.time <= t_end)
                 };
 
                 if fired {
@@ -334,7 +337,12 @@ impl Animator {
     }
 
     /// Sample an animation resource (clip or blend tree)
-    fn sample_resource(&self, res: &AnimResource, time: f32, params: &HashMap<String, AnimParam>) -> Vec<Mat4> {
+    fn sample_resource(
+        &self,
+        res: &AnimResource,
+        time: f32,
+        params: &HashMap<String, AnimParam>,
+    ) -> Vec<Mat4> {
         let local_transforms = match res {
             AnimResource::Clip(idx) => {
                 if *idx < self.clips.len() {
@@ -366,7 +374,7 @@ impl Animator {
     }
 
     /// Compute final skinning matrices from local bone transforms
-    /// 
+    ///
     /// Formula: skinning_matrix[i] = global_transform[i] * inverse_bind_matrix[i]
     fn compute_skinning_matrices(&self, local_transforms: &[Mat4]) -> Vec<Mat4> {
         let bone_count = self.skeleton.bones.len().min(MAX_BONES);
@@ -449,7 +457,7 @@ impl AnimationState {
 }
 
 /// Blend two poses together using linear interpolation
-/// 
+///
 /// Performs component-wise TRS blending:
 /// - Position: lerp
 /// - Rotation: slerp
@@ -498,10 +506,7 @@ pub enum BlendNode {
         children: Vec<(f32, f32, BlendNode)>,
     },
     /// Direct blend with explicit weight (for additive layers)
-    Direct {
-        weight: f32,
-        child: Box<BlendNode>,
-    },
+    Direct { weight: f32, child: Box<BlendNode> },
 }
 
 impl BlendNode {
@@ -524,9 +529,11 @@ impl BlendNode {
             BlendNode::Blend1D { param, children } => {
                 self.evaluate_1d(param, children, params, clips, skeleton, time)
             }
-            BlendNode::Blend2D { param_x, param_y, children } => {
-                self.evaluate_2d(param_x, param_y, children, params, clips, skeleton, time)
-            }
+            BlendNode::Blend2D {
+                param_x,
+                param_y,
+                children,
+            } => self.evaluate_2d(param_x, param_y, children, params, clips, skeleton, time),
             BlendNode::Direct { weight, child } => {
                 let pose = child.evaluate(params, clips, skeleton, time);
                 // Scale by weight (for additive blending)
@@ -652,12 +659,14 @@ impl BlendNode {
         for (i, (_, _, node)) in children.iter().enumerate() {
             let pose = node.evaluate(params, clips, skeleton, time);
             let weight = weights[i];
-            
+
             for (j, mat) in pose.iter().enumerate() {
-                if j >= result.len() { break; }
+                if j >= result.len() {
+                    break;
+                }
                 let (s, r, t) = mat.to_scale_rotation_translation();
                 let (rs, rr, rt) = result[j].to_scale_rotation_translation();
-                
+
                 result[j] = Mat4::from_scale_rotation_translation(
                     rs.lerp(s, weight),
                     rr.slerp(r, weight),
@@ -695,9 +704,9 @@ impl BlendTree {
             root: BlendNode::Blend1D {
                 param: "Speed".to_string(),
                 children: vec![
-                    (0.0, BlendNode::Clip(idle_clip)),   // Speed = 0: Idle
-                    (1.5, BlendNode::Clip(walk_clip)),   // Speed = 1.5: Walk
-                    (4.0, BlendNode::Clip(run_clip)),    // Speed = 4+: Run
+                    (0.0, BlendNode::Clip(idle_clip)), // Speed = 0: Idle
+                    (1.5, BlendNode::Clip(walk_clip)), // Speed = 1.5: Walk
+                    (4.0, BlendNode::Clip(run_clip)),  // Speed = 4+: Run
                 ],
             },
         }
@@ -949,7 +958,7 @@ impl AnimationLayer {
     /// Sample this layer's clip and apply mask weights
     pub fn sample(&self, skeleton: &Skeleton) -> Vec<Mat4> {
         let pose = self.clip.sample(self.time, skeleton);
-        
+
         // Apply mask if present
         if let Some(mask) = &self.avatar_mask {
             pose.into_iter()
@@ -978,16 +987,22 @@ impl AnimationLayer {
 }
 
 /// Blend a layer pose on top of a base pose using layer settings
-pub fn blend_layer_onto_base(base: &[Mat4], layer: &AnimationLayer, layer_pose: &[Mat4]) -> Vec<Mat4> {
+pub fn blend_layer_onto_base(
+    base: &[Mat4],
+    layer: &AnimationLayer,
+    layer_pose: &[Mat4],
+) -> Vec<Mat4> {
     let len = base.len().min(layer_pose.len());
     let layer_weight = layer.weight;
 
     (0..len)
         .map(|i| {
-            let mask_weight = layer.avatar_mask
+            let mask_weight = layer
+                .avatar_mask
                 .as_ref()
                 .map(|m| m.get_weight(i))
-                .unwrap_or(1.0) * layer_weight;
+                .unwrap_or(1.0)
+                * layer_weight;
 
             if mask_weight <= 0.0 {
                 base[i]
@@ -995,18 +1010,18 @@ pub fn blend_layer_onto_base(base: &[Mat4], layer: &AnimationLayer, layer_pose: 
                 // Additive: add layer's delta to base
                 let (bs, br, bt) = base[i].to_scale_rotation_translation();
                 let (ls, lr, lt) = layer_pose[i].to_scale_rotation_translation();
-                
+
                 // Additive blending: base + (layer - identity) * weight
                 let scale = bs + (ls - Vec3::ONE) * mask_weight;
                 let rot = br * Quat::IDENTITY.slerp(lr, mask_weight);
                 let trans = bt + lt * mask_weight;
-                
+
                 Mat4::from_scale_rotation_translation(scale, rot, trans)
             } else {
                 // Override: lerp between base and layer
                 let (bs, br, bt) = base[i].to_scale_rotation_translation();
                 let (ls, lr, lt) = layer_pose[i].to_scale_rotation_translation();
-                
+
                 Mat4::from_scale_rotation_translation(
                     bs.lerp(ls, mask_weight),
                     br.slerp(lr, mask_weight),
@@ -1016,7 +1031,6 @@ pub fn blend_layer_onto_base(base: &[Mat4], layer: &AnimationLayer, layer_pose: 
         })
         .collect()
 }
-
 
 /// Special state name for transitions that can occur from any state (like Unity's "Any State")
 /// Use this as the `from` field in StateTransition to create global interrupt transitions.
@@ -1088,7 +1102,9 @@ impl SubStateMachine {
         }
 
         // Check if we hit exit state
-        let hit_exit = self.exit_state.as_ref()
+        let hit_exit = self
+            .exit_state
+            .as_ref()
             .map(|exit| self.state_machine.current_state == *exit)
             .unwrap_or(false);
 
@@ -1199,7 +1215,12 @@ impl CurveKeyframe {
 
     /// Create a smooth keyframe with tangents
     pub fn smooth(time: f32, value: f32, in_tangent: f32, out_tangent: f32) -> Self {
-        Self { time, value, in_tangent, out_tangent }
+        Self {
+            time,
+            value,
+            in_tangent,
+            out_tangent,
+        }
     }
 }
 
@@ -1244,14 +1265,22 @@ impl AnimationCurve {
     pub fn from_keyframes(name: &str, keyframes: Vec<CurveKeyframe>) -> Self {
         let mut curve = Self::new(name);
         curve.keyframes = keyframes;
-        curve.keyframes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+        curve.keyframes.sort_by(|a, b| {
+            a.time
+                .partial_cmp(&b.time)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         curve
     }
 
     /// Add a keyframe
     pub fn add_keyframe(&mut self, keyframe: CurveKeyframe) {
         self.keyframes.push(keyframe);
-        self.keyframes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+        self.keyframes.sort_by(|a, b| {
+            a.time
+                .partial_cmp(&b.time)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     /// Evaluate the curve at a given time
@@ -1452,7 +1481,7 @@ pub enum TransitionCondition {
     /// Float parameter comparison
     FloatGreater(String, f32),
     FloatLess(String, f32),
-    FloatEquals(String, f32, f32), // (name, value, epsilon)
+    FloatEquals(String, f32, f32),  // (name, value, epsilon)
     FloatInRange(String, f32, f32), // (name, min, max)
     /// Bool parameter check
     BoolTrue(String),
@@ -1510,7 +1539,6 @@ impl AnimationStateMachineState {
     }
 }
 
-
 impl AnimationStateMachine {
     /// Create a new empty state machine
     pub fn new() -> Self {
@@ -1548,7 +1576,8 @@ impl AnimationStateMachine {
 
     /// Add a sub-state machine
     pub fn add_sub_machine(&mut self, sub_machine: SubStateMachine) {
-        self.sub_machines.insert(sub_machine.name.clone(), sub_machine);
+        self.sub_machines
+            .insert(sub_machine.name.clone(), sub_machine);
     }
 
     /// Enter a sub-state machine by name
@@ -1573,28 +1602,35 @@ impl AnimationStateMachine {
 
     /// Set a float parameter
     pub fn set_float(&mut self, name: &str, value: f32) {
-        self.parameters.insert(name.to_string(), AnimParam::Float(value));
+        self.parameters
+            .insert(name.to_string(), AnimParam::Float(value));
     }
 
     /// Set a bool parameter
     pub fn set_bool(&mut self, name: &str, value: bool) {
-        self.parameters.insert(name.to_string(), AnimParam::Bool(value));
+        self.parameters
+            .insert(name.to_string(), AnimParam::Bool(value));
     }
 
     /// Set an integer parameter
     pub fn set_int(&mut self, name: &str, value: i32) {
-        self.parameters.insert(name.to_string(), AnimParam::Int(value));
+        self.parameters
+            .insert(name.to_string(), AnimParam::Int(value));
     }
 
     /// Fire a trigger (one-shot)
     pub fn set_trigger(&mut self, name: &str) {
-        self.parameters.insert(name.to_string(), AnimParam::Trigger(true));
+        self.parameters
+            .insert(name.to_string(), AnimParam::Trigger(true));
     }
 
     /// Get current clip index (only if current state is a single clip)
     pub fn current_clip(&self) -> Option<usize> {
         match self.states.get(&self.current_state)? {
-            AnimationStateMachineState { resource: AnimResource::Clip(idx), .. } => Some(*idx),
+            AnimationStateMachineState {
+                resource: AnimResource::Clip(idx),
+                ..
+            } => Some(*idx),
             _ => None,
         }
     }
@@ -1634,7 +1670,9 @@ impl AnimationStateMachine {
             .filter(|&i| self.transitions[i].from == from_state)
             .collect();
         transition_indices.sort_by(|&a, &b| {
-            self.transitions[b].priority.cmp(&self.transitions[a].priority)
+            self.transitions[b]
+                .priority
+                .cmp(&self.transitions[a].priority)
         });
 
         for i in transition_indices {
@@ -1701,10 +1739,12 @@ impl AnimationStateMachine {
     fn check_condition(&mut self, condition: &TransitionCondition) -> bool {
         match condition {
             TransitionCondition::Trigger(name) => {
-                let is_triggered = matches!(self.parameters.get(name), Some(AnimParam::Trigger(true)));
+                let is_triggered =
+                    matches!(self.parameters.get(name), Some(AnimParam::Trigger(true)));
                 // Consuming trigger if it fired
                 if is_triggered {
-                    self.parameters.insert(name.clone(), AnimParam::Trigger(false));
+                    self.parameters
+                        .insert(name.clone(), AnimParam::Trigger(false));
                 }
                 is_triggered
             }
@@ -1739,7 +1779,6 @@ impl AnimationStateMachine {
         }
     }
 }
-
 
 impl Default for AnimationStateMachine {
     fn default() -> Self {
@@ -1925,11 +1964,13 @@ pub fn solve_two_bone_ik(
     // Law of cosines to find interior angles
     // a^2 = b^2 + c^2 - 2bc*cos(A)
     // cos(root_angle) = (limb1^2 + dist^2 - limb2^2) / (2 * limb1 * dist)
-    let cos_root = (limb1_len * limb1_len + dist * dist - limb2_len * limb2_len) / (2.0 * limb1_len * dist);
+    let cos_root =
+        (limb1_len * limb1_len + dist * dist - limb2_len * limb2_len) / (2.0 * limb1_len * dist);
     let root_angle = cos_root.clamp(-1.0, 1.0).acos();
 
     // cos(mid_angle) = (limb1^2 + limb2^2 - dist^2) / (2 * limb1 * limb2)
-    let cos_mid = (limb1_len * limb1_len + limb2_len * limb2_len - dist * dist) / (2.0 * limb1_len * limb2_len);
+    let cos_mid = (limb1_len * limb1_len + limb2_len * limb2_len - dist * dist)
+        / (2.0 * limb1_len * limb2_len);
     let mid_angle = PI - cos_mid.clamp(-1.0, 1.0).acos();
 
     // Calculate plane for the limb bending
@@ -1939,12 +1980,15 @@ pub fn solve_two_bone_ik(
 
     // Root rotation: Rotate towards target, then offset by root_angle along bend_dir
     let _base_rot = Quat::from_rotation_arc(Vec3::Z, to_target_norm); // Simplified base
-    // This needs to be relative to parent... 
-    // For simplicity in this implementation, we compute world rotations and the user must convert back if needed,
-    // OR we assume root_world_rot is the parent's world rotation.
-    
+                                                                      // This needs to be relative to parent...
+                                                                      // For simplicity in this implementation, we compute world rotations and the user must convert back if needed,
+                                                                      // OR we assume root_world_rot is the parent's world rotation.
+
     // Final rotations (simplified for now)
-    let final_root_rot = Quat::from_rotation_arc(mid_local_pos.normalize(), (to_target_norm * root_angle.cos() + bend_dir * root_angle.sin()).normalize());
+    let final_root_rot = Quat::from_rotation_arc(
+        mid_local_pos.normalize(),
+        (to_target_norm * root_angle.cos() + bend_dir * root_angle.sin()).normalize(),
+    );
     let final_mid_rot = Quat::from_rotation_y(mid_angle); // Simplified: bend around Y axis
 
     (final_root_rot, final_mid_rot)
@@ -1989,7 +2033,7 @@ impl LookAtIK {
             head_weight: 1.0,
             eyes_weight: 0.0,
             clamp_horizontal: PI * 0.5, // 90 degrees
-            clamp_vertical: PI * 0.25,   // 45 degrees
+            clamp_vertical: PI * 0.25,  // 45 degrees
             bone_chain: vec![head_bone],
             enabled: true,
         }
@@ -2046,18 +2090,21 @@ pub fn solve_look_at_ik(
 
     let head_pos = bone_world_positions[head_idx];
     let to_target = (look_at.target - head_pos).normalize();
-    
+
     // Calculate the desired rotation to look at target
-    let current_forward = bone_world_rotations.get(head_idx)
+    let current_forward = bone_world_rotations
+        .get(head_idx)
         .map(|r| *r * bone_forward)
         .unwrap_or(bone_forward);
-    
+
     // Full rotation needed
     let full_rotation = Quat::from_rotation_arc(current_forward, to_target);
-    
+
     // Clamp the rotation angles
     let (axis, angle) = full_rotation.to_axis_angle();
-    let clamped_angle = angle.min(look_at.clamp_horizontal).min(look_at.clamp_vertical);
+    let clamped_angle = angle
+        .min(look_at.clamp_horizontal)
+        .min(look_at.clamp_vertical);
     let clamped_rotation = Quat::from_axis_angle(axis, clamped_angle);
 
     // Distribute rotation across chain
@@ -2069,7 +2116,7 @@ pub fn solve_look_at_ik(
             // Diminishing weight for spine bones
             look_at.body_weight * (1.0 / (i as f32 + 1.0))
         };
-        
+
         let final_weight = look_at.weight * bone_weight;
         rotations[i] = Quat::IDENTITY.slerp(clamped_rotation, final_weight);
     }
@@ -2118,8 +2165,12 @@ impl FootIK {
     /// Create foot IK with default humanoid bone indices
     /// You should override these with your actual skeleton bone indices
     pub fn new(
-        left_thigh: usize, left_calf: usize, left_foot: usize,
-        right_thigh: usize, right_calf: usize, right_foot: usize,
+        left_thigh: usize,
+        left_calf: usize,
+        left_foot: usize,
+        right_thigh: usize,
+        right_calf: usize,
+        right_foot: usize,
         hips: usize,
     ) -> Self {
         Self {
@@ -2138,12 +2189,20 @@ impl FootIK {
 
     /// Set foot target from raycast result
     pub fn set_left_foot_target(&mut self, position: Vec3, normal: Vec3, height_offset: f32) {
-        self.left_foot_target = Some(FootIKTarget { position, normal, height_offset });
+        self.left_foot_target = Some(FootIKTarget {
+            position,
+            normal,
+            height_offset,
+        });
     }
 
     /// Set foot target from raycast result
     pub fn set_right_foot_target(&mut self, position: Vec3, normal: Vec3, height_offset: f32) {
-        self.right_foot_target = Some(FootIKTarget { position, normal, height_offset });
+        self.right_foot_target = Some(FootIKTarget {
+            position,
+            normal,
+            height_offset,
+        });
     }
 
     /// Clear foot targets (call when character is airborne)
@@ -2169,53 +2228,51 @@ pub struct FootIKResult {
 }
 
 /// Solve foot IK given current bone positions
-pub fn solve_foot_ik(
-    foot_ik: &FootIK,
-    bone_world_positions: &[Vec3],
-) -> FootIKResult {
+pub fn solve_foot_ik(foot_ik: &FootIK, bone_world_positions: &[Vec3]) -> FootIKResult {
     if !foot_ik.enabled || foot_ik.weight <= 0.0 {
         return FootIKResult::default();
     }
 
     let mut result = FootIKResult::default();
-    
+
     // Calculate hip offset based on foot height differences
     let mut min_offset = 0.0f32;
-    
+
     if let Some(left_target) = &foot_ik.left_foot_target {
         let offset = left_target.height_offset.min(foot_ik.max_correction);
         min_offset = min_offset.min(-offset);
-        
+
         // Calculate foot rotation to align with ground normal
         let up = Vec3::Y;
         if left_target.normal.dot(up) > 0.1 {
             result.left_foot_rotation = Quat::from_rotation_arc(up, left_target.normal);
         }
     }
-    
+
     if let Some(right_target) = &foot_ik.right_foot_target {
         let offset = right_target.height_offset.min(foot_ik.max_correction);
         min_offset = min_offset.min(-offset);
-        
+
         let up = Vec3::Y;
         if right_target.normal.dot(up) > 0.1 {
             result.right_foot_rotation = Quat::from_rotation_arc(up, right_target.normal);
         }
     }
-    
+
     // Apply hip offset (clamped)
-    result.hip_offset = min_offset.clamp(-foot_ik.max_hip_offset, foot_ik.max_hip_offset) * foot_ik.weight;
-    
+    result.hip_offset =
+        min_offset.clamp(-foot_ik.max_hip_offset, foot_ik.max_hip_offset) * foot_ik.weight;
+
     // TODO: Use two-bone IK to solve leg rotations for precise foot placement
     // For now, return identity rotations and let the animation handle leg bending
     // Full implementation would:
     // 1. Adjust foot target by hip offset
     // 2. Call solve_two_bone_ik for each leg
     // 3. Return the computed rotations
-    
+
     // Get leg positions for IK (if available)
     let _ = bone_world_positions; // Used in full implementation
-    
+
     result
 }
 
@@ -2266,10 +2323,16 @@ impl From<TransitionConditionConfig> for TransitionCondition {
     fn from(cfg: TransitionConditionConfig) -> Self {
         match cfg {
             TransitionConditionConfig::Trigger(s) => TransitionCondition::Trigger(s),
-            TransitionConditionConfig::FloatGreater(s, v) => TransitionCondition::FloatGreater(s, v),
+            TransitionConditionConfig::FloatGreater(s, v) => {
+                TransitionCondition::FloatGreater(s, v)
+            }
             TransitionConditionConfig::FloatLess(s, v) => TransitionCondition::FloatLess(s, v),
-            TransitionConditionConfig::FloatEquals(s, v, e) => TransitionCondition::FloatEquals(s, v, e),
-            TransitionConditionConfig::FloatInRange(s, min, max) => TransitionCondition::FloatInRange(s, min, max),
+            TransitionConditionConfig::FloatEquals(s, v, e) => {
+                TransitionCondition::FloatEquals(s, v, e)
+            }
+            TransitionConditionConfig::FloatInRange(s, min, max) => {
+                TransitionCondition::FloatInRange(s, min, max)
+            }
             TransitionConditionConfig::BoolTrue(s) => TransitionCondition::BoolTrue(s),
             TransitionConditionConfig::BoolFalse(s) => TransitionCondition::BoolFalse(s),
             TransitionConditionConfig::AnimationComplete => TransitionCondition::AnimationComplete,
@@ -2428,7 +2491,13 @@ impl AnimatorConfig {
     }
 
     /// Add a transition
-    pub fn add_transition(&mut self, from: &str, to: &str, condition: TransitionConditionConfig, duration: f32) {
+    pub fn add_transition(
+        &mut self,
+        from: &str,
+        to: &str,
+        condition: TransitionConditionConfig,
+        duration: f32,
+    ) {
         self.transitions.push(TransitionConfig {
             from_state: from.to_string(),
             to_state: to.to_string(),
@@ -2440,15 +2509,18 @@ impl AnimatorConfig {
 
     /// Add a parameter
     pub fn add_float(&mut self, name: &str, value: f32) {
-        self.parameters.push((name.to_string(), AnimParamConfig::Float(value)));
+        self.parameters
+            .push((name.to_string(), AnimParamConfig::Float(value)));
     }
 
     pub fn add_bool(&mut self, name: &str, value: bool) {
-        self.parameters.push((name.to_string(), AnimParamConfig::Bool(value)));
+        self.parameters
+            .push((name.to_string(), AnimParamConfig::Bool(value)));
     }
 
     pub fn add_trigger(&mut self, name: &str) {
-        self.parameters.push((name.to_string(), AnimParamConfig::Trigger));
+        self.parameters
+            .push((name.to_string(), AnimParamConfig::Trigger));
     }
 }
 
@@ -2469,9 +2541,16 @@ pub struct EditorKeyframe {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum KeyframeChannel {
-    PositionX, PositionY, PositionZ,
-    RotationX, RotationY, RotationZ, RotationW,
-    ScaleX, ScaleY, ScaleZ,
+    PositionX,
+    PositionY,
+    PositionZ,
+    RotationX,
+    RotationY,
+    RotationZ,
+    RotationW,
+    ScaleX,
+    ScaleY,
+    ScaleZ,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -2550,7 +2629,11 @@ mod tests {
         let tree = BlendTree::locomotion_2d(0, 1, 2, 3, 4);
         assert_eq!(tree.name, "Locomotion2D");
         match &tree.root {
-            BlendNode::Blend2D { param_x, param_y, children } => {
+            BlendNode::Blend2D {
+                param_x,
+                param_y,
+                children,
+            } => {
                 assert_eq!(param_x, "VelocityX");
                 assert_eq!(param_y, "VelocityY");
                 assert_eq!(children.len(), 5);
@@ -2565,7 +2648,7 @@ mod tests {
         controller.set_float("Speed", 2.5);
         controller.set_bool("IsGrounded", true);
         controller.set_trigger("Jump");
-        
+
         match controller.state_machine.parameters.get("Speed") {
             Some(AnimParam::Float(v)) => assert!((v - 2.5).abs() < 0.001),
             _ => panic!("Expected float parameter"),
@@ -2582,17 +2665,17 @@ mod tests {
         sm.add_state("idle", 0);
         let tree = BlendTree::locomotion_1d(1, 2, 3);
         sm.add_blend_tree("locomotion", tree);
-        
+
         sm.transitions.push(StateTransition::new(
             "idle",
             "locomotion",
             TransitionCondition::FloatGreater("Speed".to_string(), 0.1),
             0.2,
         ));
-        
+
         // No transition yet
         assert!(sm.evaluate().is_none());
-        
+
         // Trigger transition
         sm.set_float("Speed", 0.5);
         let result = sm.evaluate();
@@ -2600,7 +2683,7 @@ mod tests {
         let (resource, duration) = result.unwrap();
         assert_eq!(duration, 0.2);
         match resource {
-            AnimResource::BlendTree(_) => {},
+            AnimResource::BlendTree(_) => {}
             _ => panic!("Expected blend tree resource"),
         }
         assert_eq!(sm.current_state, "locomotion");
@@ -2610,24 +2693,27 @@ mod tests {
     fn test_animation_events() {
         let skeleton = Arc::new(Skeleton::new());
         let mut clip = Arc::new(AnimationClip::new("test", 1.0));
-        
+
         // Add an event at 0.5s
-        Arc::get_mut(&mut clip).unwrap().events.push(AnimationEvent::new(0.5, "footstep"));
-        
+        Arc::get_mut(&mut clip)
+            .unwrap()
+            .events
+            .push(AnimationEvent::new(0.5, "footstep"));
+
         let mut animator = Animator::new(skeleton, vec![clip]);
-        
+
         // Use a real world to get a RefMut
         let mut world = hecs::World::new();
         let entity = world.spawn((AnimationEventQueue::new(),));
-        
+
         {
             let q = world.get::<&mut AnimationEventQueue>(entity).unwrap();
             let mut opt_q = Some(q);
-            
+
             // Advance from 0.0 to 0.4 (no event)
             animator.update_with_params(0.4, &HashMap::new(), &mut opt_q);
             assert_eq!(opt_q.as_ref().unwrap().events.len(), 0);
-            
+
             // Advance from 0.4 to 0.6 (fires event)
             animator.update_with_params(0.2, &HashMap::new(), &mut opt_q);
             assert_eq!(opt_q.as_ref().unwrap().events.len(), 1);
@@ -2641,7 +2727,7 @@ mod tests {
         sm.add_state("idle", 0);
         sm.add_state("walk", 1);
         sm.add_state("death", 2);
-        
+
         // Normal transition from idle to walk
         sm.transitions.push(StateTransition::new(
             "idle",
@@ -2649,7 +2735,7 @@ mod tests {
             TransitionCondition::FloatGreater("Speed".to_string(), 0.1),
             0.2,
         ));
-        
+
         // ANY_STATE transition to death (global interrupt)
         sm.transitions.push(StateTransition::new(
             ANY_STATE,
@@ -2657,10 +2743,10 @@ mod tests {
             TransitionCondition::Trigger("Die".to_string()),
             0.1,
         ));
-        
+
         // Start in idle
         assert_eq!(sm.current_state, "idle");
-        
+
         // Trigger death from idle - any-state should have priority
         sm.set_trigger("Die");
         let result = sm.evaluate();
@@ -2675,7 +2761,7 @@ mod tests {
         let mut sm = AnimationStateMachine::new();
         sm.add_state("idle", 0);
         sm.add_state("walk", 1);
-        
+
         // ANY_STATE that would transition to current state (should be skipped)
         sm.transitions.push(StateTransition::new(
             ANY_STATE,
@@ -2683,9 +2769,9 @@ mod tests {
             TransitionCondition::BoolTrue("ShouldIdle".to_string()),
             0.1,
         ));
-        
+
         sm.set_bool("ShouldIdle", true);
-        
+
         // Should not transition since we're already in idle
         let result = sm.evaluate();
         assert!(result.is_none());
@@ -2698,10 +2784,10 @@ mod tests {
         assert_eq!(mask.name, "Full");
         assert_eq!(mask.bone_weights.len(), 10);
         assert!(mask.bone_weights.iter().all(|&w| w == 1.0));
-        
+
         let empty_mask = AvatarMask::empty(10);
         assert!(empty_mask.bone_weights.iter().all(|&w| w == 0.0));
-        
+
         let partial_mask = AvatarMask::from_bones("Partial", 10, &[2, 5, 7]);
         assert_eq!(partial_mask.get_weight(0), 0.0);
         assert_eq!(partial_mask.get_weight(2), 1.0);
@@ -2721,7 +2807,7 @@ mod tests {
         for i in 10..20 {
             assert_eq!(upper.get_weight(i), 1.0);
         }
-        
+
         let lower = AvatarMask::lower_body_humanoid(20, 10);
         assert_eq!(lower.name, "LowerBody");
         for i in 0..10 {
@@ -2739,7 +2825,7 @@ mod tests {
         assert_eq!(look_at.bone_chain[0], 10);
         assert!(look_at.enabled);
         assert_eq!(look_at.weight, 1.0);
-        
+
         let humanoid_look_at = LookAtIK::humanoid(15, 14, 12, 10);
         assert_eq!(humanoid_look_at.bone_chain.len(), 4);
         assert_eq!(humanoid_look_at.bone_chain[0], 15); // head
@@ -2762,18 +2848,18 @@ mod tests {
         let skeleton = Arc::new(Skeleton::new());
         let clip = Arc::new(AnimationClip::new("test", 1.0));
         let mut layer = AnimationLayer::new(clip);
-        
+
         // Start at weight 1.0
         assert_eq!(layer.weight, 1.0);
-        
+
         // Blend to 0.5 at speed 2.0 (should take 0.25 seconds)
         layer.blend_to(0.5, 2.0);
         assert_eq!(layer.target_weight, 0.5);
-        
+
         // Update for 0.1 seconds - should move 0.2 towards target
         layer.update(0.1, None);
         assert!((layer.weight - 0.8).abs() < 0.001);
-        
+
         // Update for 0.2 more seconds - should reach target
         layer.update(0.2, None);
         assert!((layer.weight - 0.5).abs() < 0.001);

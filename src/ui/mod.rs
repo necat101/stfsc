@@ -1,5 +1,5 @@
 //! Runtime UI System for STFSC Engine
-//! 
+//!
 //! Provides HUD elements and overlay menus (pause menu, settings) for the 556 game.
 //! Works on both desktop and VR (Quest 3).
 
@@ -231,27 +231,40 @@ impl Button {
     /// Check if point (in screen coords) is inside this button
     /// Uses reference resolution scaling (1920x1080 default) for hit testing
     pub fn contains(&self, point: Vec2, screen_size: Vec2, parent_offset: Option<Vec2>) -> bool {
-        self.contains_scaled(point, screen_size, DEFAULT_REFERENCE_RESOLUTION.0, DEFAULT_REFERENCE_RESOLUTION.1, parent_offset)
+        self.contains_scaled(
+            point,
+            screen_size,
+            DEFAULT_REFERENCE_RESOLUTION.0,
+            DEFAULT_REFERENCE_RESOLUTION.1,
+            parent_offset,
+        )
     }
-    
+
     /// Check if point is inside this button with explicit reference resolution
-    pub fn contains_scaled(&self, point: Vec2, screen_size: Vec2, ref_width: f32, ref_height: f32, parent_offset: Option<Vec2>) -> bool {
+    pub fn contains_scaled(
+        &self,
+        point: Vec2,
+        screen_size: Vec2,
+        ref_width: f32,
+        ref_height: f32,
+        parent_offset: Option<Vec2>,
+    ) -> bool {
         // Calculate scale factor (same as UiCanvas::scale_factor)
         let scale_x = screen_size.x / ref_width;
         let scale_y = screen_size.y / ref_height;
         let scale = scale_x.min(scale_y);
-        
+
         // Scale position and size from reference resolution
         let mut pos = Vec2::from(self.panel.position);
         if let Some(offset) = parent_offset {
             pos += offset;
         }
-        
+
         let scaled_pos = Vec2::new(pos.x * scale, pos.y * scale);
         let scaled_size = Vec2::new(self.panel.size[0] * scale, self.panel.size[1] * scale);
-        
+
         let anchor_offset = self.panel.anchor.offset();
-        
+
         // Calculate viewport offset for centering
         let viewport_offset = Vec2::new(
             (screen_size.x - ref_width * scale) / 2.0,
@@ -260,8 +273,10 @@ impl Button {
 
         // New anchor formula
         let top_left = Vec2::new(
-            viewport_offset.x + (ref_width * scale * anchor_offset.x) + scaled_pos.x - (scaled_size.x * anchor_offset.x),
-            viewport_offset.y + (ref_height * scale * anchor_offset.y) + scaled_pos.y - (scaled_size.y * anchor_offset.y),
+            viewport_offset.x + (ref_width * scale * anchor_offset.x) + scaled_pos.x
+                - (scaled_size.x * anchor_offset.x),
+            viewport_offset.y + (ref_height * scale * anchor_offset.y) + scaled_pos.y
+                - (scaled_size.y * anchor_offset.y),
         );
 
         point.x >= top_left.x
@@ -370,32 +385,32 @@ impl UiLayerSet {
             visible: std::collections::HashSet::new(),
         }
     }
-    
+
     /// Set a layout for a specific layer
     pub fn set_layer(&mut self, layer: UiLayer, layout: UiLayout) {
         self.layers.insert(layer, layout);
     }
-    
+
     /// Show a layer (make it visible)
     pub fn show(&mut self, layer: UiLayer) {
         self.visible.insert(layer);
     }
-    
+
     /// Hide a layer
     pub fn hide(&mut self, layer: &UiLayer) {
         self.visible.remove(layer);
     }
-    
+
     /// Check if a layer is visible
     pub fn is_visible(&self, layer: &UiLayer) -> bool {
         self.visible.contains(layer)
     }
-    
+
     /// Get layout for a layer if it exists
     pub fn get_layer(&self, layer: &UiLayer) -> Option<&UiLayout> {
         self.layers.get(layer)
     }
-    
+
     /// Get all visible layers in render order (Hud first, PauseMenu last)
     /// If menu_stack is provided, custom layers are ordered by their stack position
     pub fn visible_layers(&self, menu_stack: Option<&MenuStack>) -> Vec<&UiLayout> {
@@ -406,7 +421,7 @@ impl UiLayerSet {
                 result.push(layout);
             }
         }
-        
+
         // Custom layers - order by menu stack if possible
         if let Some(stack) = menu_stack {
             for alias in stack.iter() {
@@ -454,13 +469,18 @@ impl UiLayerSet {
     /// Check if any visible layer should block game input
     pub fn should_block_input(&self, menu_stack: Option<&MenuStack>) -> bool {
         for layout in self.visible_layers(menu_stack) {
-            if layout.blocks_input || matches!(layout.layer_type, UiLayerType::PauseOverlay | UiLayerType::MainMenu) {
+            if layout.blocks_input
+                || matches!(
+                    layout.layer_type,
+                    UiLayerType::PauseOverlay | UiLayerType::MainMenu
+                )
+            {
                 return true;
             }
         }
         false
     }
-    
+
     /// Get mutable layout for a layer if it exists
     pub fn get_layer_mut(&mut self, layer: &UiLayer) -> Option<&mut UiLayout> {
         self.layers.get_mut(layer)
@@ -482,32 +502,32 @@ impl MenuStack {
     pub fn new() -> Self {
         Self { stack: Vec::new() }
     }
-    
+
     /// Push a menu onto the stack (for menu_load())
     pub fn push(&mut self, alias: &str) {
         self.stack.push(alias.to_string());
     }
-    
+
     /// Pop the current menu (for going back)
     pub fn pop(&mut self) -> Option<String> {
         self.stack.pop()
     }
-    
+
     /// Get the current menu alias without removing it
     pub fn current(&self) -> Option<&str> {
         self.stack.last().map(|s| s.as_str())
     }
-    
+
     /// Clear the entire menu stack
     pub fn clear(&mut self) {
         self.stack.clear();
     }
-    
+
     /// Check if stack is empty
     pub fn is_empty(&self) -> bool {
         self.stack.is_empty()
     }
-    
+
     /// Get stack depth (for debugging)
     pub fn depth(&self) -> usize {
         self.stack.len()
@@ -522,7 +542,6 @@ impl MenuStack {
 // ============================================================================
 // UI CANVAS
 // ============================================================================
-
 
 /// Accumulated UI draw commands for a frame
 #[derive(Default)]
@@ -546,7 +565,10 @@ impl UiCanvas {
             vertices: Vec::with_capacity(1024),
             indices: Vec::with_capacity(2048),
             screen_size: Vec2::new(width, height),
-            reference_resolution: Vec2::new(DEFAULT_REFERENCE_RESOLUTION.0, DEFAULT_REFERENCE_RESOLUTION.1),
+            reference_resolution: Vec2::new(
+                DEFAULT_REFERENCE_RESOLUTION.0,
+                DEFAULT_REFERENCE_RESOLUTION.1,
+            ),
         }
     }
 
@@ -558,12 +580,12 @@ impl UiCanvas {
     pub fn resize(&mut self, width: f32, height: f32) {
         self.screen_size = Vec2::new(width, height);
     }
-    
+
     /// Set the reference resolution (the resolution coordinates were authored at)
     pub fn set_reference_resolution(&mut self, width: f32, height: f32) {
         self.reference_resolution = Vec2::new(width, height);
     }
-    
+
     /// Calculate UI scale factor based on current screen size vs reference resolution
     /// Uses the smaller scale to maintain aspect ratio and ensure everything fits
     pub fn scale_factor(&self) -> f32 {
@@ -580,13 +602,13 @@ impl UiCanvas {
             (self.screen_size.y - self.reference_resolution.y * scale) / 2.0,
         )
     }
-    
+
     /// Scale a position from reference resolution to actual screen size (without centering)
     pub fn scale_position(&self, pos: Vec2) -> Vec2 {
         let scale = self.scale_factor();
         Vec2::new(pos.x * scale, pos.y * scale)
     }
-    
+
     /// Scale a size from reference resolution to actual screen size
     pub fn scale_size(&self, size: Vec2) -> Vec2 {
         let scale = self.scale_factor();
@@ -594,23 +616,38 @@ impl UiCanvas {
     }
 
     /// Add a quad (two triangles) to the canvas
-    pub fn add_quad(&mut self, top_left: Vec2, size: Vec2, uv_min: Vec2, uv_max: Vec2, color: [f32; 4]) {
+    pub fn add_quad(
+        &mut self,
+        top_left: Vec2,
+        size: Vec2,
+        uv_min: Vec2,
+        uv_max: Vec2,
+        color: [f32; 4],
+    ) {
         let base_idx = self.vertices.len() as u32;
-        
+
         let tl = top_left;
         let tr = Vec2::new(top_left.x + size.x, top_left.y);
         let bl = Vec2::new(top_left.x, top_left.y + size.y);
         let br = Vec2::new(top_left.x + size.x, top_left.y + size.y);
 
-        self.vertices.push(UiVertex::new(tl.x, tl.y, uv_min.x, uv_min.y, color));
-        self.vertices.push(UiVertex::new(tr.x, tr.y, uv_max.x, uv_min.y, color));
-        self.vertices.push(UiVertex::new(br.x, br.y, uv_max.x, uv_max.y, color));
-        self.vertices.push(UiVertex::new(bl.x, bl.y, uv_min.x, uv_max.y, color));
+        self.vertices
+            .push(UiVertex::new(tl.x, tl.y, uv_min.x, uv_min.y, color));
+        self.vertices
+            .push(UiVertex::new(tr.x, tr.y, uv_max.x, uv_min.y, color));
+        self.vertices
+            .push(UiVertex::new(br.x, br.y, uv_max.x, uv_max.y, color));
+        self.vertices
+            .push(UiVertex::new(bl.x, bl.y, uv_min.x, uv_max.y, color));
 
         // Two triangles: TL-TR-BR and TL-BR-BL
         self.indices.extend_from_slice(&[
-            base_idx, base_idx + 1, base_idx + 2,
-            base_idx, base_idx + 2, base_idx + 3,
+            base_idx,
+            base_idx + 1,
+            base_idx + 2,
+            base_idx,
+            base_idx + 2,
+            base_idx + 3,
         ]);
     }
 
@@ -620,19 +657,25 @@ impl UiCanvas {
         let scaled_pos = self.scale_position(Vec2::from(panel.position));
         let scaled_size = self.scale_size(Vec2::from(panel.size));
         let viewport_offset = self.viewport_offset();
-        
+
         let anchor_offset = panel.anchor.offset();
         let top_left = Vec2::new(
-            viewport_offset.x + (self.reference_resolution.x * scale * anchor_offset.x) + scaled_pos.x - (scaled_size.x * anchor_offset.x),
-            viewport_offset.y + (self.reference_resolution.y * scale * anchor_offset.y) + scaled_pos.y - (scaled_size.y * anchor_offset.y),
+            viewport_offset.x
+                + (self.reference_resolution.x * scale * anchor_offset.x)
+                + scaled_pos.x
+                - (scaled_size.x * anchor_offset.x),
+            viewport_offset.y
+                + (self.reference_resolution.y * scale * anchor_offset.y)
+                + scaled_pos.y
+                - (scaled_size.y * anchor_offset.y),
         );
-        
+
         // For now, ignore corner_radius (would need more complex geometry or SDF)
         // Use the white pixel in the font atlas for solid color panels
         // The pixel is at (1,1) in our 2x2 white block
         let uv_white = Vec2::new(1.0 / 512.0, 1.0 / 512.0);
         self.add_quad(top_left, scaled_size, uv_white, uv_white, panel.color);
-        
+
         // Draw child elements relative to panel position
         for child in &panel.children {
             match child {
@@ -657,26 +700,42 @@ impl UiCanvas {
     }
 
     /// Draw a panel with font atlas for proper text rendering in children
-    pub fn draw_panel_with_font(&mut self, panel: &Panel, font: &crate::ui::font::FontAtlas, hovered_id: Option<u32>) {
+    pub fn draw_panel_with_font(
+        &mut self,
+        panel: &Panel,
+        font: &crate::ui::font::FontAtlas,
+        hovered_id: Option<u32>,
+    ) {
         self.draw_panel_with_font_internal(panel, font, hovered_id)
     }
 
-    fn draw_panel_with_font_internal(&mut self, panel: &Panel, font: &crate::ui::font::FontAtlas, hovered_id: Option<u32>) {
+    fn draw_panel_with_font_internal(
+        &mut self,
+        panel: &Panel,
+        font: &crate::ui::font::FontAtlas,
+        hovered_id: Option<u32>,
+    ) {
         let scale = self.scale_factor();
         let scaled_pos = self.scale_position(Vec2::from(panel.position));
         let scaled_size = self.scale_size(Vec2::from(panel.size));
         let viewport_offset = self.viewport_offset();
-        
+
         let anchor_offset = panel.anchor.offset();
         let top_left = Vec2::new(
-            viewport_offset.x + (self.reference_resolution.x * scale * anchor_offset.x) + scaled_pos.x - (scaled_size.x * anchor_offset.x),
-            viewport_offset.y + (self.reference_resolution.y * scale * anchor_offset.y) + scaled_pos.y - (scaled_size.y * anchor_offset.y),
+            viewport_offset.x
+                + (self.reference_resolution.x * scale * anchor_offset.x)
+                + scaled_pos.x
+                - (scaled_size.x * anchor_offset.x),
+            viewport_offset.y
+                + (self.reference_resolution.y * scale * anchor_offset.y)
+                + scaled_pos.y
+                - (scaled_size.y * anchor_offset.y),
         );
-        
+
         // Draw panel background
         let uv_white = Vec2::new(1.0 / 512.0, 1.0 / 512.0);
         self.add_quad(top_left, scaled_size, uv_white, uv_white, panel.color);
-        
+
         // Draw child elements relative to panel position
         for child in &panel.children {
             match child {
@@ -705,21 +764,27 @@ impl UiCanvas {
         let scale = self.scale_factor();
         let scaled_pos = self.scale_position(Vec2::from(text.position));
         let viewport_offset = self.viewport_offset();
-        
+
         // Use a simple estimation for text size in the placeholder
         let text_size = Vec2::new(text.content.len() as f32 * 10.0 * scale, 20.0 * scale);
-        
+
         let anchor_offset = text.anchor.offset();
         let top_left = Vec2::new(
-            viewport_offset.x + (self.reference_resolution.x * scale * anchor_offset.x) + scaled_pos.x - (text_size.x * anchor_offset.x),
-            viewport_offset.y + (self.reference_resolution.y * scale * anchor_offset.y) + scaled_pos.y - (text_size.y * anchor_offset.y),
+            viewport_offset.x
+                + (self.reference_resolution.x * scale * anchor_offset.x)
+                + scaled_pos.x
+                - (text_size.x * anchor_offset.x),
+            viewport_offset.y
+                + (self.reference_resolution.y * scale * anchor_offset.y)
+                + scaled_pos.y
+                - (text_size.y * anchor_offset.y),
         );
-        
+
         // Draw placeholder rectangle (will be replaced with actual glyph rendering)
         // Using a slightly transparent color to indicate it's a placeholder
         let mut placeholder_color = text.color;
         placeholder_color[3] *= 0.8;
-        
+
         let uv_white = Vec2::new(1.0 / 512.0, 1.0 / 512.0);
         self.add_quad(top_left, text_size, uv_white, uv_white, placeholder_color);
     }
@@ -729,9 +794,9 @@ impl UiCanvas {
         let scale = self.scale_factor();
         let scaled_pos = self.scale_position(Vec2::from(text.position));
         let viewport_offset = self.viewport_offset();
-        
+
         let font_scale = (text.font_size / font.font_size) * scale;
-        
+
         // Calculate total text width for alignment
         let mut text_width = 0.0;
         for c in text.content.chars() {
@@ -740,18 +805,24 @@ impl UiCanvas {
             }
         }
         let text_height = font.font_size * font_scale;
-        
+
         let anchor_offset = text.anchor.offset();
-        let start_x = viewport_offset.x + (self.reference_resolution.x * scale * anchor_offset.x) + scaled_pos.x - (text_width * anchor_offset.x);
-        let start_y = viewport_offset.y + (self.reference_resolution.y * scale * anchor_offset.y) + scaled_pos.y - (text_height * anchor_offset.y);
+        let start_x = viewport_offset.x
+            + (self.reference_resolution.x * scale * anchor_offset.x)
+            + scaled_pos.x
+            - (text_width * anchor_offset.x);
+        let start_y = viewport_offset.y
+            + (self.reference_resolution.y * scale * anchor_offset.y)
+            + scaled_pos.y
+            - (text_height * anchor_offset.y);
 
         let mut cursor_x = start_x;
-        
+
         for c in text.content.chars() {
             if let Some(glyph) = font.get_glyph(c) {
                 let glyph_width = glyph.width * font_scale;
                 let glyph_height = glyph.height * font_scale;
-                
+
                 // Position glyph: x_offset positions horizontally from cursor
                 // For y: fontdue's ymin is the descent below baseline (usually 0 or negative for descenders)
                 // We place glyphs relative to the text's top, offset by the glyph's top edge
@@ -759,8 +830,9 @@ impl UiCanvas {
                 // The y_offset from fontdue represents distance from baseline to glyph top
                 // In our top-down screen coords, higher y = lower on screen
                 // For most glyphs, ymin is positive (glyph extends above baseline)
-                let y = start_y + (font.font_size - glyph.height as f32 - glyph.y_offset) * font_scale;
-                
+                let y =
+                    start_y + (font.font_size - glyph.height as f32 - glyph.y_offset) * font_scale;
+
                 // Only draw if glyph has actual pixels (skip space, etc)
                 if glyph.width > 0.0 && glyph.height > 0.0 {
                     self.add_quad(
@@ -771,7 +843,7 @@ impl UiCanvas {
                         text.color,
                     );
                 }
-                
+
                 cursor_x += glyph.advance * font_scale;
             }
         }
@@ -792,11 +864,15 @@ impl UiCanvas {
         // Draw label centered in button
         let mut label = button.label.clone();
         let anchor_offset = button.panel.anchor.offset();
-        
+
         // 1. Calculate the absolute center of the button in reference resolution space
-        let center_x = (self.reference_resolution.x * anchor_offset.x) + button.panel.position[0] + button.panel.size[0] * (0.5 - anchor_offset.x);
-        let center_y = (self.reference_resolution.y * anchor_offset.y) + button.panel.position[1] + button.panel.size[1] * (0.5 - anchor_offset.y);
-        
+        let center_x = (self.reference_resolution.x * anchor_offset.x)
+            + button.panel.position[0]
+            + button.panel.size[0] * (0.5 - anchor_offset.x);
+        let center_y = (self.reference_resolution.y * anchor_offset.y)
+            + button.panel.position[1]
+            + button.panel.size[1] * (0.5 - anchor_offset.y);
+
         // 2. Position the label relative to screen center to ensure perfect centering regardless of original anchor
         label.position[0] = center_x - (self.reference_resolution.x * 0.5);
         label.position[1] = center_y - (self.reference_resolution.y * 0.5);
@@ -805,7 +881,12 @@ impl UiCanvas {
     }
 
     /// Draw a button with font atlas for proper text rendering
-    pub fn draw_button_with_font(&mut self, button: &Button, font: &crate::ui::font::FontAtlas, hovered_id: Option<u32>) {
+    pub fn draw_button_with_font(
+        &mut self,
+        button: &Button,
+        font: &crate::ui::font::FontAtlas,
+        hovered_id: Option<u32>,
+    ) {
         // Draw panel with hover/press state coloring
         let mut panel = button.panel.clone();
         let is_hovered = button.hovered || (hovered_id.is_some() && hovered_id == Some(button.id));
@@ -819,11 +900,15 @@ impl UiCanvas {
         // Draw label centered in button
         let mut label = button.label.clone();
         let anchor_offset = button.panel.anchor.offset();
-        
+
         // 1. Calculate the absolute center of the button in reference resolution space
-        let center_x = (self.reference_resolution.x * anchor_offset.x) + button.panel.position[0] + button.panel.size[0] * (0.5 - anchor_offset.x);
-        let center_y = (self.reference_resolution.y * anchor_offset.y) + button.panel.position[1] + button.panel.size[1] * (0.5 - anchor_offset.y);
-        
+        let center_x = (self.reference_resolution.x * anchor_offset.x)
+            + button.panel.position[0]
+            + button.panel.size[0] * (0.5 - anchor_offset.x);
+        let center_y = (self.reference_resolution.y * anchor_offset.y)
+            + button.panel.position[1]
+            + button.panel.size[1] * (0.5 - anchor_offset.y);
+
         // 2. Position the label relative to screen center to ensure perfect centering regardless of original anchor
         label.position[0] = center_x - (self.reference_resolution.x * 0.5);
         label.position[1] = center_y - (self.reference_resolution.y * 0.5);
@@ -839,10 +924,7 @@ impl UiCanvas {
 /// UI Events that can be handled by the scripting system
 #[derive(Clone, Debug)]
 pub enum UiEvent {
-    ButtonClicked {
-        id: u32,
-        callback: String,
-    },
+    ButtonClicked { id: u32, callback: String },
 }
 
 /// Global UI state
@@ -912,13 +994,13 @@ pub fn create_default_pause_menu_layout() -> UiLayout {
     layout.layer_type = UiLayerType::PauseOverlay;
     layout.pauses_game = true;
     layout.blocks_input = true;
-    
+
     // Background panel (semi-transparent overlay will be drawn separately)
     let panel = Panel::centered(400.0, 300.0)
         .with_color(0.1, 0.12, 0.18, 0.95)
         .with_corner_radius(16.0);
     layout.panels.push(panel);
-    
+
     // Title text
     let mut title = Text::centered("PAUSED")
         .with_font_size(48.0)
@@ -926,42 +1008,36 @@ pub fn create_default_pause_menu_layout() -> UiLayout {
     title.position[1] = -80.0;
     title.anchor = Anchor::Center;
     layout.texts.push(title);
-    
+
     // Resume button
     let resume_btn = Button::new(BUTTON_RESUME, "Resume", 0.0, -10.0, 200.0, 50.0)
         .with_anchor(Anchor::Center)
         .with_callback("resume()");
     layout.buttons.push(resume_btn);
-    
+
     // Settings button
     let settings_btn = Button::new(BUTTON_SETTINGS, "Settings", 0.0, 50.0, 200.0, 50.0)
         .with_anchor(Anchor::Center)
         .with_callback("menu_load(\"settings\")");
     layout.buttons.push(settings_btn);
-    
+
     // Quit button
     let quit_btn = Button::new(BUTTON_QUIT, "Quit", 0.0, 110.0, 200.0, 50.0)
         .with_anchor(Anchor::Center)
         .with_callback("on_quit_clicked");
     layout.buttons.push(quit_btn);
-    
+
     layout
 }
 
 /// Draw a simple pause menu overlay
 pub fn draw_pause_menu(canvas: &mut UiCanvas, ui_state: &UiState) {
     let screen = canvas.screen_size;
-    
+
     // Semi-transparent background overlay
     // Use the white pixel in the font atlas (at 1,1 in our 2x2 white block)
     let uv_white = Vec2::new(1.0 / 512.0, 1.0 / 512.0);
-    canvas.add_quad(
-        Vec2::ZERO,
-        screen,
-        uv_white,
-        uv_white,
-        [0.0, 0.0, 0.0, 0.6],
-    );
+    canvas.add_quad(Vec2::ZERO, screen, uv_white, uv_white, [0.0, 0.0, 0.0, 0.6]);
 
     // Centered panel
     let panel_width = 400.0;
@@ -976,13 +1052,13 @@ pub fn draw_pause_menu(canvas: &mut UiCanvas, ui_state: &UiState) {
         .with_font_size(48.0)
         .with_color(1.0, 1.0, 1.0, 1.0);
     let mut title_positioned = title.clone();
-    title_positioned.position[1] = -80.0;  // Offset from center, not absolute
+    title_positioned.position[1] = -80.0; // Offset from center, not absolute
     title_positioned.anchor = Anchor::Center;
     canvas.draw_text(&title_positioned);
 
     // Resume button - slightly above center
-    let resume_btn = Button::new(BUTTON_RESUME, "Resume", 0.0, -10.0, 200.0, 50.0)
-        .with_anchor(Anchor::Center);
+    let resume_btn =
+        Button::new(BUTTON_RESUME, "Resume", 0.0, -10.0, 200.0, 50.0).with_anchor(Anchor::Center);
     canvas.draw_button(&resume_btn, ui_state.hovered_button);
 
     // Settings button
@@ -991,29 +1067,27 @@ pub fn draw_pause_menu(canvas: &mut UiCanvas, ui_state: &UiState) {
     canvas.draw_button(&settings_btn, ui_state.hovered_button);
 
     // Quit button
-    let quit_btn = Button::new(BUTTON_QUIT, "Quit", 0.0, 110.0, 200.0, 50.0)
-        .with_anchor(Anchor::Center);
+    let quit_btn =
+        Button::new(BUTTON_QUIT, "Quit", 0.0, 110.0, 200.0, 50.0).with_anchor(Anchor::Center);
     canvas.draw_button(&quit_btn, ui_state.hovered_button);
 }
 
 /// Draw the default pause menu using the provided font atlas
-pub fn draw_pause_menu_with_font(canvas: &mut UiCanvas, ui_state: &UiState, font: &crate::ui::font::FontAtlas) {
+pub fn draw_pause_menu_with_font(
+    canvas: &mut UiCanvas,
+    ui_state: &UiState,
+    font: &crate::ui::font::FontAtlas,
+) {
     let screen = canvas.screen_size;
 
     // Semi-transparent background overlay
     // Use the white pixel in the font atlas (at 1,1 in our 2x2 white block)
     let uv_white = Vec2::new(1.0 / 512.0, 1.0 / 512.0);
-    canvas.add_quad(
-        Vec2::ZERO,
-        screen,
-        uv_white,
-        uv_white,
-        [0.0, 0.0, 0.0, 0.6],
-    );
+    canvas.add_quad(Vec2::ZERO, screen, uv_white, uv_white, [0.0, 0.0, 0.0, 0.6]);
 
     let panel_width = 400.0;
     let panel_height = 300.0;
-    
+
     // Background panel
     let panel = Panel::centered(panel_width, panel_height)
         .with_color(0.1, 0.12, 0.18, 0.95)
@@ -1052,7 +1126,7 @@ pub fn draw_pause_menu_with_font(canvas: &mut UiCanvas, ui_state: &UiState, font
 pub fn get_hovered_pause_button(pointer: Vec2, screen_size: Vec2) -> Option<(u32, Option<String>)> {
     // Winit and our UI now both use top-left origin (0,0)
     let processed_pointer = pointer;
-    
+
     // Button positions must match draw_pause_menu exactly
     let buttons = [
         Button::new(BUTTON_RESUME, "Resume", 0.0, -10.0, 200.0, 50.0)

@@ -46,11 +46,14 @@ impl EventHandler for EventCollector {
 
 impl PhysicsWorld {
     pub fn new() -> Self {
+        let mut integration_parameters = IntegrationParameters::default();
+        integration_parameters.max_ccd_substeps = 2;
+
         Self {
             rigid_body_set: RigidBodySet::new(),
             collider_set: ColliderSet::new(),
             gravity: vector![0.0, -9.81, 0.0],
-            integration_parameters: IntegrationParameters::default(),
+            integration_parameters,
             physics_pipeline: PhysicsPipeline::new(),
             island_manager: IslandManager::new(),
             broad_phase: BroadPhase::new(),
@@ -65,6 +68,17 @@ impl PhysicsWorld {
         }
     }
 
+    pub fn set_timestep(&mut self, dt: f32) {
+        if dt.is_finite() && dt > 0.0 {
+            self.integration_parameters.dt = dt.clamp(1.0 / 240.0, 1.0 / 30.0);
+        }
+    }
+
+    pub fn step_with_dt(&mut self, dt: f32) {
+        self.set_timestep(dt);
+        self.step();
+    }
+
     pub fn step(&mut self) {
         self.physics_pipeline.step(
             &self.gravity,
@@ -77,12 +91,10 @@ impl PhysicsWorld {
             &mut self.impulse_joint_set,
             &mut self.multibody_joint_set,
             &mut self.ccd_solver,
-            None,
+            Some(&mut self.query_pipeline),
             &(),
             &self.event_collector,
         );
-        self.query_pipeline
-            .update(&self.rigid_body_set, &self.collider_set);
     }
 
     pub fn add_box_rigid_body(
@@ -94,7 +106,15 @@ impl PhysicsWorld {
         membership: u32,
         filter: u32,
     ) -> RigidBodyHandle {
-        self.add_box_rigid_body_with_offset(entity_id, translation, 0.0, half_extents, dynamic, membership, filter)
+        self.add_box_rigid_body_with_offset(
+            entity_id,
+            translation,
+            0.0,
+            half_extents,
+            dynamic,
+            membership,
+            filter,
+        )
     }
 
     pub fn add_box_rigid_body_with_offset(
@@ -120,14 +140,13 @@ impl PhysicsWorld {
                 .build()
         };
 
-        let collider =
-            ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2])
-                .translation(vector![0.0, y_offset, 0.0])
-                .collision_groups(InteractionGroups::new(
-                    Group::from_bits_truncate(membership),
-                    Group::from_bits_truncate(filter),
-                ))
-                .build();
+        let collider = ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2])
+            .translation(vector![0.0, y_offset, 0.0])
+            .collision_groups(InteractionGroups::new(
+                Group::from_bits_truncate(membership),
+                Group::from_bits_truncate(filter),
+            ))
+            .build();
         let body_handle = self.rigid_body_set.insert(rigid_body);
         self.collider_set
             .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);

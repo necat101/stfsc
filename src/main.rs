@@ -1,30 +1,40 @@
 // use std::io::Write; // Unused
-use stfsc_engine::graphics::{GraphicsContext, GpuMesh, InstanceData, GlobalData, Texture, calculate_shadow_resolution};
-use stfsc_engine::world::{GameWorld, MeshHandle, Material, Transform, RigidBodyHandle, Mesh, AudioSource};
-use stfsc_engine::audio::{AudioSystem, AudioBuffer, AudioSourceProperties, AttenuationModel, AudioBufferHandle};
-use stfsc_engine::physics::PhysicsWorld;
-use stfsc_engine::resource_loader::{ResourceLoader, ResourceLoadResult};
-use stfsc_engine::lighting::{self, LightUBO, GpuLightData};
-use stfsc_engine::graphics::occlusion::OcclusionCuller;
-use stfsc_engine::ui::{self, UiCanvas, UiState, draw_pause_menu_with_font, get_hovered_pause_button, BUTTON_RESUME, BUTTON_QUIT};
-use stfsc_engine::ui::renderer::UiRenderer;
-use stfsc_engine::ui::font::FontAtlas;
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{WindowBuilder, CursorGrabMode};
-use winit::event::{Event, WindowEvent, DeviceEvent, ElementState, MouseButton};
-use hecs::Entity;
-use winit::keyboard::{PhysicalKey, KeyCode, Key, NamedKey};
-use log::info;
-use std::sync::{Arc, RwLock};
 use ash::vk;
-use std::collections::{HashMap, HashSet};
+use hecs::Entity;
+use log::info;
 use rapier3d::prelude::LockedAxes;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
+use stfsc_engine::audio::{
+    AttenuationModel, AudioBuffer, AudioBufferHandle, AudioSourceProperties, AudioSystem,
+};
+use stfsc_engine::graphics::occlusion::OcclusionCuller;
+use stfsc_engine::graphics::{
+    calculate_shadow_resolution_for_settings, GlobalData, GpuMesh, GraphicsContext,
+    GraphicsOptimizationSettings, InstanceData, Texture,
+};
+use stfsc_engine::lighting::{self, GpuLightData, LightUBO};
+use stfsc_engine::physics::PhysicsWorld;
+use stfsc_engine::resource_loader::{ResourceLoadResult, ResourceLoader};
+use stfsc_engine::ui::font::FontAtlas;
+use stfsc_engine::ui::renderer::UiRenderer;
+use stfsc_engine::ui::{
+    self, draw_pause_menu_with_font, get_hovered_pause_button, UiCanvas, UiState, BUTTON_QUIT,
+    BUTTON_RESUME,
+};
+use stfsc_engine::world::{
+    AudioSource, GameWorld, Material, Mesh, MeshHandle, RigidBodyHandle, Transform,
+};
+use winit::event::{DeviceEvent, ElementState, Event, MouseButton, WindowEvent};
+use winit::event_loop::{ControlFlow, EventLoop};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
+use winit::window::{CursorGrabMode, WindowBuilder};
 
 // ============================================================================
 // SCENE CONFIGURATION - Define these before graphics initialization
 // This is where a "shader pre-compilation" phase would read scene metadata
 // ============================================================================
-const GROUND_PLANE_HALF_EXTENT: f32 = 100.0;  // Half-size of ground plane (200x200 total)
+const GROUND_PLANE_HALF_EXTENT: f32 = 100.0; // Half-size of ground plane (200x200 total)
 
 /// Cached texture entry with material descriptor set
 struct TextureEntry {
@@ -37,8 +47,10 @@ fn main() {
     std::env::set_var("RUST_LOG", "info"); // Enable Info logs
     env_logger::init();
     use std::io::Write;
-    print!("DEBUG: STFSC Engine Starting..."); std::io::stdout().flush().unwrap();
+    print!("DEBUG: STFSC Engine Starting...");
+    std::io::stdout().flush().unwrap();
     println!("Init logger done");
+    stfsc_engine::runtime::configure_parallelism();
 
     // Check for bundled project
     let bundled_project = stfsc_engine::bundle::BundledProject::load();
@@ -51,11 +63,20 @@ fn main() {
         info!("STFSC Engine - Default Test Scene");
     }
 
-    let shadow_resolution = calculate_shadow_resolution(GROUND_PLANE_HALF_EXTENT);
-    info!("Scene: Ground plane half-extent = {} units", GROUND_PLANE_HALF_EXTENT);
-    info!("Scene: Calculated shadow map resolution = {}x{}", shadow_resolution, shadow_resolution);
-    
-    print!("DEBUG: EventLoop..."); std::io::stdout().flush().unwrap();
+    let graphics_settings = GraphicsOptimizationSettings::mobile_optimized();
+    let shadow_resolution =
+        calculate_shadow_resolution_for_settings(GROUND_PLANE_HALF_EXTENT, graphics_settings);
+    info!(
+        "Scene: Ground plane half-extent = {} units",
+        GROUND_PLANE_HALF_EXTENT
+    );
+    info!(
+        "Scene: Calculated shadow map resolution = {}x{}",
+        shadow_resolution, shadow_resolution
+    );
+
+    print!("DEBUG: EventLoop...");
+    std::io::stdout().flush().unwrap();
     let event_loop = EventLoop::new().unwrap();
     let window = WindowBuilder::new()
         .with_title("STFSC Engine - 556 Downtown")
@@ -65,24 +86,33 @@ fn main() {
     println!("Done");
 
     // Create graphics context with scene-optimized shadow resolution
-    print!("DEBUG: GraphicsContext::new..."); std::io::stdout().flush().unwrap();
+    print!("DEBUG: GraphicsContext::new...");
+    std::io::stdout().flush().unwrap();
     let graphics_context = Arc::new(
-        GraphicsContext::new_desktop_with_shadow_resolution(&window, Some(shadow_resolution))
-            .expect("Failed to create GraphicsContext")
+        GraphicsContext::new_desktop_with_options(
+            &window,
+            Some(shadow_resolution),
+            graphics_settings,
+        )
+        .expect("Failed to create GraphicsContext"),
     );
     println!("Done");
-    
-    info!("Graphics: Shadow map initialized at {}x{}", 
-          graphics_context.shadow_extent.width, 
-          graphics_context.shadow_extent.height);
-    
+
+    info!(
+        "Graphics: Shadow map initialized at {}x{}",
+        graphics_context.shadow_extent.width, graphics_context.shadow_extent.height
+    );
+
     // Default Textures
-    print!("DEBUG: Create textures..."); std::io::stdout().flush().unwrap();
-    let (albedo_tex, normal_tex, mr_tex) = graphics_context.create_default_pbr_textures().expect("Failed to create default textures");
+    print!("DEBUG: Create textures...");
+    std::io::stdout().flush().unwrap();
+    let (albedo_tex, normal_tex, mr_tex) = graphics_context
+        .create_default_pbr_textures()
+        .expect("Failed to create default textures");
     println!("Done");
 
     println!("DEBUG: Starting init loop...");
-    
+
     // Safety check for swapchain frames
     let frame_count = graphics_context.swapchain_image_views.len();
     info!("Init: Configuring for {} frames in flight", frame_count);
@@ -94,17 +124,21 @@ fn main() {
     let mut instance_ptrs = Vec::with_capacity(frame_count);
 
     for i in 0..frame_count {
-        let (buf, mem) = graphics_context.create_buffer(
-            (max_instances * std::mem::size_of::<InstanceData>()) as u64,
-            vk::BufferUsageFlags::STORAGE_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        ).expect("Failed to create instance buffer");
-        
+        let (buf, mem) = graphics_context
+            .create_buffer(
+                (max_instances * std::mem::size_of::<InstanceData>()) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .expect("Failed to create instance buffer");
+
         let ptr = unsafe {
-            graphics_context.device.map_memory(mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+            graphics_context
+                .device
+                .map_memory(mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
                 .expect("Failed to map instance buffer") as *mut InstanceData
         };
-        
+
         if i == 0 {
             // Initialize first frame with Safe Defaults to prevent "Mega Triangle" from zero-scale matrices
             unsafe {
@@ -121,10 +155,10 @@ fn main() {
                 }
             }
         } else {
-             // For other frames, just zero it or copy first frame? 
-             // Zeroing `InstanceData` (all zeros) means Model = Zero Matrix -> Scale = 0 -> Degenerate Geometry.
-             // We MUST initialize to Identity.
-             unsafe {
+            // For other frames, just zero it or copy first frame?
+            // Zeroing `InstanceData` (all zeros) means Model = Zero Matrix -> Scale = 0 -> Degenerate Geometry.
+            // We MUST initialize to Identity.
+            unsafe {
                 for j in 0..max_instances {
                     let instance = InstanceData {
                         model: glam::Mat4::IDENTITY,
@@ -138,7 +172,7 @@ fn main() {
                 }
             }
         }
-        
+
         instance_buffers.push(buf);
         instance_memories.push(mem);
         instance_ptrs.push(ptr);
@@ -152,17 +186,23 @@ fn main() {
     let mut light_ptrs = Vec::with_capacity(frame_count);
 
     for i in 0..frame_count {
-        let (buf, mem) = graphics_context.create_buffer(
-            light_buffer_size,
-            vk::BufferUsageFlags::UNIFORM_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        ).expect("Failed to create light buffer");
+        let (buf, mem) = graphics_context
+            .create_buffer(
+                light_buffer_size,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .expect("Failed to create light buffer");
 
         let ptr = unsafe {
-            graphics_context.device.map_memory(mem, 0, light_buffer_size, vk::MemoryMapFlags::empty())
+            graphics_context
+                .device
+                .map_memory(mem, 0, light_buffer_size, vk::MemoryMapFlags::empty())
                 .expect("Failed to map light buffer") as *mut LightUBO
         };
-        unsafe { *ptr = LightUBO::default(); } // Init default
+        unsafe {
+            *ptr = LightUBO::default();
+        } // Init default
 
         light_buffers.push(buf);
         light_memories.push(mem);
@@ -176,15 +216,19 @@ fn main() {
     let mut bone_memories = Vec::with_capacity(frame_count);
 
     for i in 0..frame_count {
-        let (buf, mem) = graphics_context.create_buffer(
-            bone_buffer_size,
-            vk::BufferUsageFlags::UNIFORM_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        ).expect("Failed to create bone buffer");
-        
+        let (buf, mem) = graphics_context
+            .create_buffer(
+                bone_buffer_size,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .expect("Failed to create bone buffer");
+
         // Map and Initialize Bone Buffer to Identity
         unsafe {
-            let ptr = graphics_context.device.map_memory(mem, 0, bone_buffer_size, vk::MemoryMapFlags::empty())
+            let ptr = graphics_context
+                .device
+                .map_memory(mem, 0, bone_buffer_size, vk::MemoryMapFlags::empty())
                 .expect("Failed to map bone buffer") as *mut glam::Mat4;
             for j in 0..128 {
                 std::ptr::write(ptr.add(j), glam::Mat4::IDENTITY);
@@ -204,25 +248,32 @@ fn main() {
     let mut global_ptrs = Vec::with_capacity(frame_count);
 
     for i in 0..frame_count {
-        let (buf, mem) = graphics_context.create_buffer(
-            global_buffer_size,
-            vk::BufferUsageFlags::UNIFORM_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        ).expect("Failed to create global data buffer");
+        let (buf, mem) = graphics_context
+            .create_buffer(
+                global_buffer_size,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .expect("Failed to create global data buffer");
 
         let ptr = unsafe {
-            graphics_context.device.map_memory(mem, 0, global_buffer_size, vk::MemoryMapFlags::empty())
+            graphics_context
+                .device
+                .map_memory(mem, 0, global_buffer_size, vk::MemoryMapFlags::empty())
                 .expect("Failed to map global data buffer") as *mut GlobalData
         };
 
         unsafe {
-            std::ptr::write(ptr, GlobalData {
-                view_proj: glam::Mat4::IDENTITY,
-                prev_view_proj: glam::Mat4::IDENTITY,
-                light_space: glam::Mat4::IDENTITY,
-                camera_pos: [0.0, 0.0, 0.0, 1.0],
-                light_dir: [0.0, -1.0, 0.0, 0.0],
-            });
+            std::ptr::write(
+                ptr,
+                GlobalData {
+                    view_proj: glam::Mat4::IDENTITY,
+                    prev_view_proj: glam::Mat4::IDENTITY,
+                    light_space: glam::Mat4::IDENTITY,
+                    camera_pos: [0.0, 0.0, 0.0, 1.0],
+                    light_dir: [0.0, -1.0, 0.0, 0.0],
+                },
+            );
         }
 
         global_buffers.push(buf);
@@ -237,33 +288,42 @@ fn main() {
 
     for i in 0..frame_count {
         // Standard Global Set (Shadow Map Input -> Main Pass)
-        let set = graphics_context.create_global_descriptor_set(
-            graphics_context.shadow_depth_view,
-            graphics_context.shadow_sampler,
-            instance_buffers[i],
-            light_buffers[i],
-            bone_buffers[i],
-            global_buffers[i],
-        ).expect("Failed to create global descriptor set");
+        let set = graphics_context
+            .create_global_descriptor_set(
+                graphics_context.shadow_depth_view,
+                graphics_context.shadow_sampler,
+                instance_buffers[i],
+                light_buffers[i],
+                bone_buffers[i],
+                global_buffers[i],
+            )
+            .expect("Failed to create global descriptor set");
         global_descriptor_sets.push(set);
 
         // Shadow Pass Set (Dummy Input -> Shadow Pass)
         // CRITICAL FIX: Bind ALBEDO as dummy shadow texture to prevent read/write feedback loop
         // The Shadow Pass WRITES to shadow_depth_view, so it cannot BIND it as input.
-        let shadow_set = graphics_context.create_global_descriptor_set(
-            albedo_tex.image_view, // DUMMY SAFE BINDING
-            albedo_tex.sampler,
-            instance_buffers[i],
-            light_buffers[i],
-            bone_buffers[i],
-            global_buffers[i],
-        ).expect("Failed to create shadow pass descriptor set");
+        let shadow_set = graphics_context
+            .create_global_descriptor_set(
+                albedo_tex.image_view, // DUMMY SAFE BINDING
+                albedo_tex.sampler,
+                instance_buffers[i],
+                light_buffers[i],
+                bone_buffers[i],
+                global_buffers[i],
+            )
+            .expect("Failed to create shadow pass descriptor set");
         shadow_pass_descriptor_sets.push(shadow_set);
 
-        println!("DEBUG: Frame {} Descriptor sets created (Main + ShadowSafe)", i);
+        println!(
+            "DEBUG: Frame {} Descriptor sets created (Main + ShadowSafe)",
+            i
+        );
     }
 
-    let material_descriptor_set = graphics_context.create_material_descriptor_set(&albedo_tex, &normal_tex, &mr_tex).expect("Failed to create material descriptor set");
+    let material_descriptor_set = graphics_context
+        .create_material_descriptor_set(&albedo_tex, &normal_tex, &mr_tex)
+        .expect("Failed to create material descriptor set");
 
     // Initialize Resource Loader
     let resource_loader = ResourceLoader::new(graphics_context.clone());
@@ -272,7 +332,7 @@ fn main() {
     let mut physics_world = PhysicsWorld::new();
     let mut game_world = GameWorld::new();
     let cmd_tx = game_world.command_sender.clone();
-    
+
     struct GameState {
         physics: PhysicsWorld,
         world: GameWorld,
@@ -285,8 +345,13 @@ fn main() {
 
     let player_pos = [0.0, 5.0, 5.0];
     let player_rb = physics_world.add_capsule_rigid_body(
-        0, player_pos, 0.6, 0.3, true, 
-        stfsc_engine::world::LAYER_DEFAULT, u32::MAX
+        0,
+        player_pos,
+        0.6,
+        0.3,
+        true,
+        stfsc_engine::world::LAYER_DEFAULT,
+        u32::MAX,
     );
     // Lock rotations for player controller
     {
@@ -310,41 +375,45 @@ fn main() {
         body.user_data = player_entity.to_bits().get() as u128;
     }
     // --- SCENE LOADING (Bundled or Test) ---
-    
+
     if let Some(ref bundle) = bundled_project {
         // Load scene from bundled project
         info!("Loading bundled scene: {}", bundle.manifest.startup_scene);
-        
+
         // Read scene JSON from bundle directory
         let scene_path = format!("assets/bundle/scenes/{}", bundle.manifest.startup_scene);
         if let Ok(scene_json) = std::fs::read_to_string(&scene_path) {
-            if let Ok(scene) = serde_json::from_str::<stfsc_engine::project::scene::Scene>(&scene_json) {
-                info!("Loaded scene '{}' with {} entities", scene.name, scene.entities.len());
-                
+            if let Ok(scene) =
+                serde_json::from_str::<stfsc_engine::project::scene::Scene>(&scene_json)
+            {
+                info!(
+                    "Loaded scene '{}' with {} entities",
+                    scene.name,
+                    scene.entities.len()
+                );
+
                 // Spawn entities from scene
                 for entity in &scene.entities {
                     let position = glam::Vec3::from(entity.position);
                     let rotation = glam::Quat::from_array(entity.rotation);
                     let scale = glam::Vec3::from(entity.scale);
-                    
+
                     // Determine mesh handle based on entity type
                     let mesh_handle = match &entity.entity_type {
-                        stfsc_engine::project::scene::EntityType::Primitive(prim) => {
-                            match prim {
-                                stfsc_engine::project::scene::PrimitiveType::Cube => Some(0),
-                                stfsc_engine::project::scene::PrimitiveType::Sphere => Some(1),
-                                stfsc_engine::project::scene::PrimitiveType::Cylinder => Some(2),
-                                stfsc_engine::project::scene::PrimitiveType::Plane => Some(3),
-                                stfsc_engine::project::scene::PrimitiveType::Capsule => Some(4),
-                                stfsc_engine::project::scene::PrimitiveType::Cone => Some(5),
-                            }
-                        }
+                        stfsc_engine::project::scene::EntityType::Primitive(prim) => match prim {
+                            stfsc_engine::project::scene::PrimitiveType::Cube => Some(0),
+                            stfsc_engine::project::scene::PrimitiveType::Sphere => Some(1),
+                            stfsc_engine::project::scene::PrimitiveType::Cylinder => Some(2),
+                            stfsc_engine::project::scene::PrimitiveType::Plane => Some(3),
+                            stfsc_engine::project::scene::PrimitiveType::Capsule => Some(4),
+                            stfsc_engine::project::scene::PrimitiveType::Cone => Some(5),
+                        },
                         stfsc_engine::project::scene::EntityType::Ground => Some(3), // Plane
                         stfsc_engine::project::scene::EntityType::Camera => None, // Skip cameras for rendering
                         stfsc_engine::project::scene::EntityType::Light { .. } => None, // Lights are handled separately
                         _ => Some(0), // Default to cube for other types
                     };
-                    
+
                     if let Some(mesh_idx) = mesh_handle {
                         let color = [
                             entity.material.albedo_color[0],
@@ -352,7 +421,7 @@ fn main() {
                             entity.material.albedo_color[2],
                             1.0,
                         ];
-                        
+
                         // Add physics if collision enabled
                         let rb_handle = if entity.collision_enabled {
                             let is_dynamic = !entity.is_static;
@@ -369,42 +438,50 @@ fn main() {
                         } else {
                             None
                         };
-                        
+
                         // Spawn ECS entity
                         let ecs_entity = if let Some(rb) = rb_handle {
                             game_world.ecs.spawn((
                                 stfsc_engine::world::StartupScene,
-                                Transform { position, rotation, scale },
+                                Transform {
+                                    position,
+                                    rotation,
+                                    scale,
+                                },
                                 MeshHandle(mesh_idx),
-                                Material { 
-                                    color, 
-                                    albedo_texture: None, 
-                                    metallic: entity.material.metallic, 
-                                    roughness: entity.material.roughness 
+                                Material {
+                                    color,
+                                    albedo_texture: None,
+                                    metallic: entity.material.metallic,
+                                    roughness: entity.material.roughness,
                                 },
                                 RigidBodyHandle(rb),
                             ))
                         } else {
                             game_world.ecs.spawn((
                                 stfsc_engine::world::StartupScene,
-                                Transform { position, rotation, scale },
+                                Transform {
+                                    position,
+                                    rotation,
+                                    scale,
+                                },
                                 MeshHandle(mesh_idx),
-                                Material { 
-                                    color, 
-                                    albedo_texture: None, 
-                                    metallic: entity.material.metallic, 
-                                    roughness: entity.material.roughness 
+                                Material {
+                                    color,
+                                    albedo_texture: None,
+                                    metallic: entity.material.metallic,
+                                    roughness: entity.material.roughness,
                                 },
                             ))
                         };
-                        
+
                         // Link physics user data
                         if let Some(rb) = rb_handle {
                             if let Some(body) = physics_world.rigid_body_set.get_mut(rb) {
                                 body.user_data = ecs_entity.to_bits().get() as u128;
                             }
                         }
-                        
+
                         info!("Spawned entity: {} at {:?}", entity.name, position);
                     }
                 }
@@ -416,13 +493,20 @@ fn main() {
         }
     } else {
         // --- DEFAULT TEST SCENE FOR ADVANCED SCRIPTING ---
-        
+
         // 1. Static Physics Floor (using a Plane)
         let floor_pos = [0.0, -0.1, 0.0];
         let collider_pos = [0.0, -0.1, 0.0];
-        let collider_extents = [GROUND_PLANE_HALF_EXTENT, 0.1, GROUND_PLANE_HALF_EXTENT]; 
-        let floor_rb = physics_world.add_box_rigid_body(0, collider_pos, collider_extents, false, stfsc_engine::world::LAYER_ENVIRONMENT, u32::MAX);
-        
+        let collider_extents = [GROUND_PLANE_HALF_EXTENT, 0.1, GROUND_PLANE_HALF_EXTENT];
+        let floor_rb = physics_world.add_box_rigid_body(
+            0,
+            collider_pos,
+            collider_extents,
+            false,
+            stfsc_engine::world::LAYER_ENVIRONMENT,
+            u32::MAX,
+        );
+
         let ground_scale = GROUND_PLANE_HALF_EXTENT * 2.0;
         let floor_id = game_world.ecs.spawn((
             stfsc_engine::world::StartupScene,
@@ -432,15 +516,34 @@ fn main() {
                 scale: glam::Vec3::new(ground_scale, 1.0, ground_scale),
             },
             MeshHandle(3), // Plane
-            Material { color: [0.15, 0.15, 0.15, 1.0], albedo_texture: None, metallic: 0.0, roughness: 0.5 },
+            Material {
+                color: [0.15, 0.15, 0.15, 1.0],
+                albedo_texture: None,
+                metallic: 0.0,
+                roughness: 0.5,
+            },
             RigidBodyHandle(floor_rb),
-            stfsc_engine::world::GroundPlane::new(GROUND_PLANE_HALF_EXTENT, GROUND_PLANE_HALF_EXTENT),
+            stfsc_engine::world::GroundPlane::new(
+                GROUND_PLANE_HALF_EXTENT,
+                GROUND_PLANE_HALF_EXTENT,
+            ),
         ));
-        physics_world.rigid_body_set.get_mut(floor_rb).unwrap().user_data = floor_id.to_bits().get() as u128;
+        physics_world
+            .rigid_body_set
+            .get_mut(floor_rb)
+            .unwrap()
+            .user_data = floor_id.to_bits().get() as u128;
 
         // 2. CollisionLogger Sphere
         let sphere_pos = [2.0, 8.0, 0.0];
-        let sphere_rb = physics_world.add_sphere_rigid_body(0, sphere_pos, 0.5, true, stfsc_engine::world::LAYER_PROP, u32::MAX);
+        let sphere_rb = physics_world.add_sphere_rigid_body(
+            0,
+            sphere_pos,
+            0.5,
+            true,
+            stfsc_engine::world::LAYER_PROP,
+            u32::MAX,
+        );
         let sphere_id = game_world.ecs.spawn((
             stfsc_engine::world::StartupScene,
             Transform {
@@ -449,17 +552,43 @@ fn main() {
                 scale: glam::Vec3::splat(1.0),
             },
             MeshHandle(1), // Sphere
-            Material { color: [0.3, 0.8, 0.3, 1.0], albedo_texture: None, metallic: 0.0, roughness: 0.5 },
+            Material {
+                color: [0.3, 0.8, 0.3, 1.0],
+                albedo_texture: None,
+                metallic: 0.0,
+                roughness: 0.5,
+            },
             RigidBodyHandle(sphere_rb),
         ));
-        physics_world.rigid_body_set.get_mut(sphere_rb).unwrap().user_data = sphere_id.to_bits().get() as u128;
-        game_world.ecs.insert_one(sphere_id, stfsc_engine::world::DynamicScript::new(
-            game_world.script_registry.create("CollisionLogger").unwrap()
-        )).unwrap();
+        physics_world
+            .rigid_body_set
+            .get_mut(sphere_rb)
+            .unwrap()
+            .user_data = sphere_id.to_bits().get() as u128;
+        game_world
+            .ecs
+            .insert_one(
+                sphere_id,
+                stfsc_engine::world::DynamicScript::from_named(
+                    "CollisionLogger",
+                    game_world
+                        .script_registry
+                        .create("CollisionLogger")
+                        .unwrap(),
+                ),
+            )
+            .unwrap();
 
         // 3. TouchToDestroy Cube
         let cube_pos = [-2.0, 5.0, 0.0];
-        let cube_rb = physics_world.add_box_rigid_body(0, cube_pos, [0.5, 0.5, 0.5], true, stfsc_engine::world::LAYER_PROP, stfsc_engine::world::LAYER_ENVIRONMENT | stfsc_engine::world::LAYER_PROP);
+        let cube_rb = physics_world.add_box_rigid_body(
+            0,
+            cube_pos,
+            [0.5, 0.5, 0.5],
+            true,
+            stfsc_engine::world::LAYER_PROP,
+            stfsc_engine::world::LAYER_ENVIRONMENT | stfsc_engine::world::LAYER_PROP,
+        );
         let cube_id = game_world.ecs.spawn((
             stfsc_engine::world::StartupScene,
             Transform {
@@ -467,24 +596,38 @@ fn main() {
                 rotation: glam::Quat::IDENTITY,
                 scale: glam::Vec3::splat(1.0),
             },
-            MeshHandle(0), 
-            Material { color: [0.8, 0.3, 0.3, 1.0], albedo_texture: None, metallic: 0.0, roughness: 0.5 },
+            MeshHandle(0),
+            Material {
+                color: [0.8, 0.3, 0.3, 1.0],
+                albedo_texture: None,
+                metallic: 0.0,
+                roughness: 0.5,
+            },
             RigidBodyHandle(cube_rb),
         ));
-        physics_world.rigid_body_set.get_mut(cube_rb).unwrap().user_data = cube_id.to_bits().get() as u128;
-        game_world.ecs.insert_one(cube_id, stfsc_engine::world::DynamicScript::new(
-            game_world.script_registry.create("TouchToDestroy").unwrap()
-        )).unwrap();
+        physics_world
+            .rigid_body_set
+            .get_mut(cube_rb)
+            .unwrap()
+            .user_data = cube_id.to_bits().get() as u128;
+        game_world
+            .ecs
+            .insert_one(
+                cube_id,
+                stfsc_engine::world::DynamicScript::from_named(
+                    "TouchToDestroy",
+                    game_world.script_registry.create("TouchToDestroy").unwrap(),
+                ),
+            )
+            .unwrap();
     }
-    // (Optional: Add TestBounce via separate DynamicScript if we supported multiple, 
-    // but the current system replaced them. Let's stick to one primary test script per entity for now.)
 
     let game_state = Arc::new(RwLock::new(GameState {
         physics: physics_world,
         world: game_world,
         player_entity,
         player_rb: stfsc_engine::world::RigidBodyHandle(player_rb),
-        player_position: glam::Vec3::from(player_pos), 
+        player_position: glam::Vec3::from(player_pos),
         player_yaw: 0.0, // Face towards -Z (scene center)
         player_pitch: 0.0,
     }));
@@ -519,19 +662,35 @@ fn main() {
                         use tokio::io::AsyncReadExt;
                         loop {
                             let mut len_buf = [0u8; 4];
-                            if socket.read_exact(&mut len_buf).await.is_err() { break; }
+                            if socket.read_exact(&mut len_buf).await.is_err() {
+                                break;
+                            }
                             let len = u32::from_le_bytes(len_buf) as usize;
                             let mut data = vec![0u8; len];
-                            if socket.read_exact(&mut data).await.is_err() { break; }
-                            if let Ok(update) = bincode::deserialize::<stfsc_engine::world::SceneUpdate>(&data) {
+                            if socket.read_exact(&mut data).await.is_err() {
+                                break;
+                            }
+                            if let Ok(update) =
+                                bincode::deserialize::<stfsc_engine::world::SceneUpdate>(&data)
+                            {
                                 match &update {
-                                    stfsc_engine::world::SceneUpdate::UploadTexture { id, .. } => {
+                                    stfsc_engine::world::SceneUpdate::UploadTexture {
+                                        id, ..
+                                    } => {
                                         // Texture upload received
-                                        info!("Received UploadTexture (ID: {}, Size: {} bytes)", id, len);
+                                        info!(
+                                            "Received UploadTexture (ID: {}, Size: {} bytes)",
+                                            id, len
+                                        );
                                     }
-                                    stfsc_engine::world::SceneUpdate::UploadSound { id, .. } => {
+                                    stfsc_engine::world::SceneUpdate::UploadSound {
+                                        id, ..
+                                    } => {
                                         // Sound upload received
-                                        info!("Received UploadSound (ID: {}, Size: {} bytes)", id, len);
+                                        info!(
+                                            "Received UploadSound (ID: {}, Size: {} bytes)",
+                                            id, len
+                                        );
                                     }
                                     _ => {
                                         // Scene update received
@@ -540,7 +699,10 @@ fn main() {
                                 }
                                 let _ = tx.send(update).await;
                             } else {
-                                println!("NETWORK ERROR: Failed to deserialize SceneUpdate (len: {})", len);
+                                println!(
+                                    "NETWORK ERROR: Failed to deserialize SceneUpdate (len: {})",
+                                    len
+                                );
                                 info!("Failed to deserialize SceneUpdate (len: {})", len);
                             }
                         }
@@ -557,20 +719,23 @@ fn main() {
             let start = std::time::Instant::now();
             {
                 if let Ok(mut state) = game_state_logic.write() {
-                    state.physics.step();
-            
+                    state.physics.step_with_dt(0.016);
+
                     // Sync player position FROM physics
                     let player_rb_handle = state.player_rb.0;
                     let (mut phys_pos, _rot) = {
-                         let body = state.physics.rigid_body_set.get(player_rb_handle).unwrap();
-                         (body.translation().clone(), body.rotation().clone())
+                        let body = state.physics.rigid_body_set.get(player_rb_handle).unwrap();
+                        (body.translation().clone(), body.rotation().clone())
                     };
-                    
+
                     // Respawn Logic
                     if state.world.respawn_enabled && phys_pos.y < state.world.respawn_y {
                         let spawn_pos = state.world.player_start_transform.position;
                         if let Some(body) = state.physics.rigid_body_set.get_mut(player_rb_handle) {
-                            body.set_translation(rapier3d::na::Vector3::new(spawn_pos.x, spawn_pos.y, spawn_pos.z), true);
+                            body.set_translation(
+                                rapier3d::na::Vector3::new(spawn_pos.x, spawn_pos.y, spawn_pos.z),
+                                true,
+                            );
                             body.set_linvel(rapier3d::na::Vector3::zeros(), true);
                             phys_pos = body.translation().clone();
                             // Player respawned
@@ -578,19 +743,28 @@ fn main() {
                     }
 
                     // Offset camera to eye level (0.8m above 0.9m center = 1.7m standing height)
-                    let eye_offset = glam::Vec3::new(0.0, 0.8, 0.0); 
-                    state.player_position = glam::Vec3::new(phys_pos.x, phys_pos.y, phys_pos.z) + eye_offset;
+                    let eye_offset = glam::Vec3::new(0.0, 0.8, 0.0);
+                    state.player_position =
+                        glam::Vec3::new(phys_pos.x, phys_pos.y, phys_pos.z) + eye_offset;
                     let pos = state.player_position; // Define pos as Glam Vec3 for update_streaming
 
                     // Sync player entity transform
                     let player_ent = state.player_entity;
                     let mut has_parent = false;
-                    if let Ok(hierarchy) = state.world.ecs.get::<&stfsc_engine::world::Hierarchy>(player_ent) {
+                    if let Ok(hierarchy) = state
+                        .world
+                        .ecs
+                        .get::<&stfsc_engine::world::Hierarchy>(player_ent)
+                    {
                         has_parent = hierarchy.parent.is_some();
                     }
 
                     if has_parent {
-                        if let Ok(mut lt) = state.world.ecs.get::<&mut stfsc_engine::world::LocalTransform>(player_ent) {
+                        if let Ok(mut lt) = state
+                            .world
+                            .ecs
+                            .get::<&mut stfsc_engine::world::LocalTransform>(player_ent)
+                        {
                             lt.position = state.player_position;
                             lt.rotation = glam::Quat::from_rotation_y(state.player_yaw);
                         }
@@ -603,22 +777,28 @@ fn main() {
 
                     let GameState { world, physics, .. } = &mut *state;
                     world.update_streaming(pos, physics);
-                    
+
                     let ui_events = std::mem::take(&mut world.pending_ui_events);
                     world.update_logic(physics, 0.016, ui_events);
 
                     // Sync physics to ECS - Keep world transforms and update local transforms if no parent
                     use rayon::prelude::*;
-                    let updates: Vec<_> = world.ecs.query::<(&Transform, &stfsc_engine::world::RigidBodyHandle)>()
+                    let updates: Vec<_> = world
+                        .ecs
+                        .query::<(&Transform, &stfsc_engine::world::RigidBodyHandle)>()
                         .iter()
                         .map(|(id, (_, handle))| (id, handle.0))
-                        .collect::<Vec<_>>() 
+                        .collect::<Vec<_>>()
                         .into_par_iter()
                         .filter_map(|(id, handle_idx)| {
                             physics.rigid_body_set.get(handle_idx).map(|body| {
                                 let p = body.translation();
                                 let r = body.rotation();
-                                (id, glam::Vec3::new(p.x, p.y, p.z), glam::Quat::from_xyzw(r.i, r.j, r.k, r.w))
+                                (
+                                    id,
+                                    glam::Vec3::new(p.x, p.y, p.z),
+                                    glam::Quat::from_xyzw(r.i, r.j, r.k, r.w),
+                                )
                             })
                         })
                         .collect();
@@ -629,8 +809,13 @@ fn main() {
                             t.rotation = r;
                         }
                         // Update local transform too for standalone physics objects or children
-                        if let Ok(mut lt) = world.ecs.get::<&mut stfsc_engine::world::LocalTransform>(id) {
-                            if let Ok(hierarchy) = world.ecs.get::<&stfsc_engine::world::Hierarchy>(id) {
+                        if let Ok(mut lt) = world
+                            .ecs
+                            .get::<&mut stfsc_engine::world::LocalTransform>(id)
+                        {
+                            if let Ok(hierarchy) =
+                                world.ecs.get::<&stfsc_engine::world::Hierarchy>(id)
+                            {
                                 if let Some(parent) = hierarchy.parent {
                                     if let Ok(pt) = world.ecs.get::<&Transform>(parent) {
                                         // p = pt.pos + (pt.rot * (pt.scale * lt.pos))
@@ -638,7 +823,8 @@ fn main() {
                                         // pt.rot.inv() * (p - pt.pos) = pt.scale * lt.pos
                                         // lt.pos = (pt.rot.inv() * (p - pt.pos)) / pt.scale
                                         let inv_parent_rot = pt.rotation.inverse();
-                                        lt.position = (inv_parent_rot * (p - pt.position)) / pt.scale;
+                                        lt.position =
+                                            (inv_parent_rot * (p - pt.position)) / pt.scale;
                                         lt.rotation = inv_parent_rot * r;
                                     } else {
                                         // Fallback if parent not found
@@ -673,21 +859,49 @@ fn main() {
     // Load Primitives
     for i in 0..6 {
         let mesh = stfsc_engine::world::create_primitive(i);
-        let (vbo, vbo_mem) = graphics_context.create_buffer((mesh.vertices.len() * std::mem::size_of::<stfsc_engine::world::Vertex>()) as u64, vk::BufferUsageFlags::VERTEX_BUFFER, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT).unwrap();
+        let (vbo, vbo_mem) = graphics_context
+            .create_buffer(
+                (mesh.vertices.len() * std::mem::size_of::<stfsc_engine::world::Vertex>()) as u64,
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .unwrap();
         unsafe {
-            let ptr = graphics_context.device.map_memory(vbo_mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).unwrap();
-            std::ptr::copy_nonoverlapping(mesh.vertices.as_ptr(), ptr as *mut stfsc_engine::world::Vertex, mesh.vertices.len());
+            let ptr = graphics_context
+                .device
+                .map_memory(vbo_mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                .unwrap();
+            std::ptr::copy_nonoverlapping(
+                mesh.vertices.as_ptr(),
+                ptr as *mut stfsc_engine::world::Vertex,
+                mesh.vertices.len(),
+            );
             graphics_context.device.unmap_memory(vbo_mem);
         }
-        let (ibo, ibo_mem) = graphics_context.create_buffer((mesh.indices.len() * std::mem::size_of::<u32>()) as u64, vk::BufferUsageFlags::INDEX_BUFFER, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT).unwrap();
+        let (ibo, ibo_mem) = graphics_context
+            .create_buffer(
+                (mesh.indices.len() * std::mem::size_of::<u32>()) as u64,
+                vk::BufferUsageFlags::INDEX_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .unwrap();
         unsafe {
-            let ptr = graphics_context.device.map_memory(ibo_mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).unwrap();
-            std::ptr::copy_nonoverlapping(mesh.indices.as_ptr(), ptr as *mut u32, mesh.indices.len());
+            let ptr = graphics_context
+                .device
+                .map_memory(ibo_mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                .unwrap();
+            std::ptr::copy_nonoverlapping(
+                mesh.indices.as_ptr(),
+                ptr as *mut u32,
+                mesh.indices.len(),
+            );
             graphics_context.device.unmap_memory(ibo_mem);
         }
         mesh_library.push(GpuMesh {
-            vertex_buffer: vbo, vertex_memory: vbo_mem,
-            index_buffer: ibo, index_memory: ibo_mem,
+            vertex_buffer: vbo,
+            vertex_memory: vbo_mem,
+            index_buffer: ibo,
+            index_memory: ibo_mem,
             index_count: mesh.indices.len() as u32,
             material_descriptor_set,
             custom_textures: Vec::new(),
@@ -700,7 +914,7 @@ fn main() {
                     max = max.max(pos);
                 }
                 stfsc_engine::graphics::occlusion::AABB::new(min, max)
-            }
+            },
         });
     }
 
@@ -1092,6 +1306,69 @@ fn main() {
                         window.set_cursor_visible(true);
                         let _ = window.set_cursor_grab(CursorGrabMode::None);
                     }
+
+                    let head_rot = glam::Quat::from_rotation_y(state.player_yaw)
+                        * glam::Quat::from_rotation_x(state.player_pitch);
+                    let mut xr_snapshot = stfsc_engine::world::scripting::XrInputSnapshot::default();
+                    xr_snapshot.head = stfsc_engine::world::scripting::XrPose::new(
+                        state.player_position,
+                        head_rot,
+                        true,
+                    );
+
+                    let mut stick = glam::Vec2::ZERO;
+                    if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyA)) { stick.x -= 1.0; }
+                    if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyD)) { stick.x += 1.0; }
+                    if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyW)) { stick.y += 1.0; }
+                    if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyS)) { stick.y -= 1.0; }
+                    if stick.length_squared() > 1.0 {
+                        stick = stick.normalize();
+                    }
+
+                    let left_pose = stfsc_engine::world::scripting::XrPose::new(
+                        state.player_position + head_rot * glam::Vec3::new(-0.28, -0.28, -0.45),
+                        head_rot,
+                        true,
+                    );
+                    let right_pose = stfsc_engine::world::scripting::XrPose::new(
+                        state.player_position + head_rot * glam::Vec3::new(0.28, -0.28, -0.45),
+                        head_rot,
+                        true,
+                    );
+
+                    xr_snapshot.left.active = true;
+                    xr_snapshot.left.tracked = true;
+                    xr_snapshot.left.grip_pose = left_pose;
+                    xr_snapshot.left.aim_pose = left_pose;
+                    xr_snapshot.left.thumbstick = stick;
+                    xr_snapshot.left.grip = if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyQ)) { 1.0 } else { 0.0 };
+                    xr_snapshot.left.primary_button = keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyX));
+                    xr_snapshot.left.secondary_button = keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyY));
+
+                    xr_snapshot.right.active = true;
+                    xr_snapshot.right.tracked = true;
+                    xr_snapshot.right.grip_pose = right_pose;
+                    xr_snapshot.right.aim_pose = right_pose;
+                    xr_snapshot.right.trigger = if ui_state.pointer_pressed { 1.0 } else { 0.0 };
+                    xr_snapshot.right.grip = if keys_pressed.contains(&PhysicalKey::Code(KeyCode::KeyE)) { 1.0 } else { 0.0 };
+                    xr_snapshot.right.primary_button = keys_pressed.contains(&PhysicalKey::Code(KeyCode::Space));
+                    xr_snapshot.right.secondary_button = keys_pressed.contains(&PhysicalKey::Code(KeyCode::ShiftLeft))
+                        || keys_pressed.contains(&PhysicalKey::Code(KeyCode::ShiftRight));
+
+                    xr_snapshot.set_action_pressed("jump", keys_pressed.contains(&PhysicalKey::Code(KeyCode::Space)));
+                    xr_snapshot.set_action_pressed(
+                        "sprint",
+                        keys_pressed.contains(&PhysicalKey::Code(KeyCode::ShiftLeft))
+                            || keys_pressed.contains(&PhysicalKey::Code(KeyCode::ShiftRight)),
+                    );
+                    state.world.set_xr_input_snapshot(xr_snapshot);
+
+                    for request in state.world.drain_xr_haptics() {
+                        info!(
+                            "Desktop XR haptic request: {:?}, amp {:.2}, duration {:.3}s",
+                            request.hand, request.amplitude, request.duration_seconds
+                        );
+                    }
                 }
 
                 // 0. Update Player Velocity - only when cursor is captured
@@ -1219,10 +1496,16 @@ fn main() {
                 // Texture Processing - Queue GPU textures for background loading
                 if let Ok(mut state) = game_state.write() {
                     let pending: Vec<_> = state.world.pending_texture_uploads.drain().collect();
+                    let max_texture_uploads = graphics_context.optimization_settings.max_texture_uploads_per_frame;
+                    let mut queued_textures = 0usize;
                     for (texture_id, data) in pending {
                         if !texture_cache.contains_key(&texture_id) {
-                            // Texture queued for load
-                            resource_loader.queue_texture(texture_id, data);
+                            if queued_textures < max_texture_uploads {
+                                resource_loader.queue_texture(texture_id, data);
+                                queued_textures += 1;
+                            } else {
+                                state.world.pending_texture_uploads.insert(texture_id, data);
+                            }
                         }
                     }
                 }
@@ -1250,21 +1533,27 @@ fn main() {
                 let light_memory = light_memories[frame_index];
                 let global_ptr = global_ptrs[frame_index];
                 let global_memory = global_memories[frame_index];
-                let global_memory = global_memories[frame_index];
                 let global_descriptor_set = global_descriptor_sets[frame_index];
                 let shadow_safe_descriptor_set = shadow_pass_descriptor_sets[frame_index]; // Select safe set for this frame
 
                 // 2. Resource Logic (Mesh Uploads)
 
                 if let Ok(state) = game_state.try_read() {
+                    let max_mesh_uploads = graphics_context.optimization_settings.max_mesh_uploads_per_frame;
+                    let mut queued_meshes = 0usize;
                     for (id, (mesh, _)) in state.world.ecs.query::<(&Mesh, &Transform)>().iter() {
                         if state.world.ecs.get::<&GpuMesh>(id).is_ok() { continue; }
                         if pending_uploads.contains(&id) { continue; }
+                        if queued_meshes >= max_mesh_uploads { break; }
                         resource_loader.queue_mesh(id, mesh.clone());
                         pending_uploads.insert(id);
+                        queued_meshes += 1;
                     }
                 }
-                for result in resource_loader.poll_processed() {
+                for result in resource_loader
+                    .poll_processed()
+                    .take(graphics_context.optimization_settings.max_completed_uploads_per_frame)
+                {
                     match result {
                         ResourceLoadResult::Mesh(id, loaded_data) => {
                             pending_uploads.remove(&id);
@@ -1290,6 +1579,9 @@ fn main() {
                                 Err(e) => println!("Failed to create material set for texture: {}", e),
                             }
                         }
+                        ResourceLoadResult::Failed(failure) => {
+                            println!("RESOURCE LOADER ERROR: {}: {}", failure.label, failure.reason);
+                        }
                     }
                 }
 
@@ -1299,7 +1591,7 @@ fn main() {
                 let mut textured_draws: Vec<(usize, InstanceData, vk::DescriptorSet)> = Vec::new();
 
                 let (view_proj, _old_proj, observer_pos, _observer_rot) = {
-                    let mut state = game_state.write().unwrap(); // Use write lock to update camera/player
+                    let state = game_state.read().unwrap();
                     
 
                     
@@ -1347,6 +1639,7 @@ fn main() {
                         .collect();
 
                     let frustum = *occlusion_culler.get_frustum();
+                    let enable_frustum_culling = graphics_context.optimization_settings.enable_frustum_culling;
 
                     let mesh_results: Vec<_> = mesh_data.into_par_iter().filter_map(|(id, handle, transform, material)| {
                         if handle.0 >= mesh_library.len() { return None; }
@@ -1354,7 +1647,7 @@ fn main() {
                         let gpu_mesh = &mesh_library[handle.0];
                         let model = glam::Mat4::from_scale_rotation_translation(transform.scale, transform.rotation, transform.position);
                         
-                        if frustum.intersects_aabb(&gpu_mesh.aabb.transform(model)) {
+                        if !enable_frustum_culling || frustum.intersects_aabb(&gpu_mesh.aabb.transform(model)) {
                             let entity_id = id.id() as u64;
                             let color = material.color;
                             let metallic = material.metallic;
@@ -1379,7 +1672,7 @@ fn main() {
                     
                     let custom_results: Vec<_> = custom_entities.into_par_iter().filter_map(|(id, gpu_mesh, transform, material)| {
                         let model = glam::Mat4::from_scale_rotation_translation(transform.scale, transform.rotation, transform.position);
-                        if frustum.intersects_aabb(&gpu_mesh.aabb.transform(model)) {
+                        if !enable_frustum_culling || frustum.intersects_aabb(&gpu_mesh.aabb.transform(model)) {
                             let entity_id = id.id() as u64;
                             
                             // Check for custom texture (same as MeshHandles)
@@ -1456,6 +1749,14 @@ fn main() {
                         .size(vk::WHOLE_SIZE)
                         .build();
                     unsafe { graphics_context.device.flush_mapped_memory_ranges(&[light_range]).unwrap(); }
+
+                    let current_entities: HashSet<u64> = state
+                        .world
+                        .ecs
+                        .iter()
+                        .map(|entry| entry.entity().id() as u64)
+                        .collect();
+                    prev_transforms.retain(|id, _| current_entities.contains(id));
 
                     (view_proj, prev_view_proj, cam_pos, rotation)
                 }; // End of GameState Lock

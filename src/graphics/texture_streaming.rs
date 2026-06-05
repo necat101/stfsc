@@ -1,6 +1,7 @@
 // STFSC Engine - Texture Streaming Manager
 // Handles KTX2/ASTC compressed texture loading and streaming for mobile VR
 
+use super::GraphicsOptimizationSettings;
 use ash::vk;
 use std::collections::HashMap;
 
@@ -66,6 +67,7 @@ pub struct StreamedTexture {
     pub mip_levels: u32,
     pub resident_mips: u32, // How many mips are currently loaded (from highest mip)
     pub format: vk::Format,
+    pub memory_size: usize,
     pub last_used_frame: u64, // For LRU eviction
 }
 
@@ -102,6 +104,10 @@ impl TextureStreamingManager {
             current_memory: 0,
             frame_count: 0,
         }
+    }
+
+    pub fn for_settings(settings: GraphicsOptimizationSettings) -> Self {
+        Self::new(settings.sanitized().texture_streaming_budget_mb)
     }
 
     /// Request a texture to be loaded
@@ -169,25 +175,6 @@ impl TextureStreamingManager {
             // Create Texture from KTX2
             match graphics_context.create_texture_from_ktx2(&data) {
                 Ok((image, memory, view)) => {
-                    // Create default sampler
-                    let sampler_info = vk::SamplerCreateInfo::builder()
-                        .mag_filter(vk::Filter::LINEAR)
-                        .min_filter(vk::Filter::LINEAR)
-                        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                        .address_mode_u(vk::SamplerAddressMode::REPEAT)
-                        .address_mode_v(vk::SamplerAddressMode::REPEAT)
-                        .address_mode_w(vk::SamplerAddressMode::REPEAT)
-                        .max_anisotropy(16.0)
-                        .anisotropy_enable(true) // Should check device limits, but Quest 3 supports it
-                        .max_lod(vk::LOD_CLAMP_NONE); // Allows access to all mips provided by ImageView
-
-                    let sampler = unsafe {
-                        graphics_context
-                            .device
-                            .create_sampler(&sampler_info, None)
-                            .unwrap()
-                    };
-
                     // Determine dimensions/format from image (we don't have them easily from return value without querying or parsing again)
                     // Better to have create_texture_from_ktx2 return a Texture struct or metadata.
                     // But we can just assume it worked. For width/height/mips, we could parse header again or refactor create_function.
@@ -205,6 +192,18 @@ impl TextureStreamingManager {
                     // Use local helper
                     let format =
                         self::ktx2::ktx2_format_to_vk(header.format.unwrap().0.get()).unwrap();
+                    let sampler = match graphics_context.create_texture_sampler(mip_levels) {
+                        Ok(sampler) => sampler,
+                        Err(e) => {
+                            log::error!("Failed to create sampler for {}: {:?}", request.path, e);
+                            unsafe {
+                                graphics_context.device.destroy_image_view(view, None);
+                                graphics_context.device.destroy_image(image, None);
+                                graphics_context.device.free_memory(memory, None);
+                            }
+                            continue;
+                        }
+                    };
 
                     let streamed = StreamedTexture {
                         image,
@@ -216,12 +215,16 @@ impl TextureStreamingManager {
                         mip_levels,
                         resident_mips: mip_levels, // We loaded all mips in create_texture_from_ktx2
                         format,
+                        memory_size: data.len(),
                         last_used_frame: self.frame_count,
                     };
 
                     self.current_memory += data.len(); // Approximate usage
                     self.textures.insert(request.path.clone(), streamed);
                     log::info!("Texture loaded: {}", request.path);
+                    if self.current_memory > self.memory_budget {
+                        self.evict_lru(graphics_context, 0);
+                    }
                 }
                 Err(e) => {
                     log::error!("Failed to create KTX2 texture {}: {:?}", request.path, e);
@@ -252,8 +255,9 @@ impl TextureStreamingManager {
     }
 
     /// Evict oldest textures to free memory
-    pub fn evict_lru(&mut self, target_free: usize) {
-        if self.current_memory <= self.memory_budget - target_free {
+    pub fn evict_lru(&mut self, graphics_context: &super::GraphicsContext, target_free: usize) {
+        let target_usage = self.memory_budget.saturating_sub(target_free);
+        if self.current_memory <= target_usage {
             return; // Already have enough free
         }
 
@@ -267,14 +271,19 @@ impl TextureStreamingManager {
 
         // Evict oldest until we have enough space
         for (path, _) in by_age {
-            if self.current_memory <= self.memory_budget - target_free {
+            if self.current_memory <= target_usage {
                 break;
             }
 
-            // TODO: Actually destroy texture resources
-            if let Some(_tex) = self.textures.remove(&path) {
+            if let Some(tex) = self.textures.remove(&path) {
+                unsafe {
+                    graphics_context.device.destroy_sampler(tex.sampler, None);
+                    graphics_context.device.destroy_image_view(tex.view, None);
+                    graphics_context.device.destroy_image(tex.image, None);
+                    graphics_context.device.free_memory(tex.memory, None);
+                }
+                self.current_memory = self.current_memory.saturating_sub(tex.memory_size);
                 log::info!("Evicted texture: {}", path);
-                // self.current_memory -= tex.memory_size;
             }
         }
     }

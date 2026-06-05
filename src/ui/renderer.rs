@@ -2,8 +2,8 @@
 //!
 //! Renders UI elements as an overlay after the main 3D scene.
 
-use crate::ui::{UiCanvas, UiVertex};
 use crate::graphics::GraphicsContext;
+use crate::ui::{UiCanvas, UiVertex};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::sync::Arc;
@@ -18,31 +18,31 @@ pub struct UiRenderer {
     /// Reference to graphics context
     #[allow(dead_code)]
     graphics: Arc<GraphicsContext>,
-    
+
     /// UI pipeline
     pub pipeline: vk::Pipeline,
     /// Pipeline layout
     pub pipeline_layout: vk::PipelineLayout,
-    
+
     /// Vertex buffer for UI quads
     pub vertex_buffer: vk::Buffer,
     pub vertex_memory: vk::DeviceMemory,
-    
+
     /// Index buffer for UI quads
     pub index_buffer: vk::Buffer,
     pub index_memory: vk::DeviceMemory,
-    
+
     /// Mapped vertex buffer pointer
     vertex_ptr: *mut UiVertex,
     /// Mapped index buffer pointer
     index_ptr: *mut u32,
-    
+
     /// White 1x1 texture for solid color rendering
     pub white_texture: vk::Image,
     pub white_texture_memory: vk::DeviceMemory,
     pub white_texture_view: vk::ImageView,
     pub white_sampler: vk::Sampler,
-    
+
     /// Descriptor set layout for UI texture
     pub descriptor_set_layout: vk::DescriptorSetLayout,
     /// Descriptor set for white texture
@@ -62,37 +62,48 @@ impl UiRenderer {
     /// Create a new UI renderer
     pub fn new(graphics: Arc<GraphicsContext>) -> Result<Self> {
         let device = &graphics.device;
-        
+
         // Create vertex buffer
         let vertex_buffer_size = (MAX_UI_VERTICES * std::mem::size_of::<UiVertex>()) as u64;
-        let (vertex_buffer, vertex_memory) = graphics.create_buffer(
-            vertex_buffer_size,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        ).context("Failed to create UI vertex buffer")?;
-        
+        let (vertex_buffer, vertex_memory) = graphics
+            .create_buffer(
+                vertex_buffer_size,
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .context("Failed to create UI vertex buffer")?;
+
         let vertex_ptr = unsafe {
-            device.map_memory(vertex_memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+            device
+                .map_memory(
+                    vertex_memory,
+                    0,
+                    vk::WHOLE_SIZE,
+                    vk::MemoryMapFlags::empty(),
+                )
                 .context("Failed to map UI vertex buffer")? as *mut UiVertex
         };
 
         // Create index buffer
         let index_buffer_size = (MAX_UI_INDICES * std::mem::size_of::<u32>()) as u64;
-        let (index_buffer, index_memory) = graphics.create_buffer(
-            index_buffer_size,
-            vk::BufferUsageFlags::INDEX_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        ).context("Failed to create UI index buffer")?;
-        
+        let (index_buffer, index_memory) = graphics
+            .create_buffer(
+                index_buffer_size,
+                vk::BufferUsageFlags::INDEX_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .context("Failed to create UI index buffer")?;
+
         let index_ptr = unsafe {
-            device.map_memory(index_memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+            device
+                .map_memory(index_memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
                 .context("Failed to map UI index buffer")? as *mut u32
         };
 
         // Create 1x1 white texture for solid color rendering
-        let (white_texture, white_texture_memory, white_texture_view) = 
+        let (white_texture, white_texture_memory, white_texture_view) =
             Self::create_white_texture(&graphics)?;
-        
+
         // Create sampler
         let sampler_info = vk::SamplerCreateInfo::builder()
             .mag_filter(vk::Filter::LINEAR)
@@ -109,27 +120,26 @@ impl UiRenderer {
             .min_lod(0.0)
             .max_lod(0.0)
             .mip_lod_bias(0.0);
-        
+
         let white_sampler = unsafe {
-            device.create_sampler(&sampler_info, None)
+            device
+                .create_sampler(&sampler_info, None)
                 .context("Failed to create UI sampler")?
         };
 
         // Create descriptor set layout
-        let bindings = [
-            vk::DescriptorSetLayoutBinding::builder()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
-                .build(),
-        ];
-        
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::builder()
-            .bindings(&bindings);
-        
+        let bindings = [vk::DescriptorSetLayoutBinding::builder()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+            .build()];
+
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
+
         let descriptor_set_layout = unsafe {
-            device.create_descriptor_set_layout(&layout_info, None)
+            device
+                .create_descriptor_set_layout(&layout_info, None)
                 .context("Failed to create UI descriptor set layout")?
         };
 
@@ -138,9 +148,10 @@ impl UiRenderer {
         let alloc_info = vk::DescriptorSetAllocateInfo::builder()
             .descriptor_pool(graphics.descriptor_pool)
             .set_layouts(&layouts);
-        
+
         let descriptor_set = unsafe {
-            device.allocate_descriptor_sets(&alloc_info)
+            device
+                .allocate_descriptor_sets(&alloc_info)
                 .context("Failed to allocate UI descriptor set")?[0]
         };
 
@@ -150,7 +161,7 @@ impl UiRenderer {
             .image_view(white_texture_view)
             .sampler(white_sampler)
             .build()];
-        
+
         let descriptor_writes = [vk::WriteDescriptorSet::builder()
             .dst_set(descriptor_set)
             .dst_binding(0)
@@ -158,7 +169,7 @@ impl UiRenderer {
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .image_info(&image_info)
             .build()];
-        
+
         unsafe {
             device.update_descriptor_sets(&descriptor_writes, &[]);
         }
@@ -169,16 +180,17 @@ impl UiRenderer {
             .offset(0)
             .size(std::mem::size_of::<UiPushConstants>() as u32)
             .build();
-        
+
         let push_constant_ranges = [push_constant_range];
         let set_layouts = [descriptor_set_layout];
-        
+
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::builder()
             .set_layouts(&set_layouts)
             .push_constant_ranges(&push_constant_ranges);
-        
+
         let pipeline_layout = unsafe {
-            device.create_pipeline_layout(&pipeline_layout_info, None)
+            device
+                .create_pipeline_layout(&pipeline_layout_info, None)
                 .context("Failed to create UI pipeline layout")?
         };
 
@@ -206,13 +218,19 @@ impl UiRenderer {
     }
 
     /// Create a 1x1 white texture
-    fn create_white_texture(graphics: &GraphicsContext) -> Result<(vk::Image, vk::DeviceMemory, vk::ImageView)> {
+    fn create_white_texture(
+        graphics: &GraphicsContext,
+    ) -> Result<(vk::Image, vk::DeviceMemory, vk::ImageView)> {
         let device = &graphics.device;
-        
+
         // Create image
         let image_info = vk::ImageCreateInfo::builder()
             .image_type(vk::ImageType::TYPE_2D)
-            .extent(vk::Extent3D { width: 1, height: 1, depth: 1 })
+            .extent(vk::Extent3D {
+                width: 1,
+                height: 1,
+                depth: 1,
+            })
             .mip_levels(1)
             .array_layers(1)
             .format(vk::Format::R8G8B8A8_UNORM)
@@ -221,30 +239,33 @@ impl UiRenderer {
             .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .samples(vk::SampleCountFlags::TYPE_1);
-        
+
         let image = unsafe {
-            device.create_image(&image_info, None)
+            device
+                .create_image(&image_info, None)
                 .context("Failed to create white texture image")?
         };
-        
+
         // Allocate memory
         let mem_requirements = unsafe { device.get_image_memory_requirements(image) };
         let memory_type = graphics.find_memory_type(
             mem_requirements.memory_type_bits,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )?;
-        
+
         let alloc_info = vk::MemoryAllocateInfo::builder()
             .allocation_size(mem_requirements.size)
             .memory_type_index(memory_type);
-        
+
         let memory = unsafe {
-            device.allocate_memory(&alloc_info, None)
+            device
+                .allocate_memory(&alloc_info, None)
                 .context("Failed to allocate white texture memory")?
         };
-        
+
         unsafe {
-            device.bind_image_memory(image, memory, 0)
+            device
+                .bind_image_memory(image, memory, 0)
                 .context("Failed to bind white texture memory")?;
         }
 
@@ -254,16 +275,17 @@ impl UiRenderer {
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
-        
+
         unsafe {
-            let ptr = device.map_memory(staging_memory, 0, 4, vk::MemoryMapFlags::empty())? as *mut u8;
+            let ptr =
+                device.map_memory(staging_memory, 0, 4, vk::MemoryMapFlags::empty())? as *mut u8;
             std::ptr::copy_nonoverlapping([255u8, 255, 255, 255].as_ptr(), ptr, 4);
             device.unmap_memory(staging_memory);
         }
 
         // Transition and copy
         let cmd = graphics.begin_single_time_commands()?;
-        
+
         // Transition to TRANSFER_DST
         let barrier = vk::ImageMemoryBarrier::builder()
             .old_layout(vk::ImageLayout::UNDEFINED)
@@ -281,7 +303,7 @@ impl UiRenderer {
             .src_access_mask(vk::AccessFlags::empty())
             .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .build();
-        
+
         unsafe {
             device.cmd_pipeline_barrier(
                 cmd,
@@ -306,9 +328,13 @@ impl UiRenderer {
                 layer_count: 1,
             })
             .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-            .image_extent(vk::Extent3D { width: 1, height: 1, depth: 1 })
+            .image_extent(vk::Extent3D {
+                width: 1,
+                height: 1,
+                depth: 1,
+            })
             .build();
-        
+
         unsafe {
             device.cmd_copy_buffer_to_image(
                 cmd,
@@ -336,7 +362,7 @@ impl UiRenderer {
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .dst_access_mask(vk::AccessFlags::SHADER_READ)
             .build();
-        
+
         unsafe {
             device.cmd_pipeline_barrier(
                 cmd,
@@ -369,9 +395,10 @@ impl UiRenderer {
                 base_array_layer: 0,
                 layer_count: 1,
             });
-        
+
         let view = unsafe {
-            device.create_image_view(&view_info, None)
+            device
+                .create_image_view(&view_info, None)
                 .context("Failed to create white texture view")?
         };
 
@@ -379,7 +406,10 @@ impl UiRenderer {
     }
 
     /// Create the UI graphics pipeline
-    fn create_pipeline(graphics: &GraphicsContext, layout: vk::PipelineLayout) -> Result<vk::Pipeline> {
+    fn create_pipeline(
+        graphics: &GraphicsContext,
+        layout: vk::PipelineLayout,
+    ) -> Result<vk::Pipeline> {
         let device = &graphics.device;
 
         // Load compiled shaders (embedded at compile time via build.rs)
@@ -390,7 +420,7 @@ impl UiRenderer {
         let frag_module = Self::create_shader_module(device, frag_code)?;
 
         let entry_name = std::ffi::CString::new("main").unwrap();
-        
+
         let shader_stages = [
             vk::PipelineShaderStageCreateInfo::builder()
                 .stage(vk::ShaderStageFlags::VERTEX)
@@ -405,13 +435,11 @@ impl UiRenderer {
         ];
 
         // Vertex input: position, uv, color
-        let binding_descriptions = [
-            vk::VertexInputBindingDescription::builder()
-                .binding(0)
-                .stride(std::mem::size_of::<UiVertex>() as u32)
-                .input_rate(vk::VertexInputRate::VERTEX)
-                .build(),
-        ];
+        let binding_descriptions = [vk::VertexInputBindingDescription::builder()
+            .binding(0)
+            .stride(std::mem::size_of::<UiVertex>() as u32)
+            .input_rate(vk::VertexInputRate::VERTEX)
+            .build()];
 
         let attribute_descriptions = [
             // position
@@ -447,8 +475,8 @@ impl UiRenderer {
 
         // Dynamic viewport/scissor
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state = vk::PipelineDynamicStateCreateInfo::builder()
-            .dynamic_states(&dynamic_states);
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
 
         let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
             .viewport_count(1)
@@ -507,7 +535,8 @@ impl UiRenderer {
             .build()];
 
         let pipeline = unsafe {
-            device.create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
+            device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
                 .map_err(|e| anyhow::anyhow!("Failed to create UI pipeline: {:?}", e.1))?[0]
         };
 
@@ -527,11 +556,11 @@ impl UiRenderer {
             .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect();
 
-        let create_info = vk::ShaderModuleCreateInfo::builder()
-            .code(&code_aligned);
+        let create_info = vk::ShaderModuleCreateInfo::builder().code(&code_aligned);
 
         unsafe {
-            device.create_shader_module(&create_info, None)
+            device
+                .create_shader_module(&create_info, None)
                 .context("Failed to create shader module")
         }
     }
@@ -553,22 +582,13 @@ impl UiRenderer {
 
         if index_count > 0 {
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    canvas.indices.as_ptr(),
-                    self.index_ptr,
-                    index_count,
-                );
+                std::ptr::copy_nonoverlapping(canvas.indices.as_ptr(), self.index_ptr, index_count);
             }
         }
     }
 
     /// Record UI render commands
-    pub fn record_commands(
-        &self,
-        cmd: vk::CommandBuffer,
-        device: &ash::Device,
-        canvas: &UiCanvas,
-    ) {
+    pub fn record_commands(&self, cmd: vk::CommandBuffer, device: &ash::Device, canvas: &UiCanvas) {
         if canvas.indices.is_empty() {
             return;
         }
@@ -591,7 +611,7 @@ impl UiRenderer {
             let push_constants = UiPushConstants {
                 screen_size: [canvas.screen_size.x, canvas.screen_size.y],
             };
-            
+
             device.cmd_push_constants(
                 cmd,
                 self.pipeline_layout,
@@ -608,15 +628,16 @@ impl UiRenderer {
     /// Set font atlas for text rendering
     pub fn set_font_atlas(&mut self, font: &crate::ui::font::FontAtlas) -> Result<()> {
         let device = &self.graphics.device;
-        
+
         // Allocate descriptor set for font atlas
         let layouts = [self.descriptor_set_layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::builder()
             .descriptor_pool(self.graphics.descriptor_pool)
             .set_layouts(&layouts);
-        
+
         let font_descriptor_set = unsafe {
-            device.allocate_descriptor_sets(&alloc_info)
+            device
+                .allocate_descriptor_sets(&alloc_info)
                 .context("Failed to allocate font atlas descriptor set")?[0]
         };
 
@@ -626,7 +647,7 @@ impl UiRenderer {
             .image_view(font.texture.image_view)
             .sampler(self.white_sampler)
             .build()];
-        
+
         let descriptor_writes = [vk::WriteDescriptorSet::builder()
             .dst_set(font_descriptor_set)
             .dst_binding(0)
@@ -634,7 +655,7 @@ impl UiRenderer {
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .image_info(&image_info)
             .build()];
-        
+
         unsafe {
             device.update_descriptor_sets(&descriptor_writes, &[]);
         }
@@ -655,7 +676,9 @@ impl UiRenderer {
         }
 
         // Use font atlas descriptor if available, otherwise fallback to white texture
-        let descriptor_set = self.font_atlas_descriptor_set.unwrap_or(self.descriptor_set);
+        let descriptor_set = self
+            .font_atlas_descriptor_set
+            .unwrap_or(self.descriptor_set);
 
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
@@ -675,7 +698,7 @@ impl UiRenderer {
             let push_constants = UiPushConstants {
                 screen_size: [canvas.screen_size.x, canvas.screen_size.y],
             };
-            
+
             device.cmd_push_constants(
                 cmd,
                 self.pipeline_layout,
@@ -694,19 +717,19 @@ impl Drop for UiRenderer {
     fn drop(&mut self) {
         unsafe {
             let device = &self.graphics.device;
-            
+
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
             device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-            
+
             device.unmap_memory(self.vertex_memory);
             device.destroy_buffer(self.vertex_buffer, None);
             device.free_memory(self.vertex_memory, None);
-            
+
             device.unmap_memory(self.index_memory);
             device.destroy_buffer(self.index_buffer, None);
             device.free_memory(self.index_memory, None);
-            
+
             device.destroy_sampler(self.white_sampler, None);
             device.destroy_image_view(self.white_texture_view, None);
             device.destroy_image(self.white_texture, None);

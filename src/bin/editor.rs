@@ -1,21 +1,25 @@
+use ash::vk;
 use eframe::egui;
+use glam::{Mat4, Quat as GQuat, Vec3 as GVec3};
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpStream;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::thread;
-use stfsc_engine::world::{
-    LightType, SceneUpdate, LAYER_ENVIRONMENT, LAYER_PROP, LAYER_CHARACTER, LAYER_VEHICLE, LAYER_DEFAULT,
-    animation::{EditorKeyframe, KeyframeChannel, KeyframeValue, KeyframeInterpolation},
-    fbx_loader::ModelScene,
-};
-use stfsc_engine::graphics::occlusion::{Frustum, AABB};
-use stfsc_engine::graphics::{GraphicsContext, Texture};
-use stfsc_engine::graphics::viewport_renderer::{ViewportRenderer, ViewportMeshHandle, ViewportMeshInstance, ViewportRenderParams};
-use ash::vk;
-use glam::{Mat4, Vec3 as GVec3, Quat as GQuat};
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::thread;
+use stfsc_engine::graphics::occlusion::{Frustum, AABB};
+use stfsc_engine::graphics::viewport_renderer::{
+    ViewportMeshHandle, ViewportMeshInstance, ViewportRenderParams, ViewportRenderer,
+};
+use stfsc_engine::graphics::{GraphicsContext, Texture};
+use stfsc_engine::world::{
+    animation::{EditorKeyframe, KeyframeChannel, KeyframeInterpolation, KeyframeValue},
+    fbx_loader::ModelScene,
+    scripting::BUILTIN_SCRIPT_NAMES,
+    LightType, SceneUpdate, LAYER_CHARACTER, LAYER_DEFAULT, LAYER_ENVIRONMENT, LAYER_PROP,
+    LAYER_VEHICLE,
+};
 
 fn main() -> Result<(), eframe::Error> {
     if let Err(e) = std::process::Command::new("adb")
@@ -175,10 +179,13 @@ impl Camera3D {
         let ndc_x = x / (z * scale * aspect);
         let ndc_y = y / (z * scale);
         // Don't reject based on NDC bounds - allow off-screen vertices
-        (egui::pos2(
-            size.x * 0.5 + ndc_x * size.x * 0.5,
-            size.y * 0.5 - ndc_y * size.y * 0.5,
-        ), true)
+        (
+            egui::pos2(
+                size.x * 0.5 + ndc_x * size.x * 0.5,
+                size.y * 0.5 - ndc_y * size.y * 0.5,
+            ),
+            true,
+        )
     }
     fn get_ray(&self, screen_pos: egui::Pos2, size: egui::Vec2) -> (Vec3, Vec3) {
         let aspect = size.x / size.y;
@@ -194,7 +201,7 @@ impl Camera3D {
             .normalize();
         (self.get_position(), dir)
     }
-    
+
     /// Project a world point to screen coordinates, returning depth (view-space Z) as well
     /// Uses EXACT same projection matrix as the client (main.rs lines 1085-1093)
     fn get_view_proj(&self, aspect: f32) -> Mat4 {
@@ -205,30 +212,30 @@ impl Camera3D {
         let right = self.get_right();
         let right_g = GVec3::new(right.x, right.y, right.z);
         let up_g = right_g.cross(fwd_g);
-        
+
         // View matrix using look_at_rh (same as client)
         let view = Mat4::look_at_rh(cam_pos_g, cam_pos_g + fwd_g, up_g);
-        
+
         // Projection matrix - MUST match client EXACTLY (main.rs lines 1085-1093)
         // Reversed-Z infinite far plane with Vulkan Y-flip
         let fov = self.fov.to_radians();
         let near = 0.1;
         let f = 1.0 / (fov / 2.0).tan();
-        
+
         // Manual construction matching client exactly:
         // - Y is negated for Vulkan coordinate system
         // - Reversed-Z: depth goes from 1 (near) to 0 (far)
         // - Infinite far plane
         let proj = Mat4::from_cols(
             glam::Vec4::new(f / aspect, 0.0, 0.0, 0.0),
-            glam::Vec4::new(0.0, -f, 0.0, 0.0),  // Y-flip for Vulkan
-            glam::Vec4::new(0.0, 0.0, 0.0, -1.0),  // Reversed-Z infinite
+            glam::Vec4::new(0.0, -f, 0.0, 0.0), // Y-flip for Vulkan
+            glam::Vec4::new(0.0, 0.0, 0.0, -1.0), // Reversed-Z infinite
             glam::Vec4::new(0.0, 0.0, near, 0.0),
         );
-        
+
         proj * view
     }
-    
+
     /// Get standard (non-reversed-Z) projection for software rendering
     fn _get_view_proj_standard(&self, aspect: f32) -> Mat4 {
         let cam_pos = self.get_position();
@@ -238,22 +245,25 @@ impl Camera3D {
         let right = self.get_right();
         let right_g = GVec3::new(right.x, right.y, right.z);
         let up_g = right_g.cross(fwd_g);
-        
+
         let view = Mat4::look_at_rh(cam_pos_g, cam_pos_g + fwd_g, up_g);
         let proj = Mat4::perspective_rh(self.fov.to_radians(), aspect, 0.1, 1000.0);
         proj * view
     }
 }
-    
-
 
 // ============================================================================
 // PRIMITIVES LIBRARY (Unity-style)
 // ============================================================================
-use stfsc_engine::project::scene::{PrimitiveType, Material, SceneEntity, EntityType, LightType as LightTypeEditor, NamedUiLayout, Scene};
+use stfsc_engine::project::scene::{
+    EntityType, LightType as LightTypeEditor, Material, NamedUiLayout, PrimitiveType, Scene,
+    SceneEntity,
+};
 
 // Helper for default layer (if needed by editor logic, otherwise handled by serde in scene.rs)
-fn default_layer_editor() -> u32 { 0 }
+fn default_layer_editor() -> u32 {
+    0
+}
 
 // ============================================================================
 // SCENE DATA
@@ -299,7 +309,7 @@ enum EditorAction {
     /// Entity was deleted - undo by adding back, redo by removing
     DeleteEntity { entity: SceneEntity },
     /// Entity was modified - stores before and after states
-    ModifyEntity { 
+    ModifyEntity {
         id: u32,
         before: SceneEntity,
         after: SceneEntity,
@@ -351,7 +361,10 @@ enum ExportMessage {
     /// Progress update with status message
     Progress(String),
     /// Export completed successfully
-    Complete { platform: String, output_path: String },
+    Complete {
+        platform: String,
+        output_path: String,
+    },
     /// Export failed with error
     Error(String),
     /// All exports done
@@ -388,7 +401,7 @@ struct AnimationEditorState {
 enum RenderQuality {
     #[default]
     High, // Solid meshes + textures
-    Low,  // Wireframe
+    Low, // Wireframe
 }
 
 impl Default for AnimationEditorState {
@@ -437,25 +450,25 @@ struct EditorApp {
     drag_button: Option<egui::PointerButton>,
     last_mouse: egui::Pos2,
     dragging_id: Option<u32>,
-    drag_start_entity: Option<SceneEntity>,  // Entity state at drag start for undo
-    inspector_start_entity: Option<SceneEntity>,  // Entity state at inspector edit start for undo
-    last_selected_id: Option<u32>,  // Track selection changes
+    drag_start_entity: Option<SceneEntity>, // Entity state at drag start for undo
+    inspector_start_entity: Option<SceneEntity>, // Entity state at inspector edit start for undo
+    last_selected_id: Option<u32>,          // Track selection changes
 
     // Scene file management
-    current_scene_path: Option<String>,    // Path to currently loaded scene file
-    scene_dirty: bool,                      // True if scene has unsaved changes
-    recent_scenes: Vec<String>,             // Recently opened scene files
-    show_open_scene_dialog: bool,           // Open scene file browser dialog
-    show_save_as_dialog: bool,              // Save as dialog
-    save_as_path: String,                   // Buffer for save-as filename input
-    open_scene_files: Vec<String>,          // Cached list of scene files for browser
-    show_unsaved_warning: bool,             // Unsaved changes warning dialog
-    pending_action: Option<PendingAction>,  // What to do after unsaved warning
+    current_scene_path: Option<String>, // Path to currently loaded scene file
+    scene_dirty: bool,                  // True if scene has unsaved changes
+    recent_scenes: Vec<String>,         // Recently opened scene files
+    show_open_scene_dialog: bool,       // Open scene file browser dialog
+    show_save_as_dialog: bool,          // Save as dialog
+    save_as_path: String,               // Buffer for save-as filename input
+    open_scene_files: Vec<String>,      // Cached list of scene files for browser
+    show_unsaved_warning: bool,         // Unsaved changes warning dialog
+    pending_action: Option<PendingAction>, // What to do after unsaved warning
 
     // Clipboard and History
-    clipboard: Option<SceneEntity>,         // Copied entity for paste
-    undo_stack: Vec<EditorAction>,          // History of actions for undo
-    redo_stack: Vec<EditorAction>,          // Undone actions for redo
+    clipboard: Option<SceneEntity>, // Copied entity for paste
+    undo_stack: Vec<EditorAction>,  // History of actions for undo
+    redo_stack: Vec<EditorAction>,  // Undone actions for redo
 
     // Project management
     current_project: Option<stfsc_engine::project::Project>,
@@ -480,24 +493,24 @@ struct EditorApp {
     /// Receiver for async export progress/completion
     export_receiver: Option<std::sync::mpsc::Receiver<ExportMessage>>,
 
-
     // Model import
-    show_import_model_dialog: bool,         // Show import model file browser
-    import_model_files: Vec<String>,        // Cached list of model files for browser
+    show_import_model_dialog: bool,  // Show import model file browser
+    import_model_files: Vec<String>, // Cached list of model files for browser
 
     // UI Editor
     show_ui_editor: bool,
     selected_ui_element_type: Option<String>, // "Button", "Panel", "Text"
     selected_ui_id: Option<u32>,
     selected_child_idx: Option<usize>, // For child elements within a panel
-    selected_layout_idx: usize, // Currently selected UI layout tab
-    
+    selected_layout_idx: usize,        // Currently selected UI layout tab
+
     // UI Dragging History
     ui_drag_start_element: Option<UiElementHistory>, // State before drag started
+    ui_drag_last_delta: egui::Vec2, // Last cumulative drag delta applied in UI canvas
     ui_inspector_start_element: Option<UiElementHistory>, // State before inspector edit
     last_selected_ui_type: Option<String>,
     last_selected_ui_id: Option<u32>,
-    
+
     // Editor view tabs
     active_view: EditorView,
     animation_editor_state: AnimationEditorState,
@@ -507,10 +520,10 @@ struct EditorApp {
     // Local assets for editor rendering
     model_cache: HashMap<String, Arc<ModelScene>>,
     egui_textures: HashMap<String, egui::TextureHandle>,
-    
+
     // Interaction
     gizmo_axis: Option<usize>, // 0=X, 1=Y, 2=Z
-    
+
     // GPU Viewport Rendering (hardware accelerated)
     viewport_graphics: Option<Arc<GraphicsContext>>,
     viewport_renderer: Option<ViewportRenderer>,
@@ -522,11 +535,11 @@ struct EditorApp {
     gpu_frame_interval_ms: u64, // Target interval between GPU renders (16ms = 60fps when active)
     viewport_idle_frames: u32, // Counts frames since last camera/scene interaction
     last_camera_state: (f32, f32, f32), // (yaw, pitch, distance) for detecting movement
-    
+
     // GPU Cache for materials and textures
     gpu_texture_cache: HashMap<String, Texture>,
     gpu_material_cache: HashMap<String, vk::DescriptorSet>,
-    resolution_scale: f32, // 0.1 to 1.0 (default 0.75 or 0.5 for performance)
+    resolution_scale: f32,  // 0.1 to 1.0 (default 0.75 or 0.5 for performance)
     sharpening_amount: f32, // 0.0 to 1.0 (Contrast Adaptive Sharpening)
     default_pbr: Option<(Texture, Texture, Texture)>, // (albedo, normal, mr)
 }
@@ -560,18 +573,21 @@ impl EditorApp {
                             }
                         }
                     }
-                     AppCommand::Send(update) => {
+                    AppCommand::Send(update) => {
                         if let Some(s) = &mut stream {
                             let bytes = bincode::serialize(&update).unwrap();
                             let len = bytes.len() as u32;
                             println!("EDITOR: Sending SceneUpdate (len: {})", len);
-                            if s.write_all(&len.to_le_bytes()).is_ok() && s.write_all(&bytes).is_ok() {
+                            if s.write_all(&len.to_le_bytes()).is_ok()
+                                && s.write_all(&bytes).is_ok()
+                            {
                                 // Success
                                 let _ = s.flush();
                             } else {
                                 println!("EDITOR ERROR: Failed to write to stream. Disconnecting.");
                                 stream = None;
-                                let _ = event_tx.send(AppEvent::ConnectionError("Connection lost".into()));
+                                let _ = event_tx
+                                    .send(AppEvent::ConnectionError("Connection lost".into()));
                             }
                         } else {
                             println!("EDITOR WARN: Not connected, cannot send command.");
@@ -628,6 +644,7 @@ impl EditorApp {
             selected_child_idx: None,
             selected_layout_idx: 0,
             ui_drag_start_element: None,
+            ui_drag_last_delta: egui::Vec2::ZERO,
             ui_inspector_start_element: None,
             last_selected_ui_type: None,
             last_selected_ui_id: None,
@@ -649,7 +666,10 @@ impl EditorApp {
                     });
                     let mut scene = ModelScene::new();
                     scene.meshes.push(mesh);
-                    cache.insert(format!("primitive://{}", ptype.name().to_lowercase()), Arc::new(scene));
+                    cache.insert(
+                        format!("primitive://{}", ptype.name().to_lowercase()),
+                        Arc::new(scene),
+                    );
                 }
                 cache
             },
@@ -664,7 +684,10 @@ impl EditorApp {
                         Some(Arc::new(ctx))
                     }
                     Err(e) => {
-                        println!("GPU Viewport: Vulkan init failed ({}), using software fallback", e);
+                        println!(
+                            "GPU Viewport: Vulkan init failed ({}), using software fallback",
+                            e
+                        );
                         None
                     }
                 }
@@ -678,7 +701,7 @@ impl EditorApp {
             gpu_frame_interval_ms: 16, // 60fps target for smooth interaction
             viewport_idle_frames: 0,
             last_camera_state: (0.0, 0.0, 10.0),
-            
+
             gpu_texture_cache: HashMap::new(),
             gpu_material_cache: HashMap::new(),
             resolution_scale: 0.5, // 0.5x for low-end hardware (adjustable in settings)
@@ -737,7 +760,9 @@ impl EditorApp {
                 let epsilon_x = (rand::random::<f32>() - 0.5) * 0.001;
                 let epsilon_y = (rand::random::<f32>() - 0.5) * 0.001;
                 let epsilon_z = (rand::random::<f32>() - 0.5) * 0.001;
-                let pos = (glam::Vec3::from(entity.position) + glam::Vec3::new(epsilon_x, epsilon_y, epsilon_z)).to_array();
+                let pos = (glam::Vec3::from(entity.position)
+                    + glam::Vec3::new(epsilon_x, epsilon_y, epsilon_z))
+                .to_array();
 
                 let _ = self
                     .command_tx
@@ -783,28 +808,35 @@ impl EditorApp {
             }
             _ => {
                 let color = entity.material.albedo_color;
-                
+
                 // Upload texture if present (for any entity type including Ground)
-                if let (Some(texture_id), Some(texture_data)) = (&entity.material.albedo_texture, &entity.material.albedo_texture_data) {
-                    let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::UploadTexture {
-                        id: texture_id.clone(),
-                        data: texture_data.clone(),
-                    }));
+                if let (Some(texture_id), Some(texture_data)) = (
+                    &entity.material.albedo_texture,
+                    &entity.material.albedo_texture_data,
+                ) {
+                    let _ = self
+                        .command_tx
+                        .send(AppCommand::Send(SceneUpdate::UploadTexture {
+                            id: texture_id.clone(),
+                            data: texture_data.clone(),
+                        }));
                 }
-                
+
                 // Special handling for Ground entities - send SpawnGroundPlane for shadow frustum sizing
                 if matches!(&entity.entity_type, EntityType::Ground) {
-                    let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SpawnGroundPlane {
-                        id: entity.id,
-                        primitive: 0, // Cube
-                        position: entity.position,
-                        scale: entity.scale,
-                        color,
-                        half_extents: [entity.scale[0] / 2.0, entity.scale[2] / 2.0], // Half of X and Z scale
-                        albedo_texture: entity.material.albedo_texture.clone(),
-                        collision_enabled: entity.collision_enabled,
-                        layer: entity.layer,
-                    }));
+                    let _ = self
+                        .command_tx
+                        .send(AppCommand::Send(SceneUpdate::SpawnGroundPlane {
+                            id: entity.id,
+                            primitive: 0, // Cube
+                            position: entity.position,
+                            scale: entity.scale,
+                            color,
+                            half_extents: [entity.scale[0] / 2.0, entity.scale[2] / 2.0], // Half of X and Z scale
+                            albedo_texture: entity.material.albedo_texture.clone(),
+                            collision_enabled: entity.collision_enabled,
+                            layer: entity.layer,
+                        }));
                 } else if let EntityType::Mesh { path } = &entity.entity_type {
                     // Load mesh from file and send via SpawnFbxMesh
                     if let Ok(data) = std::fs::read(path) {
@@ -822,10 +854,10 @@ impl EditorApp {
                             PrimitiveType::Capsule => 4,
                             PrimitiveType::Cone => 5,
                         },
-                        EntityType::Vehicle => 0,         // Use Cube for vehicle body
+                        EntityType::Vehicle => 0, // Use Cube for vehicle body
                         EntityType::Building { .. } => 0, // Use Cube for buildings
                         EntityType::CrowdAgent { .. } => 4, // Use Capsule for agents
-                        _ => 0,                           // Default to Cube
+                        _ => 0,                   // Default to Cube
                     };
 
                     let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::Spawn {
@@ -844,34 +876,38 @@ impl EditorApp {
             }
         }
 
-        // Deploy script if assigned
-        if let Some(script_name) = &entity.script {
-            if !script_name.is_empty() {
-                let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::AttachScript {
+        let script_names = entity.script_names();
+        if !script_names.is_empty() {
+            let _ = self
+                .command_tx
+                .send(AppCommand::Send(SceneUpdate::SetScripts {
                     id: entity.id,
-                    name: script_name.clone(),
+                    names: script_names,
                 }));
-            }
         }
     }
 
     fn deploy_all_to_quest(&self) {
         if let Some(scene) = &self.current_scene {
             // Send global scene settings first
-            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetRespawnSettings {
-                enabled: scene.respawn_enabled,
-                y_threshold: scene.respawn_y,
-            }));
-            
+            let _ = self
+                .command_tx
+                .send(AppCommand::Send(SceneUpdate::SetRespawnSettings {
+                    enabled: scene.respawn_enabled,
+                    y_threshold: scene.respawn_y,
+                }));
+
             // Deploy all entities
             for entity in &scene.entities {
                 self.deploy_entity_to_quest(entity);
             }
-            
+
             // Deploy all UI layouts
             for nl in &scene.ui_layouts {
                 let layer = match nl.layer_type {
-                    stfsc_engine::ui::UiLayerType::PauseOverlay => stfsc_engine::ui::UiLayer::PauseMenu,
+                    stfsc_engine::ui::UiLayerType::PauseOverlay => {
+                        stfsc_engine::ui::UiLayer::PauseMenu
+                    }
                     stfsc_engine::ui::UiLayerType::MainMenu => stfsc_engine::ui::UiLayer::MainMenu,
                     stfsc_engine::ui::UiLayerType::InGameOverlay => stfsc_engine::ui::UiLayer::Hud,
                     _ => stfsc_engine::ui::UiLayer::Custom(nl.alias.clone()),
@@ -879,10 +915,12 @@ impl EditorApp {
                 // Sync layer_type to inner layout
                 let mut layout_to_send = nl.layout.clone();
                 layout_to_send.layer_type = nl.layer_type;
-                let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetUiLayer {
-                    layer,
-                    layout: layout_to_send,
-                }));
+                let _ = self
+                    .command_tx
+                    .send(AppCommand::Send(SceneUpdate::SetUiLayer {
+                        layer,
+                        layout: layout_to_send,
+                    }));
             }
         }
     }
@@ -899,6 +937,7 @@ impl EditorApp {
                 entity_type: EntityType::Primitive(ptype),
                 material: Material::default(),
                 script: None,
+                scripts: vec![],
                 collision_enabled: true,
                 layer: LAYER_PROP, // Default new primitives to Props
                 is_static: false,
@@ -908,9 +947,11 @@ impl EditorApp {
                 deployed: false,
             };
             // Push to undo stack
-            self.undo_stack.push(EditorAction::AddEntity { entity: new_entity.clone() });
+            self.undo_stack.push(EditorAction::AddEntity {
+                entity: new_entity.clone(),
+            });
             self.redo_stack.clear();
-            
+
             scene.entities.push(new_entity);
             self.selected_entity_id = Some(id);
             self.scene_dirty = true;
@@ -920,7 +961,7 @@ impl EditorApp {
     // ========================================================================
     // SCENE FILE MANAGEMENT
     // ========================================================================
-    
+
     /// Mark the current scene as having unsaved changes
     #[allow(dead_code)]
     fn mark_scene_dirty(&mut self) {
@@ -941,13 +982,12 @@ impl EditorApp {
             if let Some(parent) = absolute_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            
+
             let json = serde_json::to_string_pretty(scene)
                 .map_err(|e| format!("Serialization error: {}", e))?;
-            
-            std::fs::write(&absolute_path, json)
-                .map_err(|e| format!("Write error: {}", e))?;
-            
+
+            std::fs::write(&absolute_path, json).map_err(|e| format!("Write error: {}", e))?;
+
             self.current_scene_path = Some(path.to_string());
             self.scene_dirty = false;
             self.add_to_recent(path);
@@ -967,7 +1007,10 @@ impl EditorApp {
             self.save_scene_to_path(&path)?;
             save_items.push("Scene");
         } else if let Some(scene) = &self.current_scene {
-            let path = format!("scenes/{}.json", scene.name.to_lowercase().replace(" ", "_"));
+            let path = format!(
+                "scenes/{}.json",
+                scene.name.to_lowercase().replace(" ", "_")
+            );
             self.save_scene_to_path(&path)?;
             save_items.push("Scene");
         }
@@ -984,7 +1027,7 @@ impl EditorApp {
         if !save_items.is_empty() {
             self.status = format!("Full Save Complete: {}", save_items.join(" + "));
         }
-        
+
         Ok(())
     }
 
@@ -996,12 +1039,12 @@ impl EditorApp {
             std::path::PathBuf::from(path)
         };
 
-        let contents = std::fs::read_to_string(&absolute_path)
-            .map_err(|e| format!("Read error: {}", e))?;
-        
-        let mut scene: Scene = serde_json::from_str(&contents)
-            .map_err(|e| format!("Parse error: {}", e))?;
-        
+        let contents =
+            std::fs::read_to_string(&absolute_path).map_err(|e| format!("Read error: {}", e))?;
+
+        let mut scene: Scene =
+            serde_json::from_str(&contents).map_err(|e| format!("Parse error: {}", e))?;
+
         // Reload texture bytes from disk for each entity with a texture path
         for entity in &mut scene.entities {
             if let Some(texture_path) = entity.material.albedo_texture.clone() {
@@ -1011,14 +1054,33 @@ impl EditorApp {
                 // 3. In the project's assets/textures folder
                 let mut paths_to_try = vec![
                     texture_path.clone(),
-                    format!("{}/{}", absolute_path.parent().unwrap_or(std::path::Path::new(".")).display(), texture_path),
-                    format!("assets/textures/{}", std::path::Path::new(&texture_path).file_name().unwrap_or_default().to_string_lossy()),
+                    format!(
+                        "{}/{}",
+                        absolute_path
+                            .parent()
+                            .unwrap_or(std::path::Path::new("."))
+                            .display(),
+                        texture_path
+                    ),
+                    format!(
+                        "assets/textures/{}",
+                        std::path::Path::new(&texture_path)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                    ),
                 ];
-                
+
                 if let Some(proj) = &self.current_project {
-                    paths_to_try.push(proj.root_path.join("assets/textures").join(std::path::Path::new(&texture_path).file_name().unwrap()).to_string_lossy().to_string());
+                    paths_to_try.push(
+                        proj.root_path
+                            .join("assets/textures")
+                            .join(std::path::Path::new(&texture_path).file_name().unwrap())
+                            .to_string_lossy()
+                            .to_string(),
+                    );
                 }
-                
+
                 let mut loaded_path = None;
                 for p in paths_to_try {
                     if let Ok(bytes) = std::fs::read(&p) {
@@ -1027,28 +1089,32 @@ impl EditorApp {
                         break;
                     }
                 }
-                
+
                 if let Some(p) = loaded_path {
                     // Update to the working path for future sessions
                     entity.material.albedo_texture = Some(p);
-                    
+
                     // Pre-cache texture for editor software renderer
                     if let Some(data) = &entity.material.albedo_texture_data {
-                        let tex_name = std::path::Path::new(entity.material.albedo_texture.as_ref().unwrap())
-                            .file_name().unwrap_or_default().to_string_lossy().to_string();
+                        let tex_name =
+                            std::path::Path::new(entity.material.albedo_texture.as_ref().unwrap())
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string();
                         self.load_egui_texture(ctx, &tex_name, data);
                     }
                 } else {
                     eprintln!("Warning: Could not load texture at '{}'", texture_path);
                 }
             }
-            
+
             // Cache model for editor rendering
             if let EntityType::Mesh { path } = &entity.entity_type {
                 let _ = self.cache_model_at_path(ctx, path);
             }
         }
-        
+
         self.current_scene = Some(scene);
         self.current_scene_path = Some(path.to_string());
         self.scene_dirty = false;
@@ -1065,16 +1131,24 @@ impl EditorApp {
     fn apply_loaded_project(&mut self, ctx: &egui::Context, proj: stfsc_engine::project::Project) {
         let name = proj.metadata.name.clone();
         let startup_scene = proj.metadata.startup_scene.clone();
-        
+
         self.current_project = Some(proj);
         self.status = format!("Loaded Project: {}", name);
-        
+
         // Refresh scenes and models
         self.scan_scene_files();
-        self.scenes = self.open_scene_files.iter()
-            .map(|p| std::path::Path::new(p).file_stem().unwrap().to_string_lossy().to_string())
+        self.scenes = self
+            .open_scene_files
+            .iter()
+            .map(|p| {
+                std::path::Path::new(p)
+                    .file_stem()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
             .collect();
-        
+
         // Load the startup scene or the first available scene
         let scene_to_load = if let Some(path) = startup_scene {
             Some(path)
@@ -1083,7 +1157,7 @@ impl EditorApp {
         } else {
             None
         };
-        
+
         if let Some(path) = scene_to_load {
             if let Err(e) = self.load_scene_from_path(ctx, &path) {
                 self.status = format!("Project loaded, but error loading scene: {}", e);
@@ -1127,13 +1201,13 @@ impl EditorApp {
             std::path::PathBuf::from("assets"),
             std::path::PathBuf::from("."),
         ];
-        
+
         if let Some(proj) = &self.current_project {
             search_dirs.insert(0, proj.root_path.join("assets/models"));
             search_dirs.insert(1, proj.root_path.join("assets"));
             search_dirs.insert(2, proj.root_path.clone());
         }
-        
+
         for dir in search_dirs {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
@@ -1141,7 +1215,11 @@ impl EditorApp {
                     if path.is_file() {
                         if let Some(ext) = path.extension() {
                             let ext_lower = ext.to_string_lossy().to_lowercase();
-                            if ext_lower == "obj" || ext_lower == "fbx" || ext_lower == "glb" || ext_lower == "gltf" {
+                            if ext_lower == "obj"
+                                || ext_lower == "fbx"
+                                || ext_lower == "glb"
+                                || ext_lower == "gltf"
+                            {
                                 if let Some(path_str) = path.to_str() {
                                     files.push(path_str.to_string());
                                 }
@@ -1151,19 +1229,24 @@ impl EditorApp {
                 }
             }
         }
-        
+
         files.sort();
         files.dedup();
         files
     }
-    
+
     /// Cache a 3D model and its textures for editor rendering
-    fn cache_model_at_path(&mut self, ctx: &egui::Context, path: &str) -> Result<Arc<ModelScene>, String> {
+    fn cache_model_at_path(
+        &mut self,
+        ctx: &egui::Context,
+        path: &str,
+    ) -> Result<Arc<ModelScene>, String> {
         if let Some(cached) = self.model_cache.get(path) {
             return Ok(cached.clone());
         }
 
-        let data = std::fs::read(path).map_err(|e| format!("Failed to read file {}: {}", path, e))?;
+        let data =
+            std::fs::read(path).map_err(|e| format!("Failed to read file {}: {}", path, e))?;
         let ext = std::path::Path::new(path)
             .extension()
             .and_then(|s| s.to_str())
@@ -1181,9 +1264,9 @@ impl EditorApp {
         };
 
         // Load textures into egui
-    for tex in &model_scene.textures {
-        self.load_egui_texture(ctx, &tex.name, &tex.data);
-    }
+        for tex in &model_scene.textures {
+            self.load_egui_texture(ctx, &tex.name, &tex.data);
+        }
 
         let arc_model = Arc::new(model_scene);
         self.model_cache.insert(path.to_string(), arc_model.clone());
@@ -1195,27 +1278,27 @@ impl EditorApp {
     fn import_model_from_path(&mut self, ctx: &egui::Context, path: &str) -> Result<(), String> {
         // Read the file
         let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
-        
+
         // Get filename for entity name
         let filename = std::path::Path::new(path)
             .file_stem()
             .and_then(|n| n.to_str())
             .unwrap_or("Model")
             .to_string();
-        
+
         // Detect file extension
         let ext = std::path::Path::new(path)
             .extension()
             .and_then(|e| e.to_str())
             .map(|s| s.to_lowercase())
             .unwrap_or_default();
-        
+
         let id = if let Some(scene) = &self.current_scene {
             scene.entities.iter().map(|e| e.id).max().unwrap_or(0) + 1
         } else {
             return Err("No scene loaded".into());
         };
-        
+
         // Check if this is a glTF file with animations
         let (animator_config, animation_info) = if ext == "glb" || ext == "gltf" || ext == "obj" {
             match self.cache_model_at_path(ctx, path) {
@@ -1223,13 +1306,13 @@ impl EditorApp {
                     if !model_scene.animations.is_empty() {
                         // Create AnimatorConfig from animations
                         let mut config = stfsc_engine::world::animation::AnimatorConfig::new();
-                        
+
                         for (i, anim) in model_scene.animations.iter().enumerate() {
                             config.add_state(&anim.name, i);
                             config.clip_names.push(anim.name.clone());
                             config.clip_durations.push(anim.duration);
                         }
-                        
+
                         // Populate bone metadata if skeleton exists
                         if let Some(skeleton) = &model_scene.skeleton {
                             for bone in &skeleton.bones {
@@ -1238,12 +1321,12 @@ impl EditorApp {
                                 config.bone_transforms.push(bone.local_transform);
                             }
                         }
-                        
+
                         // Set first animation as default
                         if let Some(first_anim) = model_scene.animations.first() {
                             config.default_state = first_anim.name.clone();
                         }
-                        
+
                         let info = format!("({} animations)", model_scene.animations.len());
                         (Some(config), info)
                     } else {
@@ -1258,70 +1341,90 @@ impl EditorApp {
         } else {
             (None, String::new())
         };
-        
+
         let new_entity = SceneEntity {
             id,
-            name: format!("{}{}", filename, if !animation_info.is_empty() { format!(" {}", animation_info) } else { String::new() }),
+            name: format!(
+                "{}{}",
+                filename,
+                if !animation_info.is_empty() {
+                    format!(" {}", animation_info)
+                } else {
+                    String::new()
+                }
+            ),
             position: [0.0, 0.0, 0.0],
             rotation: [0.0, 0.0, 0.0, 1.0],
             scale: [1.0, 1.0, 1.0],
-            entity_type: EntityType::Mesh { path: path.to_string() },
+            entity_type: EntityType::Mesh {
+                path: path.to_string(),
+            },
             material: Material::default(),
             script: None,
+            scripts: vec![],
             collision_enabled: false,
             layer: LAYER_PROP,
-            is_static: animator_config.is_none(),  // Animated models are not static
+            is_static: animator_config.is_none(), // Animated models are not static
             animator_config,
             parent_id: None,
             fov: 0.785,
             deployed: false,
         };
-        
+
         // If connected, deploy immediately (before mutating scene)
         if self.is_connected {
-            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SpawnFbxMesh {
-                id: new_entity.id,
-                mesh_data: data,
-                position: new_entity.position,
-                rotation: new_entity.rotation,
-                scale: new_entity.scale,
-                albedo_texture: None,  // No texture on initial import
-                collision_enabled: new_entity.collision_enabled,
-                layer: new_entity.layer,
-                is_static: new_entity.is_static,
-            }));
-            
+            let _ = self
+                .command_tx
+                .send(AppCommand::Send(SceneUpdate::SpawnFbxMesh {
+                    id: new_entity.id,
+                    mesh_data: data,
+                    position: new_entity.position,
+                    rotation: new_entity.rotation,
+                    scale: new_entity.scale,
+                    albedo_texture: None, // No texture on initial import
+                    collision_enabled: new_entity.collision_enabled,
+                    layer: new_entity.layer,
+                    is_static: new_entity.is_static,
+                }));
+
             // Also send AnimatorConfig if present
             if let Some(ref anim_config) = new_entity.animator_config {
-                let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::AttachAnimator {
-                    id: new_entity.id,
-                    config: anim_config.clone(),
-                }));
+                let _ = self
+                    .command_tx
+                    .send(AppCommand::Send(SceneUpdate::AttachAnimator {
+                        id: new_entity.id,
+                        config: anim_config.clone(),
+                    }));
             }
         }
-        
+
         // Now add to scene
         if let Some(scene) = &mut self.current_scene {
             scene.entities.push(new_entity);
         }
-        
+
         self.selected_entity_id = Some(id);
         self.scene_dirty = true;
         self.status = format!("Imported: {}{}", filename, animation_info);
-        
+
         Ok(())
     }
-    
+
     /// Deploy a mesh entity to the Quest via SpawnGltfMesh or SpawnFbxMesh
     fn deploy_mesh_entity(&self, entity: &SceneEntity, mesh_data: &[u8]) {
         // Upload texture if present (mainly for OBJ/FBX fallback)
-        if let (Some(texture_id), Some(texture_data)) = (&entity.material.albedo_texture, &entity.material.albedo_texture_data) {
-            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::UploadTexture {
-                id: texture_id.clone(),
-                data: texture_data.clone(),
-            }));
+        if let (Some(texture_id), Some(texture_data)) = (
+            &entity.material.albedo_texture,
+            &entity.material.albedo_texture_data,
+        ) {
+            let _ = self
+                .command_tx
+                .send(AppCommand::Send(SceneUpdate::UploadTexture {
+                    id: texture_id.clone(),
+                    data: texture_data.clone(),
+                }));
         }
-        
+
         let is_gltf = if let EntityType::Mesh { path } = &entity.entity_type {
             let path_lower = path.to_lowercase();
             path_lower.ends_with(".glb") || path_lower.ends_with(".gltf")
@@ -1330,28 +1433,32 @@ impl EditorApp {
         };
 
         if is_gltf {
-            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SpawnGltfMesh {
-                id: entity.id,
-                mesh_data: mesh_data.to_vec(),
-                position: entity.position,
-                rotation: entity.rotation,
-                scale: entity.scale,
-                collision_enabled: entity.collision_enabled,
-                layer: entity.layer,
-                is_static: entity.is_static,
-            }));
+            let _ = self
+                .command_tx
+                .send(AppCommand::Send(SceneUpdate::SpawnGltfMesh {
+                    id: entity.id,
+                    mesh_data: mesh_data.to_vec(),
+                    position: entity.position,
+                    rotation: entity.rotation,
+                    scale: entity.scale,
+                    collision_enabled: entity.collision_enabled,
+                    layer: entity.layer,
+                    is_static: entity.is_static,
+                }));
         } else {
-            let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SpawnFbxMesh {
-                id: entity.id,
-                mesh_data: mesh_data.to_vec(),
-                position: entity.position,
-                rotation: entity.rotation,
-                scale: entity.scale,
-                albedo_texture: entity.material.albedo_texture.clone(),
-                collision_enabled: entity.collision_enabled,
-                layer: entity.layer,
-                is_static: entity.is_static,
-            }));
+            let _ = self
+                .command_tx
+                .send(AppCommand::Send(SceneUpdate::SpawnFbxMesh {
+                    id: entity.id,
+                    mesh_data: mesh_data.to_vec(),
+                    position: entity.position,
+                    rotation: entity.rotation,
+                    scale: entity.scale,
+                    albedo_texture: entity.material.albedo_texture.clone(),
+                    collision_enabled: entity.collision_enabled,
+                    layer: entity.layer,
+                    is_static: entity.is_static,
+                }));
         }
     }
 
@@ -1390,11 +1497,7 @@ impl EditorApp {
                 [img.width() as usize, img.height() as usize],
                 pixels.as_slice(),
             );
-            let handle = ctx.load_texture(
-                name,
-                color_img,
-                egui::TextureOptions::LINEAR,
-            );
+            let handle = ctx.load_texture(name, color_img, egui::TextureOptions::LINEAR);
             self.egui_textures.insert(name.to_string(), handle);
         }
     }
@@ -1429,7 +1532,9 @@ impl EditorApp {
     /// Get the window title with dirty indicator
     #[allow(dead_code)]
     fn get_window_title(&self) -> String {
-        let scene_name = self.current_scene.as_ref()
+        let scene_name = self
+            .current_scene
+            .as_ref()
             .map(|s| s.name.as_str())
             .unwrap_or("Untitled");
         let dirty = if self.scene_dirty { "*" } else { "" };
@@ -1439,7 +1544,7 @@ impl EditorApp {
     // ========================================================================
     // CLIPBOARD & UNDO/REDO
     // ========================================================================
-    
+
     /// Copy selected entity to clipboard
     fn copy_selected(&mut self) {
         if let Some(id) = self.selected_entity_id {
@@ -1474,24 +1579,27 @@ impl EditorApp {
         anim_state: &AnimationEditorState,
     ) -> Option<(Vec<Mat4>, Vec<Mat4>)> {
         let anim_config = entity.animator_config.as_ref()?;
-        
+
         let clip_idx = anim_state.selected_clip_idx?;
         let clip_name = anim_config.clip_names.get(clip_idx)?;
-        
+
         if let EntityType::Mesh { path } = &entity.entity_type {
             if let Some(model) = model_cache.get(path) {
                 if let Some(clip) = model.animations.iter().find(|a| a.name == *clip_name) {
                     if let Some(skeleton) = &model.skeleton {
                         let time = anim_state.current_time;
                         let local_transforms = clip.sample(time, skeleton);
-                        
+
                         let bone_count = skeleton.bones.len();
                         let mut global_transforms = vec![Mat4::IDENTITY; bone_count];
                         let mut skinning_matrices = vec![Mat4::IDENTITY; bone_count];
 
                         for i in 0..bone_count {
                             let bone = &skeleton.bones[i];
-                            let local = local_transforms.get(i).copied().unwrap_or(bone.local_transform);
+                            let local = local_transforms
+                                .get(i)
+                                .copied()
+                                .unwrap_or(bone.local_transform);
 
                             global_transforms[i] = if let Some(parent_idx) = bone.parent_index {
                                 if parent_idx < bone_count {
@@ -1505,7 +1613,7 @@ impl EditorApp {
 
                             skinning_matrices[i] = global_transforms[i] * bone.inverse_bind_matrix;
                         }
-                        
+
                         return Some((global_transforms, skinning_matrices));
                     }
                 }
@@ -1555,7 +1663,9 @@ impl EditorApp {
                     }
                     self.status = format!("Undo: Restored entity #{}", id);
                 }
-                EditorAction::ModifyUiLayout { layout_idx, before, .. } => {
+                EditorAction::ModifyUiLayout {
+                    layout_idx, before, ..
+                } => {
                     if let Some(scene) = &mut self.current_scene {
                         if let Some(layout) = scene.ui_layouts.get_mut(*layout_idx) {
                             *layout = before.clone();
@@ -1563,40 +1673,79 @@ impl EditorApp {
                     }
                     self.status = format!("Undo: Restored UI Layout #{}", layout_idx);
                 }
-                EditorAction::AddUiElement { layout_idx, element_type, element: _ } => {
+                EditorAction::AddUiElement {
+                    layout_idx,
+                    element_type,
+                    element: _,
+                } => {
                     // Undo add = remove
                     if let Some(scene) = &mut self.current_scene {
                         if let Some(nl) = scene.ui_layouts.get_mut(*layout_idx) {
                             match element_type.as_str() {
-                                "Button" => { nl.layout.buttons.pop(); }
-                                "Panel" => { nl.layout.panels.pop(); }
-                                "Text" => { nl.layout.texts.pop(); }
+                                "Button" => {
+                                    nl.layout.buttons.pop();
+                                }
+                                "Panel" => {
+                                    nl.layout.panels.pop();
+                                }
+                                "Text" => {
+                                    nl.layout.texts.pop();
+                                }
                                 _ => {}
                             }
                         }
                     }
                     self.status = format!("Undo: Removed UI {}", element_type);
                 }
-                EditorAction::DeleteUiElement { layout_idx, element_type, element_idx, element } => {
+                EditorAction::DeleteUiElement {
+                    layout_idx,
+                    element_type,
+                    element_idx,
+                    element,
+                } => {
                     // Undo delete = insert back
                     if let Some(scene) = &mut self.current_scene {
                         if let Some(nl) = scene.ui_layouts.get_mut(*layout_idx) {
                             match element {
-                                UiElementHistory::Button(b) => nl.layout.buttons.insert(*element_idx, b.clone()),
-                                UiElementHistory::Panel(p) => nl.layout.panels.insert(*element_idx, p.clone()),
-                                UiElementHistory::Text(t) => nl.layout.texts.insert(*element_idx, t.clone()),
+                                UiElementHistory::Button(b) => {
+                                    nl.layout.buttons.insert(*element_idx, b.clone())
+                                }
+                                UiElementHistory::Panel(p) => {
+                                    nl.layout.panels.insert(*element_idx, p.clone())
+                                }
+                                UiElementHistory::Text(t) => {
+                                    nl.layout.texts.insert(*element_idx, t.clone())
+                                }
                             }
                         }
                     }
                     self.status = format!("Undo: Restored UI {}", element_type);
                 }
-                EditorAction::ModifyUiElement { layout_idx, element_type, element_idx, before, .. } => {
+                EditorAction::ModifyUiElement {
+                    layout_idx,
+                    element_type,
+                    element_idx,
+                    before,
+                    ..
+                } => {
                     if let Some(scene) = &mut self.current_scene {
                         if let Some(nl) = scene.ui_layouts.get_mut(*layout_idx) {
                             match before {
-                                UiElementHistory::Button(b) => { if let Some(target) = nl.layout.buttons.get_mut(*element_idx) { *target = b.clone(); } }
-                                UiElementHistory::Panel(p) => { if let Some(target) = nl.layout.panels.get_mut(*element_idx) { *target = p.clone(); } }
-                                UiElementHistory::Text(t) => { if let Some(target) = nl.layout.texts.get_mut(*element_idx) { *target = t.clone(); } }
+                                UiElementHistory::Button(b) => {
+                                    if let Some(target) = nl.layout.buttons.get_mut(*element_idx) {
+                                        *target = b.clone();
+                                    }
+                                }
+                                UiElementHistory::Panel(p) => {
+                                    if let Some(target) = nl.layout.panels.get_mut(*element_idx) {
+                                        *target = p.clone();
+                                    }
+                                }
+                                UiElementHistory::Text(t) => {
+                                    if let Some(target) = nl.layout.texts.get_mut(*element_idx) {
+                                        *target = t.clone();
+                                    }
+                                }
                             }
                         }
                     }
@@ -1639,7 +1788,9 @@ impl EditorApp {
                     }
                     self.status = format!("Redo: Modified entity #{}", id);
                 }
-                EditorAction::ModifyUiLayout { layout_idx, after, .. } => {
+                EditorAction::ModifyUiLayout {
+                    layout_idx, after, ..
+                } => {
                     if let Some(scene) = &mut self.current_scene {
                         if let Some(layout) = scene.ui_layouts.get_mut(*layout_idx) {
                             *layout = after.clone();
@@ -1647,7 +1798,11 @@ impl EditorApp {
                     }
                     self.status = format!("Redo: Modified UI Layout #{}", layout_idx);
                 }
-                EditorAction::AddUiElement { layout_idx, element_type, element } => {
+                EditorAction::AddUiElement {
+                    layout_idx,
+                    element_type,
+                    element,
+                } => {
                     if let Some(scene) = &mut self.current_scene {
                         if let Some(nl) = scene.ui_layouts.get_mut(*layout_idx) {
                             match element {
@@ -1659,26 +1814,55 @@ impl EditorApp {
                     }
                     self.status = format!("Redo: Added UI {}", element_type);
                 }
-                EditorAction::DeleteUiElement { layout_idx, element_type, element_idx, .. } => {
+                EditorAction::DeleteUiElement {
+                    layout_idx,
+                    element_type,
+                    element_idx,
+                    ..
+                } => {
                     if let Some(scene) = &mut self.current_scene {
                         if let Some(nl) = scene.ui_layouts.get_mut(*layout_idx) {
                             match element_type.as_str() {
-                                "Button" => { nl.layout.buttons.remove(*element_idx); }
-                                "Panel" | "PanelChild" => { nl.layout.panels.remove(*element_idx); }
-                                "Text" => { nl.layout.texts.remove(*element_idx); }
+                                "Button" => {
+                                    nl.layout.buttons.remove(*element_idx);
+                                }
+                                "Panel" | "PanelChild" => {
+                                    nl.layout.panels.remove(*element_idx);
+                                }
+                                "Text" => {
+                                    nl.layout.texts.remove(*element_idx);
+                                }
                                 _ => {}
                             }
                         }
                     }
                     self.status = format!("Redo: Deleted UI {}", element_type);
                 }
-                EditorAction::ModifyUiElement { layout_idx, element_type, element_idx, after, .. } => {
+                EditorAction::ModifyUiElement {
+                    layout_idx,
+                    element_type,
+                    element_idx,
+                    after,
+                    ..
+                } => {
                     if let Some(scene) = &mut self.current_scene {
                         if let Some(nl) = scene.ui_layouts.get_mut(*layout_idx) {
                             match after {
-                                UiElementHistory::Button(b) => { if let Some(target) = nl.layout.buttons.get_mut(*element_idx) { *target = b.clone(); } }
-                                UiElementHistory::Panel(p) => { if let Some(target) = nl.layout.panels.get_mut(*element_idx) { *target = p.clone(); } }
-                                UiElementHistory::Text(t) => { if let Some(target) = nl.layout.texts.get_mut(*element_idx) { *target = t.clone(); } }
+                                UiElementHistory::Button(b) => {
+                                    if let Some(target) = nl.layout.buttons.get_mut(*element_idx) {
+                                        *target = b.clone();
+                                    }
+                                }
+                                UiElementHistory::Panel(p) => {
+                                    if let Some(target) = nl.layout.panels.get_mut(*element_idx) {
+                                        *target = p.clone();
+                                    }
+                                }
+                                UiElementHistory::Text(t) => {
+                                    if let Some(target) = nl.layout.texts.get_mut(*element_idx) {
+                                        *target = t.clone();
+                                    }
+                                }
                             }
                         }
                     }
@@ -1693,35 +1877,42 @@ impl EditorApp {
     /// Try to render viewport using GPU acceleration.
     /// Returns true if GPU render succeeded (caller should display texture).
     /// Returns false to fall back to software rendering.
-    fn try_gpu_render(&mut self, ctx: &egui::Context, _rect: egui::Rect, size: egui::Vec2) -> Option<egui::TextureHandle> {
+    fn try_gpu_render(
+        &mut self,
+        ctx: &egui::Context,
+        _rect: egui::Rect,
+        size: egui::Vec2,
+        viewport_interacting: bool,
+    ) -> Option<egui::TextureHandle> {
         // Only use GPU for High quality mode
         if self.render_quality != RenderQuality::High || !self.use_gpu_viewport {
             return None;
         }
-        
+
         let Some(graphics) = self.viewport_graphics.clone() else {
             return None;
         };
-        
+
         let width_scaled = (size.x * self.resolution_scale) as u32;
         let height_scaled = (size.y * self.resolution_scale) as u32;
-        
+
         if width_scaled == 0 || height_scaled == 0 {
             return None;
         }
-        
+
         // Initialize default PBR textures if needed (for material DS creation)
         if self.default_pbr.is_none() {
             if let Ok(defaults) = graphics.create_default_pbr_textures() {
                 self.default_pbr = Some(defaults);
             }
         }
-        
+
         // ADAPTIVE FRAME THROTTLING: Detect camera/scene changes to adjust refresh rate
-        // Fast (16ms/60fps) when interacting, slow (100ms/10fps) when idle
+        // Fast when the viewport is being manipulated, much slower when other UI owns input.
         let current_camera_state = (self.camera.yaw, self.camera.pitch, self.camera.distance);
-        let scene_interacting = self.animation_editor_state.is_playing 
-            || self.gizmo_axis.is_some() 
+        let scene_interacting = self.animation_editor_state.is_playing
+            || self.gizmo_axis.is_some()
+            || viewport_interacting
             || (current_camera_state.0 - self.last_camera_state.0).abs() > 0.001
             || (current_camera_state.1 - self.last_camera_state.1).abs() > 0.001
             || (current_camera_state.2 - self.last_camera_state.2).abs() > 0.01;
@@ -1732,14 +1923,16 @@ impl EditorApp {
         } else {
             self.viewport_idle_frames = self.viewport_idle_frames.saturating_add(1);
         }
-        
+
         // Determine effective throttle interval based on idle state
-        let effective_interval = if self.viewport_idle_frames < 10 {
-            self.gpu_frame_interval_ms // Active: 16ms (60 FPS)
+        let effective_interval = if scene_interacting {
+            self.gpu_frame_interval_ms // Active viewport: 16ms (60 FPS)
+        } else if self.viewport_idle_frames < 10 {
+            33 // Brief settle period after movement
         } else {
-            100 // Idle: 100ms (10 FPS) to save GPU bandwidth
+            250 // Idle/UI navigation: avoid readback spikes while menus and panels are in use
         };
-        
+
         let elapsed = self.last_gpu_render_time.elapsed().as_millis() as u64;
         if elapsed < effective_interval {
             // Return cached texture if available (no new render needed)
@@ -1747,7 +1940,7 @@ impl EditorApp {
                 return Some(tex.clone());
             }
         }
-        
+
         // Create or resize viewport renderer
         if self.viewport_renderer.is_none() {
             match ViewportRenderer::new(graphics.clone(), width_scaled, height_scaled) {
@@ -1762,7 +1955,7 @@ impl EditorApp {
                 }
             }
         }
-        
+
         // Resize if needed (using scaled dimensions)
         if self.last_viewport_size != (width_scaled, height_scaled) {
             if let Some(renderer) = &mut self.viewport_renderer {
@@ -1773,50 +1966,61 @@ impl EditorApp {
                 self.last_viewport_size = (width_scaled, height_scaled);
             }
         }
-        
+
         let Some(renderer) = &mut self.viewport_renderer else {
             return None;
         };
-        
+
         // Sync meshes to GPU cache (upload any new meshes from model_cache)
         for (path, model) in &self.model_cache {
             if !self.gpu_mesh_cache.contains_key(path) {
                 let mut handles = GpuModelHandles::default();
-                
+
                 // 1. Regular meshes
                 for mesh in &model.meshes {
                     match renderer.upload_mesh(mesh) {
                         Ok(handle) => handles.static_meshes.push(handle),
-                        Err(e) => println!("GPU Mesh: Failed to upload submesh in '{}': {}", path, e),
+                        Err(e) => {
+                            println!("GPU Mesh: Failed to upload submesh in '{}': {}", path, e)
+                        }
                     }
                 }
-                
+
                 // 2. Skinned meshes
                 for skinned in &model.skinned_meshes {
                     match renderer.upload_mesh(&skinned.mesh) {
                         Ok(handle) => handles.skinned_meshes.push(handle),
-                        Err(e) => println!("GPU Mesh: Failed to upload skinned submesh in '{}': {}", path, e),
+                        Err(e) => println!(
+                            "GPU Mesh: Failed to upload skinned submesh in '{}': {}",
+                            path, e
+                        ),
                     }
                 }
-                
+
                 if !handles.static_meshes.is_empty() || !handles.skinned_meshes.is_empty() {
-                    println!("GPU Model: Uploaded '{}' ({} static, {} skinned)", path, handles.static_meshes.len(), handles.skinned_meshes.len());
+                    println!(
+                        "GPU Model: Uploaded '{}' ({} static, {} skinned)",
+                        path,
+                        handles.static_meshes.len(),
+                        handles.skinned_meshes.len()
+                    );
                     self.gpu_mesh_cache.insert(path.clone(), handles);
                 }
             }
         }
-        
+
         // Set camera parameters
         let aspect = size.x / size.y;
         let view_proj = self.camera.get_view_proj(aspect);
         let cam_pos = self.camera.get_position();
-        
+
         // Calculate shadow matrix (directional light matching client)
         let light_dir = GVec3::new(0.4, 0.8, 0.3).normalize();
         let shadow_center = GVec3::new(cam_pos.x, 0.0, cam_pos.z);
         let light_pos = shadow_center + light_dir * 100.0;
         let shadow_proj = glam::Mat4::orthographic_rh(-100.0, 100.0, -100.0, 100.0, 0.1, 200.0);
-        let light_view_proj = shadow_proj * glam::Mat4::look_at_rh(light_pos, shadow_center, glam::Vec3::Y);
+        let light_view_proj =
+            shadow_proj * glam::Mat4::look_at_rh(light_pos, shadow_center, glam::Vec3::Y);
 
         renderer.set_render_params(ViewportRenderParams {
             view_proj,
@@ -1826,21 +2030,23 @@ impl EditorApp {
             ambient: 0.35,
         });
         renderer.set_sharpening(self.sharpening_amount);
-        
+
         // Queue scene entities for rendering
         renderer.clear_queue();
         if let Some(scene) = &self.current_scene {
             for entity in &scene.entities {
                 let mesh_path = match &entity.entity_type {
                     EntityType::Mesh { path } => Some(path.clone()),
-                    EntityType::Primitive(ptype) => Some(format!("primitive://{}", ptype.name().to_lowercase())),
+                    EntityType::Primitive(ptype) => {
+                        Some(format!("primitive://{}", ptype.name().to_lowercase()))
+                    }
                     EntityType::Ground => Some("primitive://cube".to_string()),
                     EntityType::Vehicle => Some("primitive://cube".to_string()),
                     EntityType::Building { .. } => Some("primitive://cube".to_string()),
                     EntityType::CrowdAgent { .. } => Some("primitive://capsule".to_string()),
                     _ => None,
                 };
-                
+
                 if let Some(path) = mesh_path {
                     if let Some(model_handles) = self.gpu_mesh_cache.get(&path) {
                         let model_matrix = Mat4::from_scale_rotation_translation(
@@ -1848,10 +2054,10 @@ impl EditorApp {
                             GQuat::from_array(entity.rotation),
                             GVec3::from(entity.position),
                         );
-                        
+
                         // NOTE: Base-Origin offset removed to match client/deployed behavior.
                         // The client uses raw model transforms without adjustment.
-                        
+
                         let color = GVec3::new(
                             entity.material.albedo_color[0],
                             entity.material.albedo_color[1],
@@ -1860,14 +2066,20 @@ impl EditorApp {
 
                         // Check for animator config for skeletal animation
                         let joints = if entity.animator_config.is_some() {
-                            EditorApp::compute_animated_pose(entity, &self.model_cache, &self.animation_editor_state)
-                                .map(|(_, skin)| skin)
+                            EditorApp::compute_animated_pose(
+                                entity,
+                                &self.model_cache,
+                                &self.animation_editor_state,
+                            )
+                            .map(|(_, skin)| skin)
                         } else {
                             None
                         };
-                        
+
                         // Handle material descriptor set
-                        let material_descriptor_set = if let Some(tex_name) = &entity.material.albedo_texture {
+                        let material_descriptor_set = if let Some(tex_name) =
+                            &entity.material.albedo_texture
+                        {
                             if let Some(ds) = self.gpu_material_cache.get(tex_name) {
                                 Some(*ds)
                             } else {
@@ -1875,11 +2087,16 @@ impl EditorApp {
                                 if let Some(tex_data) = &entity.material.albedo_texture_data {
                                     match graphics.create_texture_from_bytes(tex_data) {
                                         Ok(albedo) => {
-                                            if let Some((_, def_normal, def_mr)) = &self.default_pbr {
-                                                match graphics.create_material_descriptor_set(&albedo, def_normal, def_mr) {
+                                            if let Some((_, def_normal, def_mr)) = &self.default_pbr
+                                            {
+                                                match graphics.create_material_descriptor_set(
+                                                    &albedo, def_normal, def_mr,
+                                                ) {
                                                     Ok(ds) => {
-                                                        self.gpu_texture_cache.insert(tex_name.clone(), albedo);
-                                                        self.gpu_material_cache.insert(tex_name.clone(), ds);
+                                                        self.gpu_texture_cache
+                                                            .insert(tex_name.clone(), albedo);
+                                                        self.gpu_material_cache
+                                                            .insert(tex_name.clone(), ds);
                                                         Some(ds)
                                                     }
                                                     Err(e) => {
@@ -1887,19 +2104,26 @@ impl EditorApp {
                                                         None
                                                     }
                                                 }
-                                            } else { None }
+                                            } else {
+                                                None
+                                            }
                                         }
                                         Err(e) => {
-                                            println!("GPU Viewport: Failed to upload texture '{}': {}", tex_name, e);
+                                            println!(
+                                                "GPU Viewport: Failed to upload texture '{}': {}",
+                                                tex_name, e
+                                            );
                                             None
                                         }
                                     }
-                                } else { None }
+                                } else {
+                                    None
+                                }
                             }
                         } else {
                             None
                         };
-                        
+
                         // Queue static meshes
                         for &handle in &model_handles.static_meshes {
                             renderer.queue_mesh(ViewportMeshInstance {
@@ -1925,39 +2149,49 @@ impl EditorApp {
                 }
             }
         }
-        
+
         // Debug: Print queue stats once (first frame only via static flag)
-        static PRINTED_QUEUE_STATS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static PRINTED_QUEUE_STATS: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
         if !PRINTED_QUEUE_STATS.swap(true, std::sync::atomic::Ordering::Relaxed) {
             if let Some(scene) = &self.current_scene {
-                println!("GPU Queue: {} entities in scene, {} queued for render", 
-                    scene.entities.len(), renderer.pending_instance_count());
+                println!(
+                    "GPU Queue: {} entities in scene, {} queued for render",
+                    scene.entities.len(),
+                    renderer.pending_instance_count()
+                );
             }
         }
-        
+
         // Get render dimensions before borrowing renderer for readback
         let render_w = renderer.width as usize;
         let render_h = renderer.height as usize;
-        
+
         match renderer.render_and_readback() {
             Ok(pixels) => {
                 // Sharpening is now handled on the GPU inside the renderer
-                
+
                 // Update throttle timer
                 self.last_gpu_render_time = std::time::Instant::now();
-                
+
                 // Debug: Check if pixels contain any non-gray content
-                static DEBUG_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                static DEBUG_ONCE: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
                 if !DEBUG_ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     // Sample a few pixels to check content
                     let mid = pixels.len() / 2;
                     if pixels.len() > mid + 4 {
                         println!("GPU Viewport: First pixel RGBA: {:?}", &pixels[0..4]);
-                        println!("GPU Viewport: Mid pixel RGBA: {:?}", &pixels[mid..mid+4]);
-                        println!("GPU Viewport: Pixels total: {} ({}x{})", pixels.len(), render_w, render_h);
+                        println!("GPU Viewport: Mid pixel RGBA: {:?}", &pixels[mid..mid + 4]);
+                        println!(
+                            "GPU Viewport: Pixels total: {} ({}x{})",
+                            pixels.len(),
+                            render_w,
+                            render_h
+                        );
                     }
                 }
-                
+
                 // Convert to egui texture using direct Color32 copy (optimized path)
                 // We use the slice directly if possible, but egui needs an owned Vec.
                 // However, we can use std::mem::take/replace if we modify the renderer.
@@ -1966,7 +2200,7 @@ impl EditorApp {
                     size: [render_w, render_h],
                     pixels: pixels.to_vec(),
                 };
-                
+
                 // Create or update texture handle
                 if let Some(existing) = &self.viewport_texture {
                     // Update existing texture
@@ -1978,11 +2212,8 @@ impl EditorApp {
                     Some(existing.clone())
                 } else {
                     // Create new texture
-                    let handle = ctx.load_texture(
-                        "gpu_viewport",
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    );
+                    let handle =
+                        ctx.load_texture("gpu_viewport", image, egui::TextureOptions::LINEAR);
                     self.viewport_texture = Some(handle.clone());
                     Some(handle)
                 }
@@ -2050,7 +2281,9 @@ impl EditorApp {
 
         if response.drag_stopped() {
             // Push undo for move if entity position changed
-            if let (Some(start_entity), Some(drag_id)) = (self.drag_start_entity.take(), self.dragging_id) {
+            if let (Some(start_entity), Some(drag_id)) =
+                (self.drag_start_entity.take(), self.dragging_id)
+            {
                 if let Some(scene) = &self.current_scene {
                     if let Some(after_entity) = scene.entities.iter().find(|e| e.id == drag_id) {
                         if start_entity.position != after_entity.position {
@@ -2119,28 +2352,40 @@ impl EditorApp {
         if self.active_view == EditorView::AnimationEditor {
             if let Some(id) = self.selected_entity_id {
                 if let Some(scene) = &self.current_scene {
-                   if let Some(entity) = scene.entities.iter().find(|e| e.id == id) {
-                       let target = Vec3::new(entity.position[0], entity.position[1] + 1.2, entity.position[2]);
-                       // Smooth camera interpolation
-                       self.camera.target.x = self.camera.target.x * 0.95 + target.x * 0.05;
-                       self.camera.target.y = self.camera.target.y * 0.95 + target.y * 0.05;
-                       self.camera.target.z = self.camera.target.z * 0.95 + target.z * 0.05;
-                       // Ensure comfortable viewing distance
-                       if self.camera.distance > 15.0 {
-                           self.camera.distance = self.camera.distance * 0.98 + 15.0 * 0.02;
-                       }
-                   }
+                    if let Some(entity) = scene.entities.iter().find(|e| e.id == id) {
+                        let target = Vec3::new(
+                            entity.position[0],
+                            entity.position[1] + 1.2,
+                            entity.position[2],
+                        );
+                        // Smooth camera interpolation
+                        self.camera.target.x = self.camera.target.x * 0.95 + target.x * 0.05;
+                        self.camera.target.y = self.camera.target.y * 0.95 + target.y * 0.05;
+                        self.camera.target.z = self.camera.target.z * 0.95 + target.z * 0.05;
+                        // Ensure comfortable viewing distance
+                        if self.camera.distance > 15.0 {
+                            self.camera.distance = self.camera.distance * 0.98 + 15.0 * 0.02;
+                        }
+                    }
                 }
             }
         }
 
-        // Zoom
-        let scroll = ui.input(|i| i.raw_scroll_delta.y);
+        // Zoom only when the pointer is over the viewport.
+        let scroll = if response.hovered() {
+            ui.input(|i| i.raw_scroll_delta.y)
+        } else {
+            0.0
+        };
         self.camera.distance = (self.camera.distance - scroll * 1.5).clamp(0.1, 1000.0);
+        let viewport_interacting =
+            response.dragged() || response.drag_started() || scroll.abs() > f32::EPSILON;
 
         // Try GPU-accelerated rendering for High quality mode
         let gpu_rendered = if self.render_quality == RenderQuality::High {
-            if let Some(texture) = self.try_gpu_render(ui.ctx(), rect, available) {
+            if let Some(texture) =
+                self.try_gpu_render(ui.ctx(), rect, available, viewport_interacting)
+            {
                 // GPU render succeeded - draw the texture as background
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                 painter.image(texture.id(), rect, uv, egui::Color32::WHITE);
@@ -2157,16 +2402,16 @@ impl EditorApp {
         if !gpu_rendered {
             if self.render_quality == RenderQuality::High {
                 // Unity-style bright sky gradient (bottom = horizon light blue, top = sky blue)
-                let sky_horizon = egui::Color32::from_rgb(147, 180, 210);   // Light blue at horizon
-                let sky_zenith = egui::Color32::from_rgb(82, 127, 175);     // Deeper blue at top
-                
+                let sky_horizon = egui::Color32::from_rgb(147, 180, 210); // Light blue at horizon
+                let sky_zenith = egui::Color32::from_rgb(82, 127, 175); // Deeper blue at top
+
                 let steps = 16;
                 for i in 0..steps {
                     let t = i as f32 / steps as f32;
                     let h = rect.height();
                     let r = egui::Rect::from_min_max(
                         egui::pos2(rect.min.x, rect.min.y + t * h),
-                        egui::pos2(rect.max.x, rect.min.y + (t + 1.0/steps as f32) * h),
+                        egui::pos2(rect.max.x, rect.min.y + (t + 1.0 / steps as f32) * h),
                     );
                     // Inverse t: sky is brighter at top (t=0) in this loop runs top-to-bottom
                     let inv_t = 1.0 - t;
@@ -2181,21 +2426,24 @@ impl EditorApp {
                 // Low Quality: Dark professional gradient
                 let bg_color_top = egui::Color32::from_rgb(20, 22, 26);
                 let bg_color_bottom = egui::Color32::from_rgb(45, 50, 60);
-                
+
                 painter.rect_filled(rect, 0.0, bg_color_top);
-                
+
                 let steps = 12;
                 for i in 0..steps {
                     let t = i as f32 / steps as f32;
                     let h = rect.height();
                     let r = egui::Rect::from_min_max(
                         egui::pos2(rect.min.x, rect.min.y + t * h),
-                        egui::pos2(rect.max.x, rect.min.y + (t + 1.0/steps as f32) * h),
+                        egui::pos2(rect.max.x, rect.min.y + (t + 1.0 / steps as f32) * h),
                     );
                     let color = egui::Color32::from_rgb(
-                        (bg_color_top.r() as f32 * (1.0 - t) + bg_color_bottom.r() as f32 * t) as u8,
-                        (bg_color_top.g() as f32 * (1.0 - t) + bg_color_bottom.g() as f32 * t) as u8,
-                        (bg_color_top.b() as f32 * (1.0 - t) + bg_color_bottom.b() as f32 * t) as u8,
+                        (bg_color_top.r() as f32 * (1.0 - t) + bg_color_bottom.r() as f32 * t)
+                            as u8,
+                        (bg_color_top.g() as f32 * (1.0 - t) + bg_color_bottom.g() as f32 * t)
+                            as u8,
+                        (bg_color_top.b() as f32 * (1.0 - t) + bg_color_bottom.b() as f32 * t)
+                            as u8,
                     );
                     painter.rect_filled(r, 0.0, color);
                 }
@@ -2211,7 +2459,7 @@ impl EditorApp {
             let cam_dist = self.camera.distance;
             // Fade grid faster at distance
             let base_alpha = (200.0 / (cam_dist * 0.1).max(1.0)).clamp(10.0, 150.0);
-            
+
             // Grid colors based on mode (darker for bright sky, lighter for dark)
             let (major_color, minor_color) = if self.render_quality == RenderQuality::High {
                 // Dark grid on bright sky (like Unity)
@@ -2220,69 +2468,147 @@ impl EditorApp {
                 // Light grid on dark background
                 ([140, 150, 170], [100, 110, 130])
             };
-            
+
             // Render sub-grid for High Quality
             if self.render_quality == RenderQuality::High {
                 for i in -100..=100 {
                     let val = i as f32 * sub_step;
-                    if val.abs() > grid_size { continue; }
-                    if i % 5 == 0 { continue; } // Skip major lines
-                    
+                    if val.abs() > grid_size {
+                        continue;
+                    }
+                    if i % 5 == 0 {
+                        continue;
+                    } // Skip major lines
+
                     // Exponential edge fade for smoother horizon
                     let dist_ratio = val.abs() / grid_size;
                     let edge_fade = (1.0 - dist_ratio * dist_ratio).max(0.0);
                     let alpha = (base_alpha * 0.25 * edge_fade) as u8;
-                    let stroke = egui::Stroke::new(0.3, egui::Color32::from_rgba_unmultiplied(minor_color[0], minor_color[1], minor_color[2], alpha));
-                    
+                    let stroke = egui::Stroke::new(
+                        0.3,
+                        egui::Color32::from_rgba_unmultiplied(
+                            minor_color[0],
+                            minor_color[1],
+                            minor_color[2],
+                            alpha,
+                        ),
+                    );
+
                     // X
-                    if let (Some(p1), Some(p2)) = (self.camera.project(Vec3::new(val, 0.0, -grid_size), available), self.camera.project(Vec3::new(val, 0.0, grid_size), available)) {
-                        painter.line_segment([egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)], stroke);
+                    if let (Some(p1), Some(p2)) = (
+                        self.camera
+                            .project(Vec3::new(val, 0.0, -grid_size), available),
+                        self.camera
+                            .project(Vec3::new(val, 0.0, grid_size), available),
+                    ) {
+                        painter.line_segment(
+                            [
+                                egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y),
+                                egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y),
+                            ],
+                            stroke,
+                        );
                     }
                     // Z
-                    if let (Some(p1), Some(p2)) = (self.camera.project(Vec3::new(-grid_size, 0.0, val), available), self.camera.project(Vec3::new(grid_size, 0.0, val), available)) {
-                        painter.line_segment([egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)], stroke);
+                    if let (Some(p1), Some(p2)) = (
+                        self.camera
+                            .project(Vec3::new(-grid_size, 0.0, val), available),
+                        self.camera
+                            .project(Vec3::new(grid_size, 0.0, val), available),
+                    ) {
+                        painter.line_segment(
+                            [
+                                egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y),
+                                egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y),
+                            ],
+                            stroke,
+                        );
                     }
                 }
             }
 
             for i in -50..=50 {
                 let val = i as f32 * grid_step;
-                if val.abs() > grid_size { continue; }
+                if val.abs() > grid_size {
+                    continue;
+                }
                 let is_major = i % 5 == 0;
-                
+
                 // Dist alpha - fade at edges
                 let dist_ratio = val.abs() / grid_size;
                 let edge_fade = (1.0 - dist_ratio * dist_ratio).max(0.0);
                 let alpha = (base_alpha * edge_fade) as u8;
-                
+
                 // X-lines
                 if let (Some(p1), Some(p2)) = (
-                    self.camera.project(Vec3::new(val, 0.0, -grid_size), available),
-                    self.camera.project(Vec3::new(val, 0.0, grid_size), available),
+                    self.camera
+                        .project(Vec3::new(val, 0.0, -grid_size), available),
+                    self.camera
+                        .project(Vec3::new(val, 0.0, grid_size), available),
                 ) {
-                    let stroke = if is_major { 
-                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(major_color[0], major_color[1], major_color[2], alpha))
+                    let stroke = if is_major {
+                        egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_rgba_unmultiplied(
+                                major_color[0],
+                                major_color[1],
+                                major_color[2],
+                                alpha,
+                            ),
+                        )
                     } else {
-                        egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(minor_color[0], minor_color[1], minor_color[2], alpha / 2))
+                        egui::Stroke::new(
+                            0.5,
+                            egui::Color32::from_rgba_unmultiplied(
+                                minor_color[0],
+                                minor_color[1],
+                                minor_color[2],
+                                alpha / 2,
+                            ),
+                        )
                     };
                     painter.line_segment(
-                        [egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)],
+                        [
+                            egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y),
+                            egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y),
+                        ],
                         stroke,
                     );
                 }
-                
+
                 // Z-lines
                 if let (Some(p1), Some(p2)) = (
-                    self.camera.project(Vec3::new(-grid_size, 0.0, val), available),
-                    self.camera.project(Vec3::new(grid_size, 0.0, val), available),
+                    self.camera
+                        .project(Vec3::new(-grid_size, 0.0, val), available),
+                    self.camera
+                        .project(Vec3::new(grid_size, 0.0, val), available),
                 ) {
-                    let stroke = if is_major { 
-                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(major_color[0], major_color[1], major_color[2], alpha))
+                    let stroke = if is_major {
+                        egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_rgba_unmultiplied(
+                                major_color[0],
+                                major_color[1],
+                                major_color[2],
+                                alpha,
+                            ),
+                        )
                     } else {
-                        egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(minor_color[0], minor_color[1], minor_color[2], alpha / 2))
+                        egui::Stroke::new(
+                            0.5,
+                            egui::Color32::from_rgba_unmultiplied(
+                                minor_color[0],
+                                minor_color[1],
+                                minor_color[2],
+                                alpha / 2,
+                            ),
+                        )
                     };
                     painter.line_segment(
-                        [egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y), egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y)],
+                        [
+                            egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y),
+                            egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y),
+                        ],
                         stroke,
                     );
                 }
@@ -2293,9 +2619,18 @@ impl EditorApp {
             if let Some(o) = self.camera.project(origin, available) {
                 let o = egui::pos2(rect.min.x + o.x, rect.min.y + o.y);
                 for (axis, color) in [
-                    (Vec3::new(5.0, 0.0, 0.0), egui::Color32::from_rgb(255, 60, 60)),
-                    (Vec3::new(0.0, 5.0, 0.0), egui::Color32::from_rgb(60, 255, 60)),
-                    (Vec3::new(0.0, 0.0, 5.0), egui::Color32::from_rgb(60, 60, 255)),
+                    (
+                        Vec3::new(5.0, 0.0, 0.0),
+                        egui::Color32::from_rgb(255, 60, 60),
+                    ),
+                    (
+                        Vec3::new(0.0, 5.0, 0.0),
+                        egui::Color32::from_rgb(60, 255, 60),
+                    ),
+                    (
+                        Vec3::new(0.0, 0.0, 5.0),
+                        egui::Color32::from_rgb(60, 60, 255),
+                    ),
                 ] {
                     if let Some(p) = self.camera.project(axis, available) {
                         painter.line_segment(
@@ -2316,7 +2651,7 @@ impl EditorApp {
             let anim_state = &self.animation_editor_state;
             let render_quality = self.render_quality;
             let skip_cpu_rendering = gpu_rendered; // If GPU rendered, skip expensive CPU mesh prep
-            
+
             // Parallel: Compute all entity render data (projections, colors, etc.)
             let white_pixel_uv = egui::pos2(0.0, 0.0);
             let cam_pos = camera.get_position();
@@ -2325,257 +2660,380 @@ impl EditorApp {
                 let fwd = camera.get_forward();
                 GVec3::new(fwd.x, fwd.y, fwd.z)
             };
-            
+
             // Extract frustum once for culling
             let vp = camera.get_view_proj(available.x / available.y);
             let frustum = Frustum::from_view_proj(vp);
 
-            let mut entity_renders: Vec<_> = scene.entities.par_iter().map(|entity| {
-                let pos = Vec3::new(entity.position[0], entity.position[1], entity.position[2]);
-                let is_selected = selected_id == Some(entity.id);
-                // Ground and Plane entities should be double-sided (no backface culling)
-                let _is_double_sided = matches!(&entity.entity_type, EntityType::Ground | EntityType::Primitive(PrimitiveType::Plane));
-                
-                let base_color = [
-                    (entity.material.albedo_color[0] * 200.0) as u8,
-                    (entity.material.albedo_color[1] * 200.0) as u8,
-                    (entity.material.albedo_color[2] * 200.0) as u8,
-                ];
+            let mut entity_renders: Vec<_> = scene
+                .entities
+                .par_iter()
+                .map(|entity| {
+                    let pos = Vec3::new(entity.position[0], entity.position[1], entity.position[2]);
+                    let is_selected = selected_id == Some(entity.id);
+                    // Ground and Plane entities should be double-sided (no backface culling)
+                    let _is_double_sided = matches!(
+                        &entity.entity_type,
+                        EntityType::Ground | EntityType::Primitive(PrimitiveType::Plane)
+                    );
 
-                // Standard projection for icons/centers
-                let center_proj = camera.project(pos, available)
-                    .map(|p| egui::pos2(rect.min.x + p.x, rect.min.y + p.y));
-                
-                let mut high_res_meshes = Vec::new();
+                    let base_color = [
+                        (entity.material.albedo_color[0] * 200.0) as u8,
+                        (entity.material.albedo_color[1] * 200.0) as u8,
+                        (entity.material.albedo_color[2] * 200.0) as u8,
+                    ];
 
-                // 1. Frustum Culling at Entity Level
-                // 1. Precise Frustum Culling at Entity Level
-                let entity_scale = GVec3::from(entity.scale);
-                let entity_pos = GVec3::from(entity.position);
-                
-                let mesh_path = match &entity.entity_type {
-                    EntityType::Mesh { path } => Some(path.clone()),
-                    EntityType::Primitive(ptype) => Some(format!("primitive://{}", ptype.name().to_lowercase())),
-                    EntityType::Ground => Some("primitive://cube".to_string()),
-                    EntityType::Vehicle => Some("primitive://cube".to_string()),
-                    EntityType::Building { .. } => Some("primitive://cube".to_string()),
-                    EntityType::CrowdAgent { .. } => Some("primitive://capsule".to_string()),
-                    _ => None,
-                };
+                    // Standard projection for icons/centers
+                    let center_proj = camera
+                        .project(pos, available)
+                        .map(|p| egui::pos2(rect.min.x + p.x, rect.min.y + p.y));
 
-                let entity_aabb = if let Some(path) = &mesh_path {
-                    if let Some(model) = model_cache.get(path) {
-                        // Use pre-calculated ModelScene AABB for speed
-                        let center = (model.aabb_min + model.aabb_max) * 0.5;
-                        let extent = (model.aabb_max - model.aabb_min) * 0.5;
-                        let world_center = entity_pos + GQuat::from_array(entity.rotation) * (center * entity_scale);
-                        let world_extent = entity_scale * extent * 1.2; // Extra padding for rotation
-                        AABB::from_center_extents(world_center, world_extent)
+                    let mut high_res_meshes = Vec::new();
+
+                    // 1. Frustum Culling at Entity Level
+                    // 1. Precise Frustum Culling at Entity Level
+                    let entity_scale = GVec3::from(entity.scale);
+                    let entity_pos = GVec3::from(entity.position);
+
+                    let mesh_path = match &entity.entity_type {
+                        EntityType::Mesh { path } => Some(path.clone()),
+                        EntityType::Primitive(ptype) => {
+                            Some(format!("primitive://{}", ptype.name().to_lowercase()))
+                        }
+                        EntityType::Ground => Some("primitive://cube".to_string()),
+                        EntityType::Vehicle => Some("primitive://cube".to_string()),
+                        EntityType::Building { .. } => Some("primitive://cube".to_string()),
+                        EntityType::CrowdAgent { .. } => Some("primitive://capsule".to_string()),
+                        _ => None,
+                    };
+
+                    let entity_aabb = if let Some(path) = &mesh_path {
+                        if let Some(model) = model_cache.get(path) {
+                            // Use pre-calculated ModelScene AABB for speed
+                            let center = (model.aabb_min + model.aabb_max) * 0.5;
+                            let extent = (model.aabb_max - model.aabb_min) * 0.5;
+                            let world_center = entity_pos
+                                + GQuat::from_array(entity.rotation) * (center * entity_scale);
+                            let world_extent = entity_scale * extent * 1.2; // Extra padding for rotation
+                            AABB::from_center_extents(world_center, world_extent)
+                        } else {
+                            AABB::from_center_extents(entity_pos, entity_scale * 1.5)
+                        }
                     } else {
                         AABB::from_center_extents(entity_pos, entity_scale * 1.5)
-                    }
-                } else {
-                    AABB::from_center_extents(entity_pos, entity_scale * 1.5) // Conservative bounds
-                };
-                let is_visible = frustum.intersects_aabb(&entity_aabb);
+                        // Conservative bounds
+                    };
+                    let is_visible = frustum.intersects_aabb(&entity_aabb);
 
-                if render_quality == RenderQuality::High && is_visible && !skip_cpu_rendering {
-                    // Reuse mesh_path from frustum culling above
-                    if let Some(ref path) = mesh_path {
-                        if let Some(model) = model_cache.get(path) {
-                            let transform = Mat4::from_scale_rotation_translation(
-                                entity_scale,
-                                GQuat::from_array(entity.rotation),
-                                entity_pos,
-                            );
-                            
-                            // NOTE: Base-Origin offset removed to match client/deployed behavior.
-                            // The client uses raw model transforms without adjustment.
-                            
-                            let pose = Self::compute_animated_pose(entity, model_cache, anim_state);
-                            let mat_color = GVec3::new(
-                                entity.material.albedo_color[0],
-                                entity.material.albedo_color[1],
-                                entity.material.albedo_color[2],
-                            );
-                            
-                            // Balanced lighting - slightly angled for depth perception
-                            let light_dir = GVec3::new(0.4, 0.8, 0.3).normalize();
-                            
-                            // Process all meshes (regular and skinned)
-                            let all_meshes: Vec<&stfsc_engine::world::Mesh> = model.meshes.iter()
-                                .chain(model.skinned_meshes.iter().map(|s| &s.mesh))
-                                .collect();
-                            
-                            for mesh in all_meshes {
-                                // 2. Vertex Pre-processing Pass (Parallel within mesh)
-                                let processed_verts: Vec<ProcessedVertex> = mesh.vertices.par_iter().map(|v| {
-                                    // Transform
-                                    let (world_pos, world_normal) = if let Some((_, skinning_matrices)) = &pose {
-                                        let mut skinned_pos = GVec3::ZERO;
-                                        let mut skinned_norm = GVec3::ZERO;
-                                        for i in 0..4 {
-                                            let weight = v.bone_weights[i];
-                                            if weight > 0.0 {
-                                                let bone_idx = v.bone_indices[i] as usize;
-                                                if let Some(mat) = skinning_matrices.get(bone_idx) {
-                                                    skinned_pos += mat.transform_point3(GVec3::from(v.position)) * weight;
-                                                    skinned_norm += mat.transform_vector3(GVec3::from(v.normal)) * weight;
+                    if render_quality == RenderQuality::High && is_visible && !skip_cpu_rendering {
+                        // Reuse mesh_path from frustum culling above
+                        if let Some(ref path) = mesh_path {
+                            if let Some(model) = model_cache.get(path) {
+                                let transform = Mat4::from_scale_rotation_translation(
+                                    entity_scale,
+                                    GQuat::from_array(entity.rotation),
+                                    entity_pos,
+                                );
+
+                                // NOTE: Base-Origin offset removed to match client/deployed behavior.
+                                // The client uses raw model transforms without adjustment.
+
+                                let pose =
+                                    Self::compute_animated_pose(entity, model_cache, anim_state);
+                                let mat_color = GVec3::new(
+                                    entity.material.albedo_color[0],
+                                    entity.material.albedo_color[1],
+                                    entity.material.albedo_color[2],
+                                );
+
+                                // Balanced lighting - slightly angled for depth perception
+                                let light_dir = GVec3::new(0.4, 0.8, 0.3).normalize();
+
+                                // Process all meshes (regular and skinned)
+                                let all_meshes: Vec<&stfsc_engine::world::Mesh> = model
+                                    .meshes
+                                    .iter()
+                                    .chain(model.skinned_meshes.iter().map(|s| &s.mesh))
+                                    .collect();
+
+                                for mesh in all_meshes {
+                                    // 2. Vertex Pre-processing Pass (Parallel within mesh)
+                                    let processed_verts: Vec<ProcessedVertex> = mesh
+                                        .vertices
+                                        .par_iter()
+                                        .map(|v| {
+                                            // Transform
+                                            let (world_pos, world_normal) =
+                                                if let Some((_, skinning_matrices)) = &pose {
+                                                    let mut skinned_pos = GVec3::ZERO;
+                                                    let mut skinned_norm = GVec3::ZERO;
+                                                    for i in 0..4 {
+                                                        let weight = v.bone_weights[i];
+                                                        if weight > 0.0 {
+                                                            let bone_idx =
+                                                                v.bone_indices[i] as usize;
+                                                            if let Some(mat) =
+                                                                skinning_matrices.get(bone_idx)
+                                                            {
+                                                                skinned_pos +=
+                                                                    mat.transform_point3(
+                                                                        GVec3::from(v.position),
+                                                                    ) * weight;
+                                                                skinned_norm +=
+                                                                    mat.transform_vector3(
+                                                                        GVec3::from(v.normal),
+                                                                    ) * weight;
+                                                            }
+                                                        }
+                                                    }
+                                                    (
+                                                        transform.transform_point3(skinned_pos),
+                                                        transform
+                                                            .transform_vector3(skinned_norm)
+                                                            .normalize(),
+                                                    )
+                                                } else {
+                                                    (
+                                                        transform.transform_point3(GVec3::from(
+                                                            v.position,
+                                                        )),
+                                                        transform
+                                                            .transform_vector3(GVec3::from(
+                                                                v.normal,
+                                                            ))
+                                                            .normalize(),
+                                                    )
+                                                };
+
+                                            let depth = (world_pos - cam_pos_g).dot(cam_fwd);
+                                            // Project vertex to screen space
+                                            // Use project_unclamped for large geometry where vertices may be off-screen
+                                            let (proj_pos, proj_valid) = camera.project_unclamped(
+                                                Vec3::new(world_pos.x, world_pos.y, world_pos.z),
+                                                available,
+                                            );
+                                            let screen_pos = egui::pos2(
+                                                rect.min.x + proj_pos.x,
+                                                rect.min.y + proj_pos.y,
+                                            );
+                                            // Vertex is valid if projection succeeded AND depth is positive
+                                            let is_valid = proj_valid && depth > 0.1;
+
+                                            // Shade
+                                            let mut color = egui::Color32::BLACK;
+                                            if is_valid {
+                                                let view_dir = (cam_pos_g - world_pos).normalize();
+                                                // Bright, balanced ambient lighting
+                                                let ambient = 0.35;
+                                                let diffuse =
+                                                    world_normal.dot(light_dir).max(0.0) * 0.65;
+                                                let half_dir = (light_dir + view_dir).normalize();
+                                                let specular =
+                                                    world_normal.dot(half_dir).max(0.0).powf(24.0)
+                                                        * 0.2;
+                                                let base_col = mat_color * GVec3::from(v.color);
+                                                let mut shaded = base_col * (diffuse + ambient)
+                                                    + GVec3::splat(specular);
+
+                                                if is_selected {
+                                                    shaded = shaded
+                                                        .lerp(GVec3::new(1.0, 0.85, 0.4), 0.25);
                                                 }
+
+                                                // Apply fog
+                                                let fog_color = GVec3::new(0.50, 0.65, 0.85);
+                                                let fog_dist = (depth - 20.0).max(0.0) * 0.002;
+                                                let fog_factor = (1.0f32 - (-fog_dist).exp())
+                                                    .clamp(0.0f32, 1.0f32);
+                                                shaded = shaded.lerp(fog_color, fog_factor);
+
+                                                color = egui::Color32::from_rgb(
+                                                    (shaded.x.clamp(0.0, 1.0) * 255.0) as u8,
+                                                    (shaded.y.clamp(0.0, 1.0) * 255.0) as u8,
+                                                    (shaded.z.clamp(0.0, 1.0) * 255.0) as u8,
+                                                );
                                             }
-                                        }
-                                        (transform.transform_point3(skinned_pos), transform.transform_vector3(skinned_norm).normalize())
-                                    } else {
-                                        (transform.transform_point3(GVec3::from(v.position)), transform.transform_vector3(GVec3::from(v.normal)).normalize())
-                                    };
 
-                                    let depth = (world_pos - cam_pos_g).dot(cam_fwd);
-                                    // Project vertex to screen space
-                                    // Use project_unclamped for large geometry where vertices may be off-screen
-                                    let (proj_pos, proj_valid) = camera.project_unclamped(Vec3::new(world_pos.x, world_pos.y, world_pos.z), available);
-                                    let screen_pos = egui::pos2(rect.min.x + proj_pos.x, rect.min.y + proj_pos.y);
-                                    // Vertex is valid if projection succeeded AND depth is positive
-                                    let is_valid = proj_valid && depth > 0.1;
+                                            ProcessedVertex {
+                                                pos: screen_pos,
+                                                color,
+                                                uv: egui::pos2(v.uv[0], v.uv[1]),
+                                                depth,
+                                                world_pos,
+                                                is_valid,
+                                            }
+                                        })
+                                        .collect();
 
-                                    // Shade
-                                    let mut color = egui::Color32::BLACK;
-                                    if is_valid {
-                                        let view_dir = (cam_pos_g - world_pos).normalize();
-                                        // Bright, balanced ambient lighting
-                                        let ambient = 0.35;
-                                        let diffuse = world_normal.dot(light_dir).max(0.0) * 0.65;
-                                        let half_dir = (light_dir + view_dir).normalize();
-                                        let specular = world_normal.dot(half_dir).max(0.0).powf(24.0) * 0.2;
-                                        let base_col = mat_color * GVec3::from(v.color);
-                                        let mut shaded = base_col * (diffuse + ambient) + GVec3::splat(specular);
-                                        
-                                        if is_selected { shaded = shaded.lerp(GVec3::new(1.0, 0.85, 0.4), 0.25); }
+                                    // 3. Triangle Collection & Sorting pass (Parallel with stable indices)
+                                    let num_tris = mesh.indices.len() / 3;
+                                    let valid_tris: Vec<(usize, [usize; 3], f32)> = (0..num_tris)
+                                        .into_par_iter()
+                                        .filter_map(|tri_idx| {
+                                            let base = tri_idx * 3;
+                                            if base + 2 >= mesh.indices.len() {
+                                                return None;
+                                            }
+                                            let indices = [
+                                                mesh.indices[base] as usize,
+                                                mesh.indices[base + 1] as usize,
+                                                mesh.indices[base + 2] as usize,
+                                            ];
+                                            let v0 = &processed_verts[indices[0]];
+                                            let v1 = &processed_verts[indices[1]];
+                                            let v2 = &processed_verts[indices[2]];
 
-                                        // Apply fog
-                                        let fog_color = GVec3::new(0.50, 0.65, 0.85);
-                                        let fog_dist = (depth - 20.0).max(0.0) * 0.002;
-                                        let fog_factor = (1.0f32 - (-fog_dist).exp()).clamp(0.0f32, 1.0f32);
-                                        shaded = shaded.lerp(fog_color, fog_factor);
+                                            // Basic vertex validity check - require all vertices to be in front of camera
+                                            if !v0.is_valid || !v1.is_valid || !v2.is_valid {
+                                                return None;
+                                            }
 
-                                        color = egui::Color32::from_rgb(
-                                            (shaded.x.clamp(0.0, 1.0) * 255.0) as u8,
-                                            (shaded.y.clamp(0.0, 1.0) * 255.0) as u8,
-                                            (shaded.z.clamp(0.0, 1.0) * 255.0) as u8,
-                                        );
-                                    }
+                                            // NO BACKFACE CULLING - matches client's vk::CullModeFlags::NONE
+                                            // The GPU hardware doesn't cull backfaces, so neither should the editor
 
-                                    ProcessedVertex {
-                                        pos: screen_pos,
-                                        color,
-                                        uv: egui::pos2(v.uv[0], v.uv[1]),
-                                        depth,
-                                        world_pos,
-                                        is_valid,
-                                    }
-                                }).collect();
+                                            // Only reject truly degenerate triangles (zero area)
+                                            let area = ((v1.pos.x - v0.pos.x)
+                                                * (v2.pos.y - v0.pos.y)
+                                                - (v2.pos.x - v0.pos.x) * (v1.pos.y - v0.pos.y))
+                                                .abs()
+                                                * 0.5;
+                                            if area < 0.001 {
+                                                return None;
+                                            }
 
-                                // 3. Triangle Collection & Sorting pass (Parallel with stable indices)
-                                let num_tris = mesh.indices.len() / 3;
-                                let valid_tris: Vec<(usize, [usize; 3], f32)> = (0..num_tris).into_par_iter().filter_map(|tri_idx| {
-                                    let base = tri_idx * 3;
-                                    if base + 2 >= mesh.indices.len() { return None; }
-                                    let indices = [mesh.indices[base] as usize, mesh.indices[base + 1] as usize, mesh.indices[base + 2] as usize];
-                                    let v0 = &processed_verts[indices[0]];
-                                    let v1 = &processed_verts[indices[1]];
-                                    let v2 = &processed_verts[indices[2]];
+                                            let avg_depth = (v0.depth + v1.depth + v2.depth) / 3.0;
+                                            Some((tri_idx, indices, avg_depth))
+                                        })
+                                        .collect();
 
-                                    // Basic vertex validity check - require all vertices to be in front of camera
-                                    if !v0.is_valid || !v1.is_valid || !v2.is_valid { return None; }
-
-                                    // NO BACKFACE CULLING - matches client's vk::CullModeFlags::NONE
-                                    // The GPU hardware doesn't cull backfaces, so neither should the editor
-
-                                    // Only reject truly degenerate triangles (zero area)
-                                    let area = ((v1.pos.x - v0.pos.x) * (v2.pos.y - v0.pos.y) - (v2.pos.x - v0.pos.x) * (v1.pos.y - v0.pos.y)).abs() * 0.5;
-                                    if area < 0.001 { return None; }
-
-                                    let avg_depth = (v0.depth + v1.depth + v2.depth) / 3.0;
-                                    Some((tri_idx, indices, avg_depth))
-                                }).collect();
-
-                                // Stable sort by depth (far to near), preserves original order for equal depths
-                                let mut valid_tris = valid_tris;
-                                valid_tris.sort_by(|a, b| {
-                                    match b.2.partial_cmp(&a.2) {
+                                    // Stable sort by depth (far to near), preserves original order for equal depths
+                                    let mut valid_tris = valid_tris;
+                                    valid_tris.sort_by(|a, b| match b.2.partial_cmp(&a.2) {
                                         Some(std::cmp::Ordering::Equal) | None => a.0.cmp(&b.0),
                                         Some(ord) => ord,
+                                    });
+
+                                    // 4. Final Egui Mesh Construction
+                                    // Calculate average depth for this sub-mesh BEFORE consuming valid_tris
+                                    let mesh_avg_depth = if !valid_tris.is_empty() {
+                                        valid_tris.iter().map(|(_, _, d)| *d).sum::<f32>()
+                                            / valid_tris.len() as f32
+                                    } else {
+                                        0.0
+                                    };
+
+                                    let mut egui_vertices =
+                                        Vec::with_capacity(valid_tris.len() * 3);
+                                    let mut egui_indices = Vec::with_capacity(valid_tris.len() * 3);
+                                    let has_texture = mesh.albedo_texture.is_some()
+                                        || entity.material.albedo_texture.is_some();
+
+                                    for (_, indices, _) in valid_tris {
+                                        let base_idx = egui_vertices.len() as u32;
+                                        for &idx in &indices {
+                                            let v = &processed_verts[idx];
+                                            egui_vertices.push(egui::epaint::Vertex {
+                                                pos: v.pos,
+                                                uv: if has_texture { v.uv } else { white_pixel_uv },
+                                                color: v.color,
+                                            });
+                                        }
+                                        egui_indices.push(base_idx);
+                                        egui_indices.push(base_idx + 1);
+                                        egui_indices.push(base_idx + 2);
                                     }
-                                });
 
-                                // 4. Final Egui Mesh Construction
-                                // Calculate average depth for this sub-mesh BEFORE consuming valid_tris
-                                let mesh_avg_depth = if !valid_tris.is_empty() {
-                                    valid_tris.iter().map(|(_, _, d)| *d).sum::<f32>() / valid_tris.len() as f32
-                                } else {
-                                    0.0
-                                };
-                                
-                                let mut egui_vertices = Vec::with_capacity(valid_tris.len() * 3);
-                                let mut egui_indices = Vec::with_capacity(valid_tris.len() * 3);
-                                let has_texture = mesh.albedo_texture.is_some() || entity.material.albedo_texture.is_some();
-
-                                for (_, indices, _) in valid_tris {
-                                    let base_idx = egui_vertices.len() as u32;
-                                    for &idx in &indices {
-                                        let v = &processed_verts[idx];
-                                        egui_vertices.push(egui::epaint::Vertex {
-                                            pos: v.pos,
-                                            uv: if has_texture { v.uv } else { white_pixel_uv },
-                                            color: v.color,
-                                        });
+                                    if !egui_indices.is_empty() {
+                                        high_res_meshes.push((
+                                            egui_vertices,
+                                            egui_indices,
+                                            mesh.albedo_texture.clone(),
+                                            mesh_avg_depth,
+                                        ));
                                     }
-                                    egui_indices.push(base_idx);
-                                    egui_indices.push(base_idx + 1);
-                                    egui_indices.push(base_idx + 2);
-                                }
-
-                                if !egui_indices.is_empty() {
-                                    high_res_meshes.push((egui_vertices, egui_indices, mesh.albedo_texture.clone(), mesh_avg_depth));
                                 }
                             }
                         }
                     }
-                }
 
-                // Culling for icons/lines (project corners for bounding box culling)
-                let half = Vec3::new(entity.scale[0] * 0.5, entity.scale[1] * 0.5, entity.scale[2] * 0.5);
-                let corners = [
-                    Vec3::new(pos.x - half.x, pos.y - half.y, pos.z - half.z),
-                    Vec3::new(pos.x + half.x, pos.y - half.y, pos.z - half.z),
-                    Vec3::new(pos.x + half.x, pos.y + half.y, pos.z - half.z),
-                    Vec3::new(pos.x - half.x, pos.y + half.y, pos.z - half.z),
-                    Vec3::new(pos.x - half.x, pos.y - half.y, pos.z + half.z),
-                    Vec3::new(pos.x + half.x, pos.y - half.y, pos.z + half.z),
-                    Vec3::new(pos.x + half.x, pos.y + half.y, pos.z + half.z),
-                    Vec3::new(pos.x - half.x, pos.y + half.y, pos.z + half.z),
-                ];
-                let proj: Vec<Option<egui::Pos2>> = corners.iter().map(|c| {
-                    camera.project(*c, available).map(|p| egui::pos2(rect.min.x + p.x, rect.min.y + p.y))
-                }).collect();
-                
-                let dist_to_cam = (entity_pos - cam_pos_g).length();
-                let is_light = matches!(&entity.entity_type, EntityType::Light { .. });
-                let is_camera = matches!(&entity.entity_type, EntityType::Camera);
-                (entity.id, is_selected, base_color, proj, center_proj, high_res_meshes, dist_to_cam, pos, Vec3::new(half.x, half.y, half.z), entity.material.albedo_texture.clone(), is_light, is_camera)
-            }).collect();
-            
+                    // Culling for icons/lines (project corners for bounding box culling)
+                    let half = Vec3::new(
+                        entity.scale[0] * 0.5,
+                        entity.scale[1] * 0.5,
+                        entity.scale[2] * 0.5,
+                    );
+                    let corners = [
+                        Vec3::new(pos.x - half.x, pos.y - half.y, pos.z - half.z),
+                        Vec3::new(pos.x + half.x, pos.y - half.y, pos.z - half.z),
+                        Vec3::new(pos.x + half.x, pos.y + half.y, pos.z - half.z),
+                        Vec3::new(pos.x - half.x, pos.y + half.y, pos.z - half.z),
+                        Vec3::new(pos.x - half.x, pos.y - half.y, pos.z + half.z),
+                        Vec3::new(pos.x + half.x, pos.y - half.y, pos.z + half.z),
+                        Vec3::new(pos.x + half.x, pos.y + half.y, pos.z + half.z),
+                        Vec3::new(pos.x - half.x, pos.y + half.y, pos.z + half.z),
+                    ];
+                    let proj: Vec<Option<egui::Pos2>> = corners
+                        .iter()
+                        .map(|c| {
+                            camera
+                                .project(*c, available)
+                                .map(|p| egui::pos2(rect.min.x + p.x, rect.min.y + p.y))
+                        })
+                        .collect();
+
+                    let dist_to_cam = (entity_pos - cam_pos_g).length();
+                    let is_light = matches!(&entity.entity_type, EntityType::Light { .. });
+                    let is_camera = matches!(&entity.entity_type, EntityType::Camera);
+                    (
+                        entity.id,
+                        is_selected,
+                        base_color,
+                        proj,
+                        center_proj,
+                        high_res_meshes,
+                        dist_to_cam,
+                        pos,
+                        Vec3::new(half.x, half.y, half.z),
+                        entity.material.albedo_texture.clone(),
+                        is_light,
+                        is_camera,
+                    )
+                })
+                .collect();
+
             // Sort entities by distance from camera (far to near)
-            entity_renders.sort_by(|a, b| b.6.partial_cmp(&a.6).unwrap_or(std::cmp::Ordering::Equal));
-            
+            entity_renders
+                .sort_by(|a, b| b.6.partial_cmp(&a.6).unwrap_or(std::cmp::Ordering::Equal));
+
             // Draw high-quality meshes (Always as fallback/overlay for now)
-            let use_gpu_viewport_rendering = self.render_quality == RenderQuality::High && self.use_gpu_viewport && self.viewport_texture.is_some();
-            
+            let use_gpu_viewport_rendering = self.render_quality == RenderQuality::High
+                && self.use_gpu_viewport
+                && self.viewport_texture.is_some();
+
             // Sequential: Draw using pre-computed projections (already sorted far-to-near)
-            for (id, is_selected, base_color, proj, center_proj, high_res_meshes, _dist, pos, half, entity_albedo, is_light, is_camera) in entity_renders {
+            for (
+                id,
+                is_selected,
+                base_color,
+                proj,
+                center_proj,
+                high_res_meshes,
+                _dist,
+                pos,
+                half,
+                entity_albedo,
+                is_light,
+                is_camera,
+            ) in entity_renders
+            {
                 let base = egui::Color32::from_rgb(base_color[0], base_color[1], base_color[2]);
-                let wire_color = if is_selected { egui::Color32::GOLD } else { base };
+                let wire_color = if is_selected {
+                    egui::Color32::GOLD
+                } else {
+                    base
+                };
                 let stroke = egui::Stroke::new(if is_selected { 2.5 } else { 1.0 }, wire_color);
-                
+
                 // Draw wireframe/Solid - Low = ALWAYS wireframe, High = solid meshes if available
                 // Always draw software meshes for now so we don't have an empty screen
                 // EXCEPT if GPU render already handled it (prevents doubling/artifacting)
@@ -2583,21 +3041,25 @@ impl EditorApp {
                 if !gpu_rendered && self.render_quality == RenderQuality::High && has_mesh {
                     // Sort sub-meshes by depth (far to near) for correct occlusion
                     let mut high_res_meshes = high_res_meshes;
-                    high_res_meshes.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
-                    
+                    high_res_meshes
+                        .sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+
                     // High Quality: Render solid lit triangles with smooth Gouraud shading and textures
                     for (egui_vertices, indices, texture_name, _depth) in high_res_meshes {
                         let mut mesh = egui::Mesh::default();
                         mesh.vertices = egui_vertices;
                         mesh.indices = indices;
-                        
+
                         // Apply texture if available
                         let mut final_texture = texture_name;
                         if final_texture.is_none() {
                             if let Some(entity_tex) = &entity_albedo {
                                 // Try to get the filename of the entity texture
                                 let tex_name = std::path::Path::new(entity_tex)
-                                    .file_name().unwrap_or_default().to_string_lossy().to_string();
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string();
                                 final_texture = Some(tex_name);
                             }
                         }
@@ -2607,10 +3069,10 @@ impl EditorApp {
                                 mesh.texture_id = handle.id();
                             }
                         }
-                        
+
                         painter.add(egui::Shape::mesh(mesh));
                     }
-                    
+
                     // Realistic Mesh Projection Shadows for High Quality
                     // Project the entire mesh silhouette onto the ground plane (Y=0)
                     let shadow_dist = pos.y;
@@ -2618,22 +3080,26 @@ impl EditorApp {
 
                     // Optimization: Skip shadows for small or far objects
                     if shadow_dist > 0.0 && shadow_dist < 50.0 && shadow_size > 0.1 {
-                        let shadow_alpha = (60.0 / (shadow_dist * 0.5 + 1.0)).clamp(5.0, 40.0) as u8;
-                        
+                        let shadow_alpha =
+                            (60.0 / (shadow_dist * 0.5 + 1.0)).clamp(5.0, 40.0) as u8;
+
                         let shadow_pos = Vec3::new(pos.x, 0.0, pos.z);
                         if let Some(sp) = camera.project(shadow_pos, available) {
                             let sp = egui::pos2(rect.min.x + sp.x, rect.min.y + sp.y);
-                            
+
                             // Transform the extents to screen space to get an ellipse
                             // Use actual half-extents for more accurate shadow sizing
                             let extent_x = Vec3::new(pos.x + half.x, 0.0, pos.z);
                             let extent_z = Vec3::new(pos.x, 0.0, pos.z + half.z);
-                            
-                            if let (Some(px), Some(pz)) = (camera.project(extent_x, available), camera.project(extent_z, available)) {
+
+                            if let (Some(px), Some(pz)) = (
+                                camera.project(extent_x, available),
+                                camera.project(extent_z, available),
+                            ) {
                                 let dx = px.x - (sp.x - rect.min.x);
                                 let dy = px.y - (sp.y - rect.min.y);
                                 let radius_x = (dx * dx + dy * dy).sqrt();
-                                
+
                                 let dzx = pz.x - (sp.x - rect.min.x);
                                 let dzy = pz.y - (sp.y - rect.min.y);
                                 let radius_z = (dzx * dzx + dzy * dzy).sqrt();
@@ -2643,8 +3109,9 @@ impl EditorApp {
                                 for i in 0..2 {
                                     let t = 1.0 - (i as f32 / 2.0);
                                     let alpha = (shadow_alpha as f32 * t * t) as u8;
-                                    let s_color = egui::Color32::from_rgba_unmultiplied(5, 10, 15, alpha);
-                                    
+                                    let s_color =
+                                        egui::Color32::from_rgba_unmultiplied(5, 10, 15, alpha);
+
                                     // Approximate ellipse with a 8-sided polygon for faster results
                                     let mut points = Vec::with_capacity(8);
                                     let rad_x = radius_x * (1.0 + i as f32 * 0.6);
@@ -2656,42 +3123,70 @@ impl EditorApp {
                                             sp.y + angle.sin() * rad_z,
                                         ));
                                     }
-                                    painter.add(egui::Shape::convex_polygon(points, s_color, egui::Stroke::NONE));
+                                    painter.add(egui::Shape::convex_polygon(
+                                        points,
+                                        s_color,
+                                        egui::Stroke::NONE,
+                                    ));
                                 }
                             }
                         }
                     }
-                    
+
                     // Also draw a subtle wireframe overlay on selected objects for clarity
                     if is_selected {
                         for (i, j) in [
-                            (0, 1), (1, 2), (2, 3), (3, 0),
-                            (4, 5), (5, 6), (6, 7), (7, 4),
-                            (0, 4), (1, 5), (2, 6), (3, 7),
+                            (0, 1),
+                            (1, 2),
+                            (2, 3),
+                            (3, 0),
+                            (4, 5),
+                            (5, 6),
+                            (6, 7),
+                            (7, 4),
+                            (0, 4),
+                            (1, 5),
+                            (2, 6),
+                            (3, 7),
                         ] {
                             if let (Some(p1), Some(p2)) = (proj[i], proj[j]) {
-                                painter.line_segment([p1, p2], egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(255, 200, 50, 180)));
+                                painter.line_segment(
+                                    [p1, p2],
+                                    egui::Stroke::new(
+                                        1.5,
+                                        egui::Color32::from_rgba_unmultiplied(255, 200, 50, 180),
+                                    ),
+                                );
                             }
                         }
                     }
                 } else {
                     // Low Quality: Always render wireframe bounding boxes
                     for (i, j) in [
-                        (0, 1), (1, 2), (2, 3), (3, 0),
-                        (4, 5), (5, 6), (6, 7), (7, 4),
-                        (0, 4), (1, 5), (2, 6), (3, 7),
+                        (0, 1),
+                        (1, 2),
+                        (2, 3),
+                        (3, 0),
+                        (4, 5),
+                        (5, 6),
+                        (6, 7),
+                        (7, 4),
+                        (0, 4),
+                        (1, 5),
+                        (2, 6),
+                        (3, 7),
                     ] {
                         if let (Some(p1), Some(p2)) = (proj[i], proj[j]) {
                             painter.line_segment([p1, p2], stroke);
                         }
                     }
                 }
-                
+
                 // Center dot + click detection
                 // High mode = NO dots for objects with meshes, but keep them for lights/cameras
                 if let Some(c) = center_proj {
                     let size = (8.0 + 400.0 / self.camera.distance).clamp(4.0, 25.0);
-                    
+
                     // Draw distinctive icons for special entity types
                     if is_light {
                         // Light icon: Diamond/Star shape with rays
@@ -2704,20 +3199,37 @@ impl EditorApp {
                             egui::pos2(c.x, c.y + s),
                             egui::pos2(c.x - s * 0.7, c.y),
                         ];
-                        painter.add(egui::Shape::convex_polygon(diamond, light_color, egui::Stroke::NONE));
+                        painter.add(egui::Shape::convex_polygon(
+                            diamond,
+                            light_color,
+                            egui::Stroke::NONE,
+                        ));
                         // Rays
                         for i in 0..4 {
-                            let angle = (i as f32) * std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_4;
+                            let angle = (i as f32) * std::f32::consts::FRAC_PI_2
+                                + std::f32::consts::FRAC_PI_4;
                             let inner = s * 0.9;
                             let outer = s * 1.4;
                             painter.line_segment(
-                                [egui::pos2(c.x + angle.cos() * inner, c.y + angle.sin() * inner),
-                                 egui::pos2(c.x + angle.cos() * outer, c.y + angle.sin() * outer)],
+                                [
+                                    egui::pos2(
+                                        c.x + angle.cos() * inner,
+                                        c.y + angle.sin() * inner,
+                                    ),
+                                    egui::pos2(
+                                        c.x + angle.cos() * outer,
+                                        c.y + angle.sin() * outer,
+                                    ),
+                                ],
                                 egui::Stroke::new(2.0, light_color),
                             );
                         }
                         if is_selected {
-                            painter.circle_stroke(c, size + 4.0, egui::Stroke::new(2.5, egui::Color32::GOLD));
+                            painter.circle_stroke(
+                                c,
+                                size + 4.0,
+                                egui::Stroke::new(2.5, egui::Color32::GOLD),
+                            );
                         }
                     } else if is_camera {
                         // Camera icon: Simple frustum/eye shape
@@ -2730,36 +3242,69 @@ impl EditorApp {
                             egui::pos2(c.x + s * 0.3, c.y + s * 0.6),
                             egui::pos2(c.x - s, c.y + s * 0.6),
                         ];
-                        painter.add(egui::Shape::convex_polygon(body, cam_color, egui::Stroke::NONE));
+                        painter.add(egui::Shape::convex_polygon(
+                            body,
+                            cam_color,
+                            egui::Stroke::NONE,
+                        ));
                         // Lens (cone/triangle)
                         let lens = vec![
                             egui::pos2(c.x + s * 0.3, c.y - s * 0.4),
                             egui::pos2(c.x + s, c.y),
                             egui::pos2(c.x + s * 0.3, c.y + s * 0.4),
                         ];
-                        painter.add(egui::Shape::convex_polygon(lens, cam_color, egui::Stroke::NONE));
+                        painter.add(egui::Shape::convex_polygon(
+                            lens,
+                            cam_color,
+                            egui::Stroke::NONE,
+                        ));
                         if is_selected {
-                            painter.circle_stroke(c, size + 4.0, egui::Stroke::new(2.5, egui::Color32::GOLD));
+                            painter.circle_stroke(
+                                c,
+                                size + 4.0,
+                                egui::Stroke::new(2.5, egui::Color32::GOLD),
+                            );
                         }
-                    } else if self.render_quality == RenderQuality::Low || !use_gpu_viewport_rendering || !has_mesh {
+                    } else if self.render_quality == RenderQuality::Low
+                        || !use_gpu_viewport_rendering
+                        || !has_mesh
+                    {
                         // Low/Fallback or No Mesh: colored outline circle
                         painter.circle_stroke(c, size, egui::Stroke::new(1.5, wire_color));
                         if is_selected {
-                            painter.circle_stroke(c, size + 2.0, egui::Stroke::new(2.0, egui::Color32::GOLD));
+                            painter.circle_stroke(
+                                c,
+                                size + 2.0,
+                                egui::Stroke::new(2.0, egui::Color32::GOLD),
+                            );
                         }
                     } else {
                         // High + GPU + Has Mesh: Subtle dot to show it's interactable
-                        painter.circle_filled(c, 3.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 100));
+                        painter.circle_filled(
+                            c,
+                            3.0,
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 100),
+                        );
                         if is_selected {
-                             painter.circle_stroke(c, size, egui::Stroke::new(2.0, egui::Color32::GOLD));
+                            painter.circle_stroke(
+                                c,
+                                size,
+                                egui::Stroke::new(2.0, egui::Color32::GOLD),
+                            );
                         }
                     }
-                    
+
                     // Click detection hitbox (invisible in High mode)
                     if response.clicked() {
-                        if (self.last_mouse.x - response.interact_pointer_pos().unwrap_or(self.last_mouse).x).abs() < 2.0 {
+                        if (self.last_mouse.x
+                            - response.interact_pointer_pos().unwrap_or(self.last_mouse).x)
+                            .abs()
+                            < 2.0
+                        {
                             if let Some(click) = response.interact_pointer_pos() {
-                                if (click.x - c.x).abs() < size + 5.0 && (click.y - c.y).abs() < size + 5.0 {
+                                if (click.x - c.x).abs() < size + 5.0
+                                    && (click.y - c.y).abs() < size + 5.0
+                                {
                                     clicked_entity = Some(id);
                                 }
                             }
@@ -2768,7 +3313,7 @@ impl EditorApp {
                 }
             }
         }
-        
+
         // Draw Skeleton for selected entity in Animation Editor
         if self.active_view == EditorView::AnimationEditor {
             if let Some(id) = self.selected_entity_id {
@@ -2779,7 +3324,7 @@ impl EditorApp {
                 }
             }
         }
-        
+
         // ========================================================================
         // 3D TRANSLATE GIZMO
         // ========================================================================
@@ -2790,58 +3335,104 @@ impl EditorApp {
                     let entity_pos = Vec3::new(pos[0], pos[1], pos[2]);
                     let gizmo_scale = (self.camera.distance * 0.15).max(0.5);
                     let axes = [
-                        (Vec3::new(1.0, 0.0, 0.0), egui::Color32::from_rgb(255, 60, 60), "X"),
-                        (Vec3::new(0.0, 1.0, 0.0), egui::Color32::from_rgb(60, 255, 60), "Y"),
-                        (Vec3::new(0.0, 0.0, 1.0), egui::Color32::from_rgb(60, 60, 255), "Z"),
+                        (
+                            Vec3::new(1.0, 0.0, 0.0),
+                            egui::Color32::from_rgb(255, 60, 60),
+                            "X",
+                        ),
+                        (
+                            Vec3::new(0.0, 1.0, 0.0),
+                            egui::Color32::from_rgb(60, 255, 60),
+                            "Y",
+                        ),
+                        (
+                            Vec3::new(0.0, 0.0, 1.0),
+                            egui::Color32::from_rgb(60, 60, 255),
+                            "Z",
+                        ),
                     ];
 
                     let mut hovered_axis = None;
                     let mouse_pos = ui.input(|i| i.pointer.interact_pos());
-                    
+
                     for (i, (dir, color, _label)) in axes.iter().enumerate() {
                         let start = entity_pos;
-                        let scaled_dir = Vec3::new(dir.x * gizmo_scale, dir.y * gizmo_scale, dir.z * gizmo_scale);
+                        let scaled_dir = Vec3::new(
+                            dir.x * gizmo_scale,
+                            dir.y * gizmo_scale,
+                            dir.z * gizmo_scale,
+                        );
                         let end = entity_pos.add(&scaled_dir);
-                        
-                        if let (Some(p1), Some(p2)) = (self.camera.project(start, available), self.camera.project(end, available)) {
+
+                        if let (Some(p1), Some(p2)) = (
+                            self.camera.project(start, available),
+                            self.camera.project(end, available),
+                        ) {
                             let p1 = egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y);
                             let p2 = egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y);
-                            
+
                             let is_dragging = self.gizmo_axis == Some(i);
                             let mut draw_color = *color;
-                            if is_dragging { draw_color = egui::Color32::WHITE; }
-                            
+                            if is_dragging {
+                                draw_color = egui::Color32::WHITE;
+                            }
+
                             // Check for hover
                             if let Some(m) = mouse_pos {
                                 let dist_to_segment = {
                                     let l2 = p1.distance_sq(p2);
-                                    if l2 == 0.0 { p1.distance(m) }
-                                    else {
-                                        let t = ((m.x - p1.x) * (p2.x - p1.x) + (m.y - p1.y) * (p2.y - p1.y)) / l2;
+                                    if l2 == 0.0 {
+                                        p1.distance(m)
+                                    } else {
+                                        let t = ((m.x - p1.x) * (p2.x - p1.x)
+                                            + (m.y - p1.y) * (p2.y - p1.y))
+                                            / l2;
                                         let t = t.clamp(0.0, 1.0);
-                                        m.distance(egui::pos2(p1.x + t * (p2.x - p1.x), p1.y + t * (p2.y - p1.y)))
+                                        m.distance(egui::pos2(
+                                            p1.x + t * (p2.x - p1.x),
+                                            p1.y + t * (p2.y - p1.y),
+                                        ))
                                     }
                                 };
                                 if dist_to_segment < 10.0 {
                                     hovered_axis = Some(i);
-                                    if !is_dragging { draw_color = egui::Color32::YELLOW; }
+                                    if !is_dragging {
+                                        draw_color = egui::Color32::YELLOW;
+                                    }
                                 }
                             }
-                            
-                            painter.line_segment([p1, p2], egui::Stroke::new(if is_dragging || hovered_axis == Some(i) { 4.0 } else { 2.5 }, draw_color));
-                            
+
+                            painter.line_segment(
+                                [p1, p2],
+                                egui::Stroke::new(
+                                    if is_dragging || hovered_axis == Some(i) {
+                                        4.0
+                                    } else {
+                                        2.5
+                                    },
+                                    draw_color,
+                                ),
+                            );
+
                             // Draw Arrowhead (Cone)
                             if let Some(cone_model) = self.model_cache.get("primitive://cone") {
                                 let cone_transform = Mat4::from_scale_rotation_translation(
                                     GVec3::splat(gizmo_scale * 0.1),
-                                    GQuat::from_rotation_arc(GVec3::Y, GVec3::new(dir.x, dir.y, dir.z)),
-                                    GVec3::new(end.x, end.y, end.z)
+                                    GQuat::from_rotation_arc(
+                                        GVec3::Y,
+                                        GVec3::new(dir.x, dir.y, dir.z),
+                                    ),
+                                    GVec3::new(end.x, end.y, end.z),
                                 );
                                 for mesh in &cone_model.meshes {
                                     let mut egui_mesh = egui::Mesh::default();
                                     for v in &mesh.vertices {
-                                        let world_v = cone_transform.transform_point3(GVec3::from(v.position));
-                                        if let Some(p) = self.camera.project(Vec3::new(world_v.x, world_v.y, world_v.z), available) {
+                                        let world_v = cone_transform
+                                            .transform_point3(GVec3::from(v.position));
+                                        if let Some(p) = self.camera.project(
+                                            Vec3::new(world_v.x, world_v.y, world_v.z),
+                                            available,
+                                        ) {
                                             egui_mesh.vertices.push(egui::epaint::Vertex {
                                                 pos: egui::pos2(rect.min.x + p.x, rect.min.y + p.y),
                                                 uv: egui::pos2(0.0, 0.0),
@@ -2869,17 +3460,21 @@ impl EditorApp {
                     if let Some(axis_idx) = self.gizmo_axis {
                         let axis_dir = axes[axis_idx].0;
                         let mouse_delta = ui.input(|i| i.pointer.delta());
-                        
+
                         // Convert mouse delta to world space delta
                         // Simple approach: project mouse delta onto axis in screen space
-                        if let (Some(p1), Some(p2)) = (self.camera.project(entity_pos, available), self.camera.project(entity_pos.add(&axis_dir), available)) {
+                        if let (Some(p1), Some(p2)) = (
+                            self.camera.project(entity_pos, available),
+                            self.camera.project(entity_pos.add(&axis_dir), available),
+                        ) {
                             let screen_dir = egui::vec2(p2.x - p1.x, p2.y - p1.y);
                             let screen_len = screen_dir.length();
                             if screen_len > 0.0 {
                                 let normalized_screen_dir = screen_dir / screen_len;
-                                let projection = mouse_delta.x * normalized_screen_dir.x + mouse_delta.y * normalized_screen_dir.y;
+                                let projection = mouse_delta.x * normalized_screen_dir.x
+                                    + mouse_delta.y * normalized_screen_dir.y;
                                 let world_delta = projection / screen_len; // Scale by reciprocal of screen-space unit length
-                                
+
                                 let mut new_pos = scene.entities[entity_idx].position;
                                 match axis_idx {
                                     0 => new_pos[0] += world_delta,
@@ -2889,15 +3484,17 @@ impl EditorApp {
                                 }
                                 scene.entities[entity_idx].position = new_pos;
                                 self.scene_dirty = true;
-                                
+
                                 // Deploy to engine
                                 if self.is_connected {
-                                    let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::UpdateTransform {
-                                        id: selected_id,
-                                        position: Some(new_pos),
-                                        rotation: None,
-                                        scale: None,
-                                    }));
+                                    let _ = self.command_tx.send(AppCommand::Send(
+                                        SceneUpdate::UpdateTransform {
+                                            id: selected_id,
+                                            position: Some(new_pos),
+                                            rotation: None,
+                                            scale: None,
+                                        },
+                                    ));
                                 }
                             }
                         }
@@ -2905,9 +3502,10 @@ impl EditorApp {
                 }
             }
         }
-        
+
         if let Some(id) = clicked_entity {
-            if self.gizmo_axis.is_none() { // Don't change selection while dragging gizmo
+            if self.gizmo_axis.is_none() {
+                // Don't change selection while dragging gizmo
                 self.selected_entity_id = Some(id);
             }
         }
@@ -2920,26 +3518,39 @@ impl EditorApp {
             egui::FontId::proportional(11.0),
             egui::Color32::WHITE,
         );
-        
+
         rect
     }
 
-    fn draw_skeleton(&self, painter: &egui::Painter, entity: &SceneEntity, camera: &Camera3D, rect: egui::Rect, available: egui::Vec2) {
+    fn draw_skeleton(
+        &self,
+        painter: &egui::Painter,
+        entity: &SceneEntity,
+        camera: &Camera3D,
+        rect: egui::Rect,
+        available: egui::Vec2,
+    ) {
         if let Some(config) = &entity.animator_config {
-            if config.bone_transforms.is_empty() { return; }
-            
+            if config.bone_transforms.is_empty() {
+                return;
+            }
+
             // Try to get animated pose first
-            let animated_pose = Self::compute_animated_pose(entity, &self.model_cache, &self.animation_editor_state);
-            
+            let animated_pose = Self::compute_animated_pose(
+                entity,
+                &self.model_cache,
+                &self.animation_editor_state,
+            );
+
             let entity_mat = Mat4::from_scale_rotation_translation(
                 GVec3::from(entity.scale),
                 GQuat::from_array(entity.rotation),
-                GVec3::from(entity.position)
+                GVec3::from(entity.position),
             );
-            
+
             // NOTE: Base-Origin offset removed to match client/deployed behavior.
             // The client uses raw model transforms without adjustment.
-            
+
             let globals = if let Some((global_transforms, _)) = animated_pose {
                 global_transforms
             } else {
@@ -2956,36 +3567,39 @@ impl EditorApp {
                 }
                 base_globals
             };
-            
+
             // Draw bones
             let bone_color = egui::Color32::from_rgb(100, 200, 255);
             let joint_color = egui::Color32::WHITE;
-            
+
             for i in 0..globals.len() {
                 let world_mat = entity_mat * globals[i];
                 let pos = world_mat.transform_point3(GVec3::ZERO);
                 let v3_pos = Vec3::new(pos.x, pos.y, pos.z);
-                
+
                 if let Some(p1) = camera.project(v3_pos, available) {
                     let p1_egui = egui::pos2(rect.min.x + p1.x, rect.min.y + p1.y);
-                    
+
                     // Draw joint
                     painter.circle_filled(p1_egui, 3.0, joint_color);
-                    
+
                     // Draw line to parent
                     if let Some(parent_idx) = config.bone_parents[i] {
                         if parent_idx < globals.len() {
                             let p_world_mat = entity_mat * globals[parent_idx];
                             let p_pos = p_world_mat.transform_point3(GVec3::ZERO);
                             let v3_p_pos = Vec3::new(p_pos.x, p_pos.y, p_pos.z);
-                            
+
                             if let Some(p2) = camera.project(v3_p_pos, available) {
                                 let p2_egui = egui::pos2(rect.min.x + p2.x, rect.min.y + p2.y);
-                                painter.line_segment([p1_egui, p2_egui], egui::Stroke::new(1.5, bone_color));
+                                painter.line_segment(
+                                    [p1_egui, p2_egui],
+                                    egui::Stroke::new(1.5, bone_color),
+                                );
                             }
                         }
                     }
-                    
+
                     // Label bone if selected
                     if self.animation_editor_state.selected_bones.contains(&i) {
                         painter.text(
@@ -2995,7 +3609,11 @@ impl EditorApp {
                             egui::FontId::proportional(10.0),
                             egui::Color32::YELLOW,
                         );
-                        painter.circle_stroke(p1_egui, 5.0, egui::Stroke::new(1.0, egui::Color32::YELLOW));
+                        painter.circle_stroke(
+                            p1_egui,
+                            5.0,
+                            egui::Stroke::new(1.0, egui::Color32::YELLOW),
+                        );
                     }
                 }
             }
@@ -3005,26 +3623,33 @@ impl EditorApp {
     fn draw_keyframe_inspector(&mut self, ui: &mut egui::Ui) {
         ui.heading("🔍 Keyframe Inspector");
         ui.add_space(8.0);
-        
+
         let state = &mut self.animation_editor_state;
         if state.selected_keyframes.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(20.0);
                 ui.label(egui::RichText::new("No keyframe selected").weak());
-                ui.label(egui::RichText::new("Click a keyframe in the timeline to edit its properties").small());
+                ui.label(
+                    egui::RichText::new("Click a keyframe in the timeline to edit its properties")
+                        .small(),
+                );
             });
             return;
         }
-        
+
         if state.selected_keyframes.len() > 1 {
-            ui.label(format!("Multiple keyframes selected ({}).", state.selected_keyframes.len()));
+            ui.label(format!(
+                "Multiple keyframes selected ({}).",
+                state.selected_keyframes.len()
+            ));
             return;
         }
-        
+
         let kf_idx = state.selected_keyframes[0];
-        
+
         if let Some(scene) = &mut self.current_scene {
-            if let Some(entity) = self.selected_entity_id
+            if let Some(entity) = self
+                .selected_entity_id
                 .and_then(|id| scene.entities.iter_mut().find(|e| e.id == id))
             {
                 if let Some(config) = &mut entity.animator_config {
@@ -3035,37 +3660,70 @@ impl EditorApp {
                             .striped(true)
                             .show(ui, |ui| {
                                 ui.label("Time:");
-                                if ui.add(egui::DragValue::new(&mut kf.time).speed(0.01).clamp_range(0.0..=60.0).suffix("s")).changed() {
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut kf.time)
+                                            .speed(0.01)
+                                            .clamp_range(0.0..=60.0)
+                                            .suffix("s"),
+                                    )
+                                    .changed()
+                                {
                                     self.scene_dirty = true;
                                 }
                                 ui.end_row();
-                                
+
                                 ui.label("Bone:");
-                                let bone_name = config.bone_names.get(kf.bone_index).cloned().unwrap_or_else(|| "Unknown".to_string());
-                                ui.label(egui::RichText::new(format!("#{} {}", kf.bone_index, bone_name)).strong());
+                                let bone_name = config
+                                    .bone_names
+                                    .get(kf.bone_index)
+                                    .cloned()
+                                    .unwrap_or_else(|| "Unknown".to_string());
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "#{} {}",
+                                        kf.bone_index, bone_name
+                                    ))
+                                    .strong(),
+                                );
                                 ui.end_row();
-                                
+
                                 ui.label("Channel:");
                                 ui.label(format!("{:?}", kf.channel));
                                 ui.end_row();
-                                
+
                                 ui.label("Interpolation:");
                                 if egui::ComboBox::from_id_source("kf_interp")
                                     .selected_text(format!("{:?}", kf.interpolation))
                                     .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut kf.interpolation, KeyframeInterpolation::Linear, "Linear");
-                                        ui.selectable_value(&mut kf.interpolation, KeyframeInterpolation::Step, "Step");
-                                        ui.selectable_value(&mut kf.interpolation, KeyframeInterpolation::Bezier, "Bezier");
-                                    }).response.changed() {
-                                        self.scene_dirty = true;
-                                    }
+                                        ui.selectable_value(
+                                            &mut kf.interpolation,
+                                            KeyframeInterpolation::Linear,
+                                            "Linear",
+                                        );
+                                        ui.selectable_value(
+                                            &mut kf.interpolation,
+                                            KeyframeInterpolation::Step,
+                                            "Step",
+                                        );
+                                        ui.selectable_value(
+                                            &mut kf.interpolation,
+                                            KeyframeInterpolation::Bezier,
+                                            "Bezier",
+                                        );
+                                    })
+                                    .response
+                                    .changed()
+                                {
+                                    self.scene_dirty = true;
+                                }
                                 ui.end_row();
                             });
-                        
+
                         ui.add_space(8.0);
                         ui.separator();
                         ui.add_space(8.0);
-                        
+
                         ui.label("Value:");
                         match &mut kf.value {
                             KeyframeValue::Float(f) => {
@@ -3075,18 +3733,60 @@ impl EditorApp {
                             }
                             KeyframeValue::Vec3(v) => {
                                 ui.horizontal(|ui| {
-                                    ui.label("X"); if ui.add(egui::DragValue::new(&mut v[0]).speed(0.05)).changed() { self.scene_dirty = true; }
-                                    ui.label("Y"); if ui.add(egui::DragValue::new(&mut v[1]).speed(0.05)).changed() { self.scene_dirty = true; }
-                                    ui.label("Z"); if ui.add(egui::DragValue::new(&mut v[2]).speed(0.05)).changed() { self.scene_dirty = true; }
+                                    ui.label("X");
+                                    if ui
+                                        .add(egui::DragValue::new(&mut v[0]).speed(0.05))
+                                        .changed()
+                                    {
+                                        self.scene_dirty = true;
+                                    }
+                                    ui.label("Y");
+                                    if ui
+                                        .add(egui::DragValue::new(&mut v[1]).speed(0.05))
+                                        .changed()
+                                    {
+                                        self.scene_dirty = true;
+                                    }
+                                    ui.label("Z");
+                                    if ui
+                                        .add(egui::DragValue::new(&mut v[2]).speed(0.05))
+                                        .changed()
+                                    {
+                                        self.scene_dirty = true;
+                                    }
                                 });
                             }
                             KeyframeValue::Quat(q) => {
                                 egui::Grid::new("quat_grid").show(ui, |ui| {
-                                    ui.label("X"); if ui.add(egui::DragValue::new(&mut q[0]).speed(0.02)).changed() { self.scene_dirty = true; }
-                                    ui.label("Y"); if ui.add(egui::DragValue::new(&mut q[1]).speed(0.02)).changed() { self.scene_dirty = true; }
+                                    ui.label("X");
+                                    if ui
+                                        .add(egui::DragValue::new(&mut q[0]).speed(0.02))
+                                        .changed()
+                                    {
+                                        self.scene_dirty = true;
+                                    }
+                                    ui.label("Y");
+                                    if ui
+                                        .add(egui::DragValue::new(&mut q[1]).speed(0.02))
+                                        .changed()
+                                    {
+                                        self.scene_dirty = true;
+                                    }
                                     ui.end_row();
-                                    ui.label("Z"); if ui.add(egui::DragValue::new(&mut q[2]).speed(0.02)).changed() { self.scene_dirty = true; }
-                                    ui.label("W"); if ui.add(egui::DragValue::new(&mut q[3]).speed(0.02)).changed() { self.scene_dirty = true; }
+                                    ui.label("Z");
+                                    if ui
+                                        .add(egui::DragValue::new(&mut q[2]).speed(0.02))
+                                        .changed()
+                                    {
+                                        self.scene_dirty = true;
+                                    }
+                                    ui.label("W");
+                                    if ui
+                                        .add(egui::DragValue::new(&mut q[3]).speed(0.02))
+                                        .changed()
+                                    {
+                                        self.scene_dirty = true;
+                                    }
                                     ui.end_row();
                                 });
                             }
@@ -3096,22 +3796,26 @@ impl EditorApp {
             }
         }
     }
-    
+
     // ========================================================================
     // ANIMATION EDITOR
     // ========================================================================
-    
+
     fn draw_animation_editor(&mut self, ui: &mut egui::Ui) {
         ui.heading("🎭 Animation Editor");
-        
+
         // Get selected entity with animator
-        let has_animator = self.selected_entity_id.map(|id| {
-            self.current_scene.as_ref()
-                .and_then(|s| s.entities.iter().find(|e| e.id == id))
-                .and_then(|e| e.animator_config.as_ref())
-                .is_some()
-        }).unwrap_or(false);
-        
+        let has_animator = self
+            .selected_entity_id
+            .map(|id| {
+                self.current_scene
+                    .as_ref()
+                    .and_then(|s| s.entities.iter().find(|e| e.id == id))
+                    .and_then(|e| e.animator_config.as_ref())
+                    .is_some()
+            })
+            .unwrap_or(false);
+
         if !has_animator {
             ui.add_space(20.0);
             ui.label("⚠ Select an entity with an Animator to edit animations.");
@@ -3122,22 +3826,22 @@ impl EditorApp {
             ui.label("3. Import a 3D model with animations (.glb/.gltf)");
             return;
         }
-        
+
         // Toolbar
         ui.horizontal(|ui| {
             self.draw_animation_toolbar(ui);
         });
-        
+
         ui.separator();
-        
+
         // Main content: split vertically
         // Top: Preview viewport + Bone hierarchy
         // Bottom: Timeline/Dopesheet
-        
+
         let available = ui.available_size();
         let timeline_height = 220.0_f32.min(available.y * 0.4);
         let top_height = (available.y - timeline_height - 20.0).max(100.0);
-        
+
         // Split top section into Hierarchy | Preview | Inspector
         ui.horizontal(|ui| {
             // Left: Bone hierarchy (220px)
@@ -3148,9 +3852,9 @@ impl EditorApp {
                     });
                 });
             });
-            
+
             ui.separator();
-            
+
             // Middle: Animation preview viewport (flexible)
             let preview_width = (ui.available_width() - 270.0).max(100.0);
             ui.allocate_ui(egui::vec2(preview_width, top_height), |ui| {
@@ -3158,9 +3862,9 @@ impl EditorApp {
                     self.draw_animation_preview(ui);
                 });
             });
-            
+
             ui.separator();
-            
+
             // Right: Keyframe Inspector (250px)
             ui.allocate_ui(egui::vec2(250.0, top_height), |ui| {
                 ui.vertical(|ui| {
@@ -3170,39 +3874,44 @@ impl EditorApp {
                 });
             });
         });
-        
+
         ui.separator();
-        
+
         // Bottom: Timeline/Dopesheet
         ui.allocate_ui(egui::vec2(available.x, timeline_height), |ui| {
             self.draw_animation_timeline(ui);
         });
     }
-    
+
     fn draw_animation_toolbar(&mut self, ui: &mut egui::Ui) {
         // Clip selector
         ui.label("Clip:");
         if let Some(scene) = &self.current_scene {
-            if let Some(entity) = self.selected_entity_id
-                .and_then(|id| scene.entities.iter().find(|e| e.id == id)) 
+            if let Some(entity) = self
+                .selected_entity_id
+                .and_then(|id| scene.entities.iter().find(|e| e.id == id))
             {
                 if let Some(config) = &entity.animator_config {
                     egui::ComboBox::from_id_source("anim_clip_select")
                         .width(150.0)
                         .selected_text(
-                            self.animation_editor_state.selected_clip_idx
+                            self.animation_editor_state
+                                .selected_clip_idx
                                 .and_then(|i| config.clip_names.get(i))
                                 .map(|s| s.as_str())
-                                .unwrap_or("Select clip...")
+                                .unwrap_or("Select clip..."),
                         )
                         .show_ui(ui, |ui| {
                             for (i, name) in config.clip_names.iter().enumerate() {
                                 let duration = config.clip_durations.get(i).copied().unwrap_or(0.0);
                                 let text = format!("{} ({:.2}s)", name, duration);
-                                if ui.selectable_label(
-                                    self.animation_editor_state.selected_clip_idx == Some(i),
-                                    &text
-                                ).clicked() {
+                                if ui
+                                    .selectable_label(
+                                        self.animation_editor_state.selected_clip_idx == Some(i),
+                                        &text,
+                                    )
+                                    .clicked()
+                                {
                                     self.animation_editor_state.selected_clip_idx = Some(i);
                                     self.animation_editor_state.current_time = 0.0;
                                 }
@@ -3211,16 +3920,16 @@ impl EditorApp {
                 }
             }
         }
-        
+
         ui.separator();
-        
+
         // Playback controls
         let state = &mut self.animation_editor_state;
-        
+
         if ui.button("⏮").on_hover_text("Go to start").clicked() {
             state.current_time = 0.0;
         }
-        
+
         if state.is_playing {
             if ui.button("⏸").on_hover_text("Pause").clicked() {
                 state.is_playing = false;
@@ -3231,16 +3940,17 @@ impl EditorApp {
                 state.last_update = std::time::Instant::now();
             }
         }
-        
+
         if ui.button("⏹").on_hover_text("Stop").clicked() {
             state.is_playing = false;
             state.current_time = 0.0;
         }
-        
+
         if ui.button("⏭").on_hover_text("Go to end").clicked() {
             // Set to clip duration
             if let Some(scene) = &self.current_scene {
-                if let Some(entity) = self.selected_entity_id
+                if let Some(entity) = self
+                    .selected_entity_id
                     .and_then(|id| scene.entities.iter().find(|e| e.id == id))
                 {
                     if let Some(config) = &entity.animator_config {
@@ -3253,36 +3963,42 @@ impl EditorApp {
                 }
             }
         }
-        
+
         ui.separator();
-        
+
         // Speed control
         ui.label("Speed:");
-        ui.add(egui::DragValue::new(&mut self.animation_editor_state.playback_speed)
-            .speed(0.1)
-            .clamp_range(0.1..=3.0)
-            .suffix("x"));
-        
+        ui.add(
+            egui::DragValue::new(&mut self.animation_editor_state.playback_speed)
+                .speed(0.1)
+                .clamp_range(0.1..=3.0)
+                .suffix("x"),
+        );
+
         ui.separator();
-        
+
         // Auto-key toggle
         ui.checkbox(&mut self.animation_editor_state.auto_key, "🔑 Auto-Key")
             .on_hover_text("Automatically create keyframes when modifying transforms");
-        
+
         ui.separator();
-        
+
         // Time display
         let time = self.animation_editor_state.current_time;
         ui.label(format!("⏱ {:.2}s", time));
-        
+
         ui.separator();
-        
+
         // Add keyframe button
-        if ui.button("➕ Add Keyframe").on_hover_text("Add keyframe at current time for selected bones").clicked() {
+        if ui
+            .button("➕ Add Keyframe")
+            .on_hover_text("Add keyframe at current time for selected bones")
+            .clicked()
+        {
             if let Some(entity_id) = self.selected_entity_id {
                 let time = self.animation_editor_state.current_time;
                 let bones = self.animation_editor_state.selected_bones.clone();
-                
+
                 if let Some(scene) = &mut self.current_scene {
                     if let Some(entity) = scene.entities.iter_mut().find(|e| e.id == entity_id) {
                         if let Some(config) = &mut entity.animator_config {
@@ -3302,16 +4018,21 @@ impl EditorApp {
                 }
             }
         }
-        
+
         // Delete keyframe button
-        if ui.button("🗑 Delete").on_hover_text("Delete selected keyframes").clicked() {
+        if ui
+            .button("🗑 Delete")
+            .on_hover_text("Delete selected keyframes")
+            .clicked()
+        {
             if let Some(entity_id) = self.selected_entity_id {
                 if let Some(scene) = &mut self.current_scene {
                     if let Some(entity) = scene.entities.iter_mut().find(|e| e.id == entity_id) {
                         if let Some(config) = &mut entity.animator_config {
-                            let mut kf_indices = self.animation_editor_state.selected_keyframes.clone();
+                            let mut kf_indices =
+                                self.animation_editor_state.selected_keyframes.clone();
                             kf_indices.sort_unstable_by(|a, b| b.cmp(a)); // Delete from end
-                            
+
                             for idx in kf_indices {
                                 if idx < config.editor_keyframes.len() {
                                     config.editor_keyframes.remove(idx);
@@ -3325,49 +4046,63 @@ impl EditorApp {
             }
         }
     }
-    
+
     fn draw_animation_timeline(&mut self, ui: &mut egui::Ui) {
         egui::Frame::dark_canvas(ui.style()).show(ui, |ui| {
-            let (response, painter) = ui.allocate_painter(
-                ui.available_size(),
-                egui::Sense::click_and_drag(),
-            );
-            
+            let (response, painter) =
+                ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
+
             let rect = response.rect;
             let state = &mut self.animation_editor_state;
-            
+
             // Get clip duration
-            let duration = self.current_scene.as_ref()
-                .and_then(|s| self.selected_entity_id
-                    .and_then(|id| s.entities.iter().find(|e| e.id == id)))
+            let duration = self
+                .current_scene
+                .as_ref()
+                .and_then(|s| {
+                    self.selected_entity_id
+                        .and_then(|id| s.entities.iter().find(|e| e.id == id))
+                })
                 .and_then(|e| e.animator_config.as_ref())
-                .and_then(|c| state.selected_clip_idx
-                    .and_then(|i| c.clip_durations.get(i)))
+                .and_then(|c| {
+                    state
+                        .selected_clip_idx
+                        .and_then(|i| c.clip_durations.get(i))
+                })
                 .copied()
                 .unwrap_or(1.0)
                 .max(0.1);
-            
+
             let header_height = 25.0;
             let track_height = 20.0;
             let time_offset = 100.0; // Left margin for labels
             let usable_width = (rect.width() - time_offset).max(100.0);
             let pixels_per_second = usable_width / duration * state.timeline_zoom;
-            
+
             // Draw timeline header with time markers
             painter.rect_filled(
                 egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), header_height)),
                 0.0,
                 egui::Color32::from_gray(40),
             );
-            
+
             // Draw time markers
-            let step = if state.timeline_zoom > 2.0 { 0.25 } else if state.timeline_zoom > 1.0 { 0.5 } else { 1.0 };
+            let step = if state.timeline_zoom > 2.0 {
+                0.25
+            } else if state.timeline_zoom > 1.0 {
+                0.5
+            } else {
+                1.0
+            };
             let mut t = 0.0;
             while t <= duration {
                 let x = rect.min.x + time_offset + t * pixels_per_second;
                 if x < rect.max.x {
                     painter.line_segment(
-                        [egui::pos2(x, rect.min.y + 15.0), egui::pos2(x, rect.min.y + header_height)],
+                        [
+                            egui::pos2(x, rect.min.y + 15.0),
+                            egui::pos2(x, rect.min.y + header_height),
+                        ],
                         egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
                     );
                     painter.text(
@@ -3380,7 +4115,7 @@ impl EditorApp {
                 }
                 t += step;
             }
-            
+
             // Draw "Timeline" label
             painter.text(
                 egui::pos2(rect.min.x + 5.0, rect.min.y + 5.0),
@@ -3389,39 +4124,39 @@ impl EditorApp {
                 egui::FontId::proportional(11.0),
                 egui::Color32::WHITE,
             );
-            
+
             // Draw keyframe tracks (dopesheet style)
             let tracks_start_y = rect.min.y + header_height;
             let num_tracks = ((rect.height() - header_height) / track_height) as usize;
-            
+
             for i in 0..num_tracks.min(20) {
                 let y = tracks_start_y + (i as f32) * track_height;
-                
+
                 if y + track_height > rect.max.y {
                     break;
                 }
-                
+
                 // Track background
-                let bg_color = if i % 2 == 0 { 
-                    egui::Color32::from_gray(30) 
-                } else { 
-                    egui::Color32::from_gray(25) 
+                let bg_color = if i % 2 == 0 {
+                    egui::Color32::from_gray(30)
+                } else {
+                    egui::Color32::from_gray(25)
                 };
                 painter.rect_filled(
                     egui::Rect::from_min_size(
                         egui::pos2(rect.min.x, y),
-                        egui::vec2(rect.width(), track_height)
+                        egui::vec2(rect.width(), track_height),
                     ),
                     0.0,
                     bg_color,
                 );
-                
+
                 // Track label
                 let is_selected = state.selected_bones.contains(&i);
-                let text_color = if is_selected { 
-                    egui::Color32::from_rgb(100, 200, 255) 
-                } else { 
-                    egui::Color32::from_gray(150) 
+                let text_color = if is_selected {
+                    egui::Color32::from_rgb(100, 200, 255)
+                } else {
+                    egui::Color32::from_gray(150)
                 };
                 painter.text(
                     egui::pos2(rect.min.x + 5.0, y + 3.0),
@@ -3430,30 +4165,36 @@ impl EditorApp {
                     egui::FontId::proportional(11.0),
                     text_color,
                 );
-                
+
                 // Draw separator line
                 painter.line_segment(
-                    [egui::pos2(rect.min.x + time_offset - 5.0, y), egui::pos2(rect.min.x + time_offset - 5.0, y + track_height)],
+                    [
+                        egui::pos2(rect.min.x + time_offset - 5.0, y),
+                        egui::pos2(rect.min.x + time_offset - 5.0, y + track_height),
+                    ],
                     egui::Stroke::new(1.0, egui::Color32::from_gray(50)),
                 );
 
                 // Draw keyframes for this track/bone
                 if let Some(scene) = &self.current_scene {
-                    if let Some(entity) = self.selected_entity_id
+                    if let Some(entity) = self
+                        .selected_entity_id
                         .and_then(|id| scene.entities.iter().find(|e| e.id == id))
                     {
                         if let Some(config) = &entity.animator_config {
                             for (kf_idx, kf) in config.editor_keyframes.iter().enumerate() {
                                 if kf.bone_index == i {
-                                    let kf_x = rect.min.x + time_offset + kf.time * pixels_per_second;
+                                    let kf_x =
+                                        rect.min.x + time_offset + kf.time * pixels_per_second;
                                     if kf_x >= rect.min.x + time_offset && kf_x <= rect.max.x {
-                                        let is_kf_selected = state.selected_keyframes.contains(&kf_idx);
+                                        let is_kf_selected =
+                                            state.selected_keyframes.contains(&kf_idx);
                                         let kf_color = if is_kf_selected {
                                             egui::Color32::from_rgb(255, 255, 0)
                                         } else {
                                             egui::Color32::from_gray(200)
                                         };
-                                        
+
                                         // Draw diamond shape for keyframe
                                         let size = 5.0;
                                         let center = egui::pos2(kf_x, y + track_height / 2.0);
@@ -3474,15 +4215,18 @@ impl EditorApp {
                     }
                 }
             }
-            
+
             // Draw current time playhead
             let playhead_x = rect.min.x + time_offset + state.current_time * pixels_per_second;
             if playhead_x >= rect.min.x + time_offset && playhead_x <= rect.max.x {
                 painter.line_segment(
-                    [egui::pos2(playhead_x, rect.min.y), egui::pos2(playhead_x, rect.max.y)],
+                    [
+                        egui::pos2(playhead_x, rect.min.y),
+                        egui::pos2(playhead_x, rect.max.y),
+                    ],
                     egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 80, 80)),
                 );
-                
+
                 // Playhead handle
                 painter.circle_filled(
                     egui::pos2(playhead_x, rect.min.y + 12.0),
@@ -3490,7 +4234,7 @@ impl EditorApp {
                     egui::Color32::from_rgb(255, 80, 80),
                 );
             }
-            
+
             // Handle drag to scrub time
             if response.dragged() && !ui.input(|i| i.modifiers.shift) {
                 if let Some(pos) = response.interact_pointer_pos() {
@@ -3499,18 +4243,20 @@ impl EditorApp {
                     state.current_time = new_time;
                 }
             }
-            
+
             // Handle keyframe selection
             if response.clicked() {
                 if let Some(mouse_pos) = response.interact_pointer_pos() {
                     let mut found_kf = None;
                     if let Some(scene) = &self.current_scene {
-                        if let Some(entity) = self.selected_entity_id
+                        if let Some(entity) = self
+                            .selected_entity_id
                             .and_then(|id| scene.entities.iter().find(|e| e.id == id))
                         {
                             if let Some(config) = &entity.animator_config {
                                 for (kf_idx, kf) in config.editor_keyframes.iter().enumerate() {
-                                    let kf_x = rect.min.x + time_offset + kf.time * pixels_per_second;
+                                    let kf_x =
+                                        rect.min.x + time_offset + kf.time * pixels_per_second;
                                     let y = tracks_start_y + (kf.bone_index as f32) * track_height;
                                     let center = egui::pos2(kf_x, y + track_height / 2.0);
                                     if mouse_pos.distance(center) < 8.0 {
@@ -3521,7 +4267,7 @@ impl EditorApp {
                             }
                         }
                     }
-                    
+
                     if let Some(kf_idx) = found_kf {
                         if ui.input(|i| i.modifiers.shift) {
                             if state.selected_keyframes.contains(&kf_idx) {
@@ -3540,7 +4286,7 @@ impl EditorApp {
                     }
                 }
             }
-            
+
             // Handle scroll to zoom
             let scroll = ui.input(|i| i.raw_scroll_delta.y);
             if scroll != 0.0 && response.hovered() {
@@ -3548,14 +4294,15 @@ impl EditorApp {
             }
         });
     }
-    
+
     fn draw_bone_hierarchy(&mut self, ui: &mut egui::Ui) {
         ui.heading("🦴 Bones");
         ui.add_space(4.0);
-        
+
         egui::ScrollArea::vertical().show(ui, |ui| {
             if let Some(scene) = &self.current_scene {
-                if let Some(entity) = self.selected_entity_id
+                if let Some(entity) = self
+                    .selected_entity_id
                     .and_then(|id| scene.entities.iter().find(|e| e.id == id))
                 {
                     if let Some(config) = &entity.animator_config {
@@ -3567,35 +4314,50 @@ impl EditorApp {
                             // Show bone list
                             ui.label(egui::RichText::new("Select bones to edit:").small());
                             ui.add_space(4.0);
-                            
+
                             if config.bone_names.is_empty() {
                                 for i in 0..16 {
-                                    let selected = self.animation_editor_state.selected_bones.contains(&i);
+                                    let selected =
+                                        self.animation_editor_state.selected_bones.contains(&i);
                                     let label = format!("  🦴 Bone {}", i);
                                     if ui.selectable_label(selected, label).clicked() {
-                                        if selected { self.animation_editor_state.selected_bones.retain(|&b| b != i); }
-                                        else { self.animation_editor_state.selected_bones.push(i); }
+                                        if selected {
+                                            self.animation_editor_state
+                                                .selected_bones
+                                                .retain(|&b| b != i);
+                                        } else {
+                                            self.animation_editor_state.selected_bones.push(i);
+                                        }
                                     }
                                 }
                             } else {
                                 for (i, name) in config.bone_names.iter().enumerate() {
-                                    let selected = self.animation_editor_state.selected_bones.contains(&i);
-                                    
+                                    let selected =
+                                        self.animation_editor_state.selected_bones.contains(&i);
+
                                     // Simple indentation logic
                                     let mut depth = 0;
                                     let mut curr = config.bone_parents.get(i).copied().flatten();
                                     while let Some(parent_idx) = curr {
                                         depth += 1;
-                                        curr = config.bone_parents.get(parent_idx).copied().flatten();
-                                        if depth > 10 { break; } // Safety
+                                        curr =
+                                            config.bone_parents.get(parent_idx).copied().flatten();
+                                        if depth > 10 {
+                                            break;
+                                        } // Safety
                                     }
-                                    
+
                                     let indent = "  ".repeat(depth);
                                     let label = format!("{}🦴 {}", indent, name);
-                                    
+
                                     if ui.selectable_label(selected, label).clicked() {
-                                        if selected { self.animation_editor_state.selected_bones.retain(|&b| b != i); }
-                                        else { self.animation_editor_state.selected_bones.push(i); }
+                                        if selected {
+                                            self.animation_editor_state
+                                                .selected_bones
+                                                .retain(|&b| b != i);
+                                        } else {
+                                            self.animation_editor_state.selected_bones.push(i);
+                                        }
                                     }
                                 }
                             }
@@ -3605,19 +4367,23 @@ impl EditorApp {
             }
         });
     }
-    
+
     fn draw_animation_preview(&mut self, ui: &mut egui::Ui) {
         // Update playback time if playing
         if self.animation_editor_state.is_playing {
             let now = std::time::Instant::now();
-            let dt = now.duration_since(self.animation_editor_state.last_update).as_secs_f32();
+            let dt = now
+                .duration_since(self.animation_editor_state.last_update)
+                .as_secs_f32();
             self.animation_editor_state.last_update = now;
-            
-            self.animation_editor_state.current_time += dt * self.animation_editor_state.playback_speed;
-            
+
+            self.animation_editor_state.current_time +=
+                dt * self.animation_editor_state.playback_speed;
+
             // Loop at end of clip
             if let Some(scene) = &self.current_scene {
-                if let Some(entity) = self.selected_entity_id
+                if let Some(entity) = self
+                    .selected_entity_id
                     .and_then(|id| scene.entities.iter().find(|e| e.id == id))
                 {
                     if let Some(config) = &entity.animator_config {
@@ -3631,17 +4397,17 @@ impl EditorApp {
                     }
                 }
             }
-            
+
             // Request repaint for continuous playback
             ui.ctx().request_repaint();
         }
-        
+
         // Show 3D Viewport in preview area
         let rect = self.draw_3d_viewport(ui);
-        
+
         // Add Animation Info Overlay on top of the 3D Viewport
         let painter = ui.painter().with_clip_rect(rect);
-        
+
         // Draw "Animation Preview" label (top left)
         painter.text(
             egui::pos2(rect.min.x + 10.0, rect.min.y + 10.0),
@@ -3650,25 +4416,40 @@ impl EditorApp {
             egui::FontId::proportional(14.0),
             egui::Color32::from_gray(180),
         );
-        
+
         // Draw current time and clip info (top center)
-        let clip_info = self.current_scene.as_ref()
-            .and_then(|s| self.selected_entity_id
-                .and_then(|id| s.entities.iter().find(|e| e.id == id)))
+        let clip_info = self
+            .current_scene
+            .as_ref()
+            .and_then(|s| {
+                self.selected_entity_id
+                    .and_then(|id| s.entities.iter().find(|e| e.id == id))
+            })
             .and_then(|e| e.animator_config.as_ref())
-            .and_then(|c| self.animation_editor_state.selected_clip_idx
-                .and_then(|i| c.clip_names.get(i).map(|name| (name.clone(), c.clip_durations.get(i).copied().unwrap_or(0.0)))))
+            .and_then(|c| {
+                self.animation_editor_state.selected_clip_idx.and_then(|i| {
+                    c.clip_names.get(i).map(|name| {
+                        (
+                            name.clone(),
+                            c.clip_durations.get(i).copied().unwrap_or(0.0),
+                        )
+                    })
+                })
+            })
             .map(|(name, dur)| format!("{} ({:.2}s)", name, dur))
             .unwrap_or_else(|| "No clip selected".to_string());
-        
+
         painter.text(
             egui::pos2(rect.center().x, rect.min.y + 15.0),
             egui::Align2::CENTER_TOP,
-            format!("🎬 Clip: {} | ⏱ Time: {:.2}s", clip_info, self.animation_editor_state.current_time),
+            format!(
+                "🎬 Clip: {} | ⏱ Time: {:.2}s",
+                clip_info, self.animation_editor_state.current_time
+            ),
             egui::FontId::proportional(16.0),
             egui::Color32::WHITE,
         );
-        
+
         // Draw play indicator if playing (top right)
         if self.animation_editor_state.is_playing {
             painter.text(
@@ -3679,16 +4460,18 @@ impl EditorApp {
                 egui::Color32::from_rgb(100, 255, 100),
             );
         }
-        
+
         // Send preview update to engine if connected
         if self.is_connected {
             if let Some(id) = self.selected_entity_id {
                 if let Some(clip_idx) = self.animation_editor_state.selected_clip_idx {
-                    let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::PreviewAnimationAt {
-                        id,
-                        clip_index: clip_idx,
-                        time: self.animation_editor_state.current_time,
-                    }));
+                    let _ =
+                        self.command_tx
+                            .send(AppCommand::Send(SceneUpdate::PreviewAnimationAt {
+                                id,
+                                clip_index: clip_idx,
+                                time: self.animation_editor_state.current_time,
+                            }));
                 }
             }
         }
@@ -3779,14 +4562,14 @@ impl eframe::App for EditorApp {
                         ui.close_menu();
                     }
                     ui.separator();
-                    
+
                     // Open Scene
                     if ui.button("📂 Open Scene...").clicked() {
                         self.scan_scene_files();
                         self.show_open_scene_dialog = true;
                         ui.close_menu();
                     }
-                    
+
                     // Recent Scenes submenu
                     if !self.recent_scenes.is_empty() {
                         ui.menu_button("📋 Recent Scenes", |ui| {
@@ -3798,8 +4581,11 @@ impl eframe::App for EditorApp {
                                     .unwrap_or(path);
                                 if ui.button(display_name).clicked() {
                                     let path_clone = path.clone();
-                                    if self.check_unsaved_and_set_action(PendingAction::OpenScene(path_clone.clone())) {
-                                        if let Err(e) = self.load_scene_from_path(ctx, &path_clone) {
+                                    if self.check_unsaved_and_set_action(PendingAction::OpenScene(
+                                        path_clone.clone(),
+                                    )) {
+                                        if let Err(e) = self.load_scene_from_path(ctx, &path_clone)
+                                        {
                                             self.status = format!("Error: {}", e);
                                         }
                                     }
@@ -3808,9 +4594,9 @@ impl eframe::App for EditorApp {
                             }
                         });
                     }
-                    
+
                     ui.separator();
-                    
+
                     // Save Scene (to known path or trigger Save As)
                     if ui.button("💾 Save Scene").clicked() {
                         if let Some(path) = self.current_scene_path.clone() {
@@ -3819,25 +4605,31 @@ impl eframe::App for EditorApp {
                             }
                         } else if let Some(scene) = &self.current_scene {
                             // Default to scene name if no path
-                            let path = format!("scenes/{}.json", scene.name.to_lowercase().replace(" ", "_"));
+                            let path = format!(
+                                "scenes/{}.json",
+                                scene.name.to_lowercase().replace(" ", "_")
+                            );
                             if let Err(e) = self.save_scene_to_path(&path) {
                                 self.status = format!("Error: {}", e);
                             }
                         }
                         ui.close_menu();
                     }
-                    
+
                     // Save Scene As
                     if ui.button("💾 Save Scene As...").clicked() {
                         if let Some(scene) = &self.current_scene {
-                            self.save_as_path = format!("scenes/{}.json", scene.name.to_lowercase().replace(" ", "_"));
+                            self.save_as_path = format!(
+                                "scenes/{}.json",
+                                scene.name.to_lowercase().replace(" ", "_")
+                            );
                         } else {
                             self.save_as_path = "scenes/untitled.json".to_string();
                         }
                         self.show_save_as_dialog = true;
                         ui.close_menu();
                     }
-                    
+
                     ui.separator();
                     if ui.button("Exit").clicked() {
                         if self.check_unsaved_and_set_action(PendingAction::Exit) {
@@ -3857,17 +4649,17 @@ impl eframe::App for EditorApp {
                     if ui.button("📂 Open Project...").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .set_title("Open Project Folder")
-                            .pick_folder() 
+                            .pick_folder()
                         {
                             match stfsc_engine::project::Project::load(path.clone()) {
                                 Ok(proj) => {
                                     let name = proj.metadata.name.clone();
                                     let path_str = path.to_string_lossy().to_string();
-                                    
+
                                     // Add to recent projects
                                     self.recent_projects.add(&name, &path_str);
                                     let _ = self.recent_projects.save();
-                                    
+
                                     self.apply_loaded_project(ctx, proj);
                                 }
                                 Err(e) => self.status = format!("Error loading project: {}", e),
@@ -3875,7 +4667,7 @@ impl eframe::App for EditorApp {
                         }
                         ui.close_menu();
                     }
-                    
+
                     // Recent Projects submenu
                     if !self.recent_projects.projects.is_empty() {
                         ui.menu_button("📋 Recent Projects", |ui| {
@@ -3886,7 +4678,8 @@ impl eframe::App for EditorApp {
                                     let path = std::path::PathBuf::from(&recent.path);
                                     match stfsc_engine::project::Project::load(path) {
                                         Ok(proj) => {
-                                            self.recent_projects.add(&proj.metadata.name, &recent.path);
+                                            self.recent_projects
+                                                .add(&proj.metadata.name, &recent.path);
                                             let _ = self.recent_projects.save();
                                             self.apply_loaded_project(ctx, proj);
                                         }
@@ -3908,9 +4701,9 @@ impl eframe::App for EditorApp {
                             }
                         });
                     }
-                    
+
                     let mut do_save_everything = false;
-                    
+
                     if let Some(proj) = &mut self.current_project {
                         ui.separator();
                         if ui.button("⚙ Project Settings").clicked() {
@@ -3929,7 +4722,8 @@ impl eframe::App for EditorApp {
                         ui.separator();
                         if ui.button("📦 Export Project...").clicked() {
                             // Set default export directory to project's exports folder
-                            self.export_output_dir = proj.root_path.join("exports").to_string_lossy().to_string();
+                            self.export_output_dir =
+                                proj.root_path.join("exports").to_string_lossy().to_string();
                             self.show_export_dialog = true;
                             self.export_in_progress = false;
                             self.export_log.clear();
@@ -3937,7 +4731,7 @@ impl eframe::App for EditorApp {
                             ui.close_menu();
                         }
                     }
-                    
+
                     if do_save_everything {
                         if let Err(e) = self.save_everything() {
                             self.status = format!("Error saving: {}", e);
@@ -3949,10 +4743,14 @@ impl eframe::App for EditorApp {
                 // Build Menu - Always visible for discoverability
                 ui.menu_button("Build", |ui| {
                     let has_project = self.current_project.is_some();
-                    
-                    if ui.add_enabled(has_project, egui::Button::new("📦 Export Project...")).clicked() {
+
+                    if ui
+                        .add_enabled(has_project, egui::Button::new("📦 Export Project..."))
+                        .clicked()
+                    {
                         if let Some(proj) = &self.current_project {
-                            self.export_output_dir = proj.root_path.join("exports").to_string_lossy().to_string();
+                            self.export_output_dir =
+                                proj.root_path.join("exports").to_string_lossy().to_string();
                         }
                         self.show_export_dialog = true;
                         self.export_in_progress = false;
@@ -3960,10 +4758,10 @@ impl eframe::App for EditorApp {
                         self.export_error = None;
                         ui.close_menu();
                     }
-                    
+
                     ui.separator();
                     ui.label("Quick Build (CLI):");
-                    
+
                     if ui.button("🐧 Build Linux").clicked() {
                         self.status = "Run ./build_engine.sh linux in terminal".into();
                         ui.close_menu();
@@ -3972,7 +4770,7 @@ impl eframe::App for EditorApp {
                         self.status = "Run ./build_engine.sh quest in terminal".into();
                         ui.close_menu();
                     }
-                    
+
                     if !has_project {
                         ui.separator();
                         ui.label("💡 Create or open a project");
@@ -4004,14 +4802,28 @@ impl eframe::App for EditorApp {
                 });
                 ui.menu_button("View", |ui| {
                     ui.label("Rendering Quality");
-                    ui.selectable_value(&mut self.render_quality, RenderQuality::Low, "Low (Wireframe)");
-                    ui.selectable_value(&mut self.render_quality, RenderQuality::High, "High (Solid)");
-                    
+                    ui.selectable_value(
+                        &mut self.render_quality,
+                        RenderQuality::Low,
+                        "Low (Wireframe)",
+                    );
+                    ui.selectable_value(
+                        &mut self.render_quality,
+                        RenderQuality::High,
+                        "High (Solid)",
+                    );
+
                     if self.render_quality == RenderQuality::High {
-                        ui.add(egui::Slider::new(&mut self.resolution_scale, 0.1..=1.0).text("Resolution Scale"));
-                        ui.add(egui::Slider::new(&mut self.sharpening_amount, 0.0..=1.0).text("Sharpening"));
+                        ui.add(
+                            egui::Slider::new(&mut self.resolution_scale, 0.1..=1.0)
+                                .text("Resolution Scale"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut self.sharpening_amount, 0.0..=1.0)
+                                .text("Sharpening"),
+                        );
                     }
-                    
+
                     ui.separator();
                     ui.label("Camera");
                     if ui.button("🔄 Reset Camera").clicked() {
@@ -4019,9 +4831,12 @@ impl eframe::App for EditorApp {
                         ui.close_menu();
                     }
                     if ui.button("🔍 Focus Selected").clicked() {
-                        if let (Some(id), Some(scene)) = (self.selected_entity_id, &self.current_scene) {
+                        if let (Some(id), Some(scene)) =
+                            (self.selected_entity_id, &self.current_scene)
+                        {
                             if let Some(e) = scene.entities.iter().find(|e| e.id == id) {
-                                self.camera.target = Vec3::new(e.position[0], e.position[1], e.position[2]);
+                                self.camera.target =
+                                    Vec3::new(e.position[0], e.position[1], e.position[2]);
                             }
                         }
                         ui.close_menu();
@@ -4055,6 +4870,7 @@ impl eframe::App for EditorApp {
                                     ..Default::default()
                                 },
                                 script: None,
+                                scripts: vec![],
                                 collision_enabled: true,
                                 layer: LAYER_VEHICLE,
                                 is_static: false,
@@ -4082,6 +4898,7 @@ impl eframe::App for EditorApp {
                                 },
                                 material: Material::default(),
                                 script: Some("CrowdAgent".into()),
+                                scripts: vec!["CrowdAgent".into()],
                                 collision_enabled: true,
                                 layer: LAYER_CHARACTER,
                                 is_static: false,
@@ -4109,6 +4926,7 @@ impl eframe::App for EditorApp {
                                     ..Default::default()
                                 },
                                 script: None,
+                                scripts: vec![],
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
@@ -4143,6 +4961,7 @@ impl eframe::App for EditorApp {
                                     ..Default::default()
                                 },
                                 script: None,
+                                scripts: vec![],
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
@@ -4175,6 +4994,7 @@ impl eframe::App for EditorApp {
                                     ..Default::default()
                                 },
                                 script: None,
+                                scripts: vec![],
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
@@ -4207,6 +5027,7 @@ impl eframe::App for EditorApp {
                                     ..Default::default()
                                 },
                                 script: None,
+                                scripts: vec![],
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
@@ -4242,6 +5063,7 @@ impl eframe::App for EditorApp {
                                     ..Default::default()
                                 },
                                 script: None,
+                                scripts: vec![],
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
@@ -4323,12 +5145,18 @@ impl eframe::App for EditorApp {
                     ui.label("Respawn System");
                     if let Some(scene) = &mut self.current_scene {
                         let mut changed = false;
-                        if ui.checkbox(&mut scene.respawn_enabled, "Enable Min Y Respawn").changed() {
+                        if ui
+                            .checkbox(&mut scene.respawn_enabled, "Enable Min Y Respawn")
+                            .changed()
+                        {
                             changed = true;
                         }
                         ui.horizontal(|ui| {
                             ui.label("Min Y:");
-                            if ui.add(egui::DragValue::new(&mut scene.respawn_y).speed(0.1)).changed() {
+                            if ui
+                                .add(egui::DragValue::new(&mut scene.respawn_y).speed(0.1))
+                                .changed()
+                            {
                                 changed = true;
                             }
                         });
@@ -4344,7 +5172,6 @@ impl eframe::App for EditorApp {
                         }
                     }
                 });
-
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let c = if self.is_connected {
@@ -4474,6 +5301,7 @@ impl eframe::App for EditorApp {
                                || start.material.metallic != after.material.metallic
                                || start.material.roughness != after.material.roughness
                                || start.script != after.script
+                               || start.scripts != after.scripts
                                || start.collision_enabled != after.collision_enabled {
                                 self.undo_stack.push(EditorAction::ModifyEntity {
                                     id: prev_id,
@@ -4551,11 +5379,53 @@ impl eframe::App for EditorApp {
 
                         ui.horizontal(|ui| {
                             ui.label("📜 Script:");
-                            let mut script_name = entity.script.clone().unwrap_or_default();
-                            if ui.text_edit_singleline(&mut script_name).changed() {
-                                entity.script = if script_name.is_empty() { None } else { Some(script_name) };
-                                inspector_dirty = true;
-                            }
+                            ui.vertical(|ui| {
+                                let mut script_names = entity.script_names();
+                                let mut scripts_changed = false;
+                                let mut remove_script_index = None;
+
+                                if script_names.is_empty() {
+                                    ui.label("No script components");
+                                }
+
+                                for (script_index, script_name) in script_names.iter_mut().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(format!("Script {}", script_index + 1));
+                                        if ui.text_edit_singleline(script_name).changed() {
+                                            scripts_changed = true;
+                                        }
+                                        if ui.small_button("Remove").clicked() {
+                                            remove_script_index = Some(script_index);
+                                        }
+                                    });
+                                }
+
+                                if let Some(script_index) = remove_script_index {
+                                    script_names.remove(script_index);
+                                    scripts_changed = true;
+                                }
+
+                                ui.menu_button("+ Add Component", |ui| {
+                                    for script_name in BUILTIN_SCRIPT_NAMES {
+                                        if ui.button(*script_name).clicked() {
+                                            script_names.push((*script_name).to_string());
+                                            scripts_changed = true;
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
+
+                                if scripts_changed {
+                                    entity.set_script_names(script_names);
+                                    inspector_dirty = true;
+                                    if self.is_connected {
+                                        let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetScripts {
+                                            id: entity.id,
+                                            names: entity.script_names(),
+                                        }));
+                                    }
+                                }
+                            });
                         });
                         
                         // Animator Controller Section
@@ -5160,6 +6030,14 @@ impl eframe::App for EditorApp {
                                 }));
                             }
 
+                            let script_names = e.script_names();
+                            if !script_names.is_empty() {
+                                let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetScripts {
+                                    id: e.id,
+                                    names: script_names,
+                                }));
+                            }
+
                             e.deployed = true;
                             self.status = format!("Deployed #{}", id);
                         }
@@ -5236,21 +6114,27 @@ impl eframe::App for EditorApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             // Tab bar at top
             ui.horizontal(|ui| {
-                if ui.selectable_label(
-                    self.active_view == EditorView::SceneEditor,
-                    "🎬 Scene Editor"
-                ).clicked() {
+                if ui
+                    .selectable_label(
+                        self.active_view == EditorView::SceneEditor,
+                        "🎬 Scene Editor",
+                    )
+                    .clicked()
+                {
                     self.active_view = EditorView::SceneEditor;
                 }
-                if ui.selectable_label(
-                    self.active_view == EditorView::AnimationEditor,
-                    "🎭 Animation Editor"
-                ).clicked() {
+                if ui
+                    .selectable_label(
+                        self.active_view == EditorView::AnimationEditor,
+                        "🎭 Animation Editor",
+                    )
+                    .clicked()
+                {
                     self.active_view = EditorView::AnimationEditor;
                 }
             });
             ui.separator();
-            
+
             // Conditional content based on active tab
             match self.active_view {
                 EditorView::SceneEditor => {
@@ -5335,42 +6219,47 @@ impl eframe::App for EditorApp {
                         ui.label("Directory:");
                         ui.text_edit_singleline(&mut self.new_project_dir);
                         if ui.button("...").clicked() {
-                           if let Some(path) = rfd::FileDialog::new()
-                                .pick_folder() 
-                            {
+                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
                                 self.new_project_dir = path.to_string_lossy().to_string();
                             }
                         }
                     });
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("🚀 Create Project").clicked() && !self.new_project_name.is_empty() {
-                            let root = std::path::PathBuf::from(&self.new_project_dir).join(&self.new_project_name);
-                            let mut proj = stfsc_engine::project::Project::new(&self.new_project_name, root.clone());
+                        if ui.button("🚀 Create Project").clicked()
+                            && !self.new_project_name.is_empty()
+                        {
+                            let root = std::path::PathBuf::from(&self.new_project_dir)
+                                .join(&self.new_project_name);
+                            let mut proj = stfsc_engine::project::Project::new(
+                                &self.new_project_name,
+                                root.clone(),
+                            );
                             if let Err(e) = proj.save() {
                                 self.status = format!("Error creating project: {}", e);
                             } else {
                                 // Add to recent projects
                                 let path_str = root.to_string_lossy().to_string();
-                                 self.recent_projects.add(&self.new_project_name, &path_str);
-                                 let _ = self.recent_projects.save();
-                                 
-                                 // Create a default test scene in the new project
-                                 let mut test_scene = Scene::create_test_scene();
-                                 test_scene.name = "Main".to_string();
-                                 let scene_json = serde_json::to_string_pretty(&test_scene).unwrap_or_default();
-                                 let scene_path = root.join("scenes/main.json");
-                                 let _ = std::fs::create_dir_all(scene_path.parent().unwrap());
-                                 let _ = std::fs::write(&scene_path, scene_json);
-                                 
-                                 // Set this as startup scene
-                                 proj.metadata.startup_scene = Some("scenes/main.json".to_string());
-                                 let _ = proj.save();
+                                self.recent_projects.add(&self.new_project_name, &path_str);
+                                let _ = self.recent_projects.save();
 
-                                 self.apply_loaded_project(ctx, proj);
-                                 self.show_new_project_dialog = false;
-                             }
-                         }
+                                // Create a default test scene in the new project
+                                let mut test_scene = Scene::create_test_scene();
+                                test_scene.name = "Main".to_string();
+                                let scene_json =
+                                    serde_json::to_string_pretty(&test_scene).unwrap_or_default();
+                                let scene_path = root.join("scenes/main.json");
+                                let _ = std::fs::create_dir_all(scene_path.parent().unwrap());
+                                let _ = std::fs::write(&scene_path, scene_json);
+
+                                // Set this as startup scene
+                                proj.metadata.startup_scene = Some("scenes/main.json".to_string());
+                                let _ = proj.save();
+
+                                self.apply_loaded_project(ctx, proj);
+                                self.show_new_project_dialog = false;
+                            }
+                        }
                         if ui.button("Cancel").clicked() {
                             self.show_new_project_dialog = false;
                         }
@@ -5589,7 +6478,7 @@ impl eframe::App for EditorApp {
                 self.show_project_settings = false;
             }
         }
-        
+
         if do_save_everything {
             if let Err(e) = self.save_everything() {
                 self.status = format!("Error: {}", e);
@@ -5610,8 +6499,14 @@ impl eframe::App for EditorApp {
                                 self.status = line.to_string();
                             }
                         }
-                        ExportMessage::Complete { platform, output_path } => {
-                            self.export_log.push_str(&format!("✅ {} export complete: {}\n", platform, output_path));
+                        ExportMessage::Complete {
+                            platform,
+                            output_path,
+                        } => {
+                            self.export_log.push_str(&format!(
+                                "✅ {} export complete: {}\n",
+                                platform, output_path
+                            ));
                             self.status = format!("✅ {} export complete", platform);
                         }
                         ExportMessage::Error(err) => {
@@ -5628,7 +6523,7 @@ impl eframe::App for EditorApp {
                     }
                 }
             }
-            
+
             egui::Window::new("📦 Export Project")
                 .collapsible(false)
                 .resizable(true)
@@ -5638,7 +6533,7 @@ impl eframe::App for EditorApp {
                     if let Some(proj) = &self.current_project {
                         ui.heading(&proj.metadata.name);
                         ui.add_space(8.0);
-                        
+
                         // Target platforms
                         ui.heading("Target Platforms");
                         ui.add_space(4.0);
@@ -5646,9 +6541,9 @@ impl eframe::App for EditorApp {
                         ui.checkbox(&mut self.export_target_windows, "🪟 Windows PC");
                         ui.checkbox(&mut self.export_target_quest3, "🥽 Meta Quest 3");
                         ui.checkbox(&mut self.export_target_quest_pro, "🥽 Meta Quest Pro");
-                        
+
                         ui.add_space(12.0);
-                        
+
                         // Output directory
                         ui.heading("Output");
                         ui.add_space(4.0);
@@ -5661,9 +6556,9 @@ impl eframe::App for EditorApp {
                                 }
                             }
                         });
-                        
+
                         ui.add_space(12.0);
-                        
+
                         // Build settings
                         ui.heading("Build Settings");
                         ui.add_space(4.0);
@@ -5671,59 +6566,77 @@ impl eframe::App for EditorApp {
                             .selected_text(self.export_opt_level.name())
                             .show_ui(ui, |ui| {
                                 for opt in stfsc_engine::project::OptLevel::all() {
-                                    ui.selectable_value(&mut self.export_opt_level, opt, opt.name());
+                                    ui.selectable_value(
+                                        &mut self.export_opt_level,
+                                        opt,
+                                        opt.name(),
+                                    );
                                 }
                             });
-                        
+
                         // Build time warning
                         match self.export_opt_level {
                             stfsc_engine::project::OptLevel::Debug => {
                                 ui.label("⚡ Fast build, larger binary, debug symbols");
                             }
                             stfsc_engine::project::OptLevel::Release => {
-                                ui.label("⚖️ Recommended - good optimization, reasonable build time");
+                                ui.label(
+                                    "⚖️ Recommended - good optimization, reasonable build time",
+                                );
                             }
                             stfsc_engine::project::OptLevel::ReleaseLTO => {
-                                ui.colored_label(egui::Color32::YELLOW, 
-                                    "⚠️ LTO: Very slow build (30+ min), maximum optimization");
+                                ui.colored_label(
+                                    egui::Color32::YELLOW,
+                                    "⚠️ LTO: Very slow build (30+ min), maximum optimization",
+                                );
                                 ui.label("    Consider using Release for testing");
                             }
                         }
-                        
+
                         ui.add_space(16.0);
                         ui.separator();
-                        
+
                         // Export log
                         if !self.export_log.is_empty() || self.export_error.is_some() {
                             ui.collapsing("Build Log", |ui| {
                                 egui::ScrollArea::vertical()
                                     .max_height(150.0)
                                     .show(ui, |ui| {
-                                        ui.add(egui::TextEdit::multiline(&mut self.export_log.as_str())
+                                        ui.add(
+                                            egui::TextEdit::multiline(
+                                                &mut self.export_log.as_str(),
+                                            )
                                             .font(egui::TextStyle::Monospace)
-                                            .desired_width(f32::INFINITY));
+                                            .desired_width(f32::INFINITY),
+                                        );
                                     });
                             });
                             if let Some(ref err) = self.export_error {
                                 ui.colored_label(egui::Color32::RED, format!("❌ Error: {}", err));
                             }
                         }
-                        
+
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            let can_export = !self.export_in_progress && 
-                                (self.export_target_linux || self.export_target_windows || self.export_target_quest3 || self.export_target_quest_pro);
-                            
-                            if ui.add_enabled(can_export, egui::Button::new("🚀 Export")).clicked() {
+                            let can_export = !self.export_in_progress
+                                && (self.export_target_linux
+                                    || self.export_target_windows
+                                    || self.export_target_quest3
+                                    || self.export_target_quest_pro);
+
+                            if ui
+                                .add_enabled(can_export, egui::Button::new("🚀 Export"))
+                                .clicked()
+                            {
                                 self.export_in_progress = true;
                                 self.export_log.clear();
                                 self.export_error = None;
                                 self.status = "Starting export...".into();
-                                
+
                                 // Create channel for progress updates
                                 let (tx, rx) = std::sync::mpsc::channel();
                                 self.export_receiver = Some(rx);
-                                
+
                                 // Clone data needed for background thread
                                 let engine_root = std::env::current_dir().unwrap_or_default();
                                 let output_dir = std::path::PathBuf::from(&self.export_output_dir);
@@ -5732,20 +6645,22 @@ impl eframe::App for EditorApp {
                                 let target_windows = self.export_target_windows;
                                 let target_quest3 = self.export_target_quest3;
                                 let target_quest_pro = self.export_target_quest_pro;
-                                
+
                                 // Clone project data for thread
                                 let project_clone = proj.clone();
-                                
+
                                 // Spawn background export thread with streaming output
                                 std::thread::spawn(move || {
-                                    let exporter = stfsc_engine::project::export::ProjectExporter::new(
-                                        engine_root,
-                                        output_dir,
-                                    );
-                                    
+                                    let exporter =
+                                        stfsc_engine::project::export::ProjectExporter::new(
+                                            engine_root,
+                                            output_dir,
+                                        );
+
                                     // Create a separate channel for streaming cargo output
-                                    let (stream_tx, stream_rx) = std::sync::mpsc::channel::<String>();
-                                    
+                                    let (stream_tx, stream_rx) =
+                                        std::sync::mpsc::channel::<String>();
+
                                     // Forward streaming output to main channel
                                     let tx_clone = tx.clone();
                                     std::thread::spawn(move || {
@@ -5753,84 +6668,112 @@ impl eframe::App for EditorApp {
                                             let _ = tx_clone.send(ExportMessage::Progress(line));
                                         }
                                     });
-                                    
+
                                     let mut had_error = false;
-                                    
+
                                     if target_linux && !had_error {
                                         let result = exporter.export_with_sender(
-                                            &project_clone, 
-                                            stfsc_engine::project::TargetPlatform::Linux, 
+                                            &project_clone,
+                                            stfsc_engine::project::TargetPlatform::Linux,
                                             opt_level,
-                                            &stream_tx
+                                            &stream_tx,
                                         );
                                         if result.success {
                                             let _ = tx.send(ExportMessage::Complete {
                                                 platform: "Linux".into(),
-                                                output_path: result.output_path.display().to_string(),
+                                                output_path: result
+                                                    .output_path
+                                                    .display()
+                                                    .to_string(),
                                             });
                                         } else {
-                                            let _ = tx.send(ExportMessage::Error(result.error.unwrap_or_else(|| "Unknown error".into())));
+                                            let _ = tx.send(ExportMessage::Error(
+                                                result
+                                                    .error
+                                                    .unwrap_or_else(|| "Unknown error".into()),
+                                            ));
                                             had_error = true;
                                         }
                                     }
-                                    
+
                                     if target_windows && !had_error {
                                         let result = exporter.export_with_sender(
-                                            &project_clone, 
-                                            stfsc_engine::project::TargetPlatform::PC, 
+                                            &project_clone,
+                                            stfsc_engine::project::TargetPlatform::PC,
                                             opt_level,
-                                            &stream_tx
+                                            &stream_tx,
                                         );
                                         if result.success {
                                             let _ = tx.send(ExportMessage::Complete {
                                                 platform: "Windows".into(),
-                                                output_path: result.output_path.display().to_string(),
+                                                output_path: result
+                                                    .output_path
+                                                    .display()
+                                                    .to_string(),
                                             });
                                         } else {
-                                            let _ = tx.send(ExportMessage::Error(result.error.unwrap_or_else(|| "Unknown error".into())));
+                                            let _ = tx.send(ExportMessage::Error(
+                                                result
+                                                    .error
+                                                    .unwrap_or_else(|| "Unknown error".into()),
+                                            ));
                                             had_error = true;
                                         }
                                     }
-                                    
+
                                     if target_quest3 && !had_error {
                                         let result = exporter.export_with_sender(
-                                            &project_clone, 
-                                            stfsc_engine::project::TargetPlatform::Quest3, 
+                                            &project_clone,
+                                            stfsc_engine::project::TargetPlatform::Quest3,
                                             opt_level,
-                                            &stream_tx
+                                            &stream_tx,
                                         );
                                         if result.success {
                                             let _ = tx.send(ExportMessage::Complete {
                                                 platform: "Quest 3".into(),
-                                                output_path: result.output_path.display().to_string(),
+                                                output_path: result
+                                                    .output_path
+                                                    .display()
+                                                    .to_string(),
                                             });
                                         } else {
-                                            let _ = tx.send(ExportMessage::Error(result.error.unwrap_or_else(|| "Unknown error".into())));
+                                            let _ = tx.send(ExportMessage::Error(
+                                                result
+                                                    .error
+                                                    .unwrap_or_else(|| "Unknown error".into()),
+                                            ));
                                             had_error = true;
                                         }
                                     }
-                                    
+
                                     if target_quest_pro && !had_error {
                                         let result = exporter.export_with_sender(
-                                            &project_clone, 
-                                            stfsc_engine::project::TargetPlatform::QuestPro, 
+                                            &project_clone,
+                                            stfsc_engine::project::TargetPlatform::QuestPro,
                                             opt_level,
-                                            &stream_tx
+                                            &stream_tx,
                                         );
                                         if result.success {
                                             let _ = tx.send(ExportMessage::Complete {
                                                 platform: "Quest Pro".into(),
-                                                output_path: result.output_path.display().to_string(),
+                                                output_path: result
+                                                    .output_path
+                                                    .display()
+                                                    .to_string(),
                                             });
                                         } else {
-                                            let _ = tx.send(ExportMessage::Error(result.error.unwrap_or_else(|| "Unknown error".into())));
+                                            let _ = tx.send(ExportMessage::Error(
+                                                result
+                                                    .error
+                                                    .unwrap_or_else(|| "Unknown error".into()),
+                                            ));
                                         }
                                     }
-                                    
+
                                     let _ = tx.send(ExportMessage::Done);
                                 });
                             }
-                            
+
                             if ui.button("Cancel").clicked() {
                                 self.show_export_dialog = false;
                             }
@@ -5853,7 +6796,7 @@ impl eframe::App for EditorApp {
                 .show(ctx, |ui| {
                     ui.label("Select a scene file to open:");
                     ui.add_space(4.0);
-                    
+
                     egui::ScrollArea::vertical()
                         .max_height(300.0)
                         .show(ui, |ui| {
@@ -5863,9 +6806,14 @@ impl eframe::App for EditorApp {
                                     .file_name()
                                     .and_then(|n| n.to_str())
                                     .unwrap_or(file);
-                                if ui.selectable_label(false, format!("📄 {}", display_name)).clicked() {
+                                if ui
+                                    .selectable_label(false, format!("📄 {}", display_name))
+                                    .clicked()
+                                {
                                     let file_path = file.clone();
-                                    if self.check_unsaved_and_set_action(PendingAction::OpenScene(file_path.clone())) {
+                                    if self.check_unsaved_and_set_action(PendingAction::OpenScene(
+                                        file_path.clone(),
+                                    )) {
                                         if let Err(e) = self.load_scene_from_path(ctx, &file_path) {
                                             self.status = format!("Error: {}", e);
                                         }
@@ -5877,7 +6825,7 @@ impl eframe::App for EditorApp {
                                 ui.label("No scene files found in 'scenes/' directory.");
                             }
                         });
-                    
+
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("🔄 Refresh").clicked() {
@@ -5953,7 +6901,7 @@ impl eframe::App for EditorApp {
         if self.show_ui_editor {
             let mut ui_dirty = false;
             let mut open = true;
-            
+
             egui::Window::new("🖼 UI Editor")
                 .default_size([800.0, 500.0])
                 .min_width(600.0)
@@ -6284,6 +7232,9 @@ impl eframe::App for EditorApp {
 
                             let (response, painter) = ui.allocate_painter(canvas_size, egui::Sense::click_and_drag());
                             let rect = response.rect;
+                            if response.drag_started() {
+                                self.ui_drag_last_delta = egui::Vec2::ZERO;
+                            }
                             
                             // Dark background with grid
                             painter.rect_filled(rect, 4.0, egui::Color32::from_gray(20));
@@ -6418,10 +7369,12 @@ impl eframe::App for EditorApp {
                             }
 
                             // Apply drag delta to selected element
-                            if response.dragged() {
+                            if response.dragged() && self.ui_drag_start_element.is_some() {
                                 if let (Some(etype), Some(id), Some(scene)) = (&self.selected_ui_element_type, self.selected_ui_id, &mut self.current_scene) {
                                     if let Some(nl) = scene.ui_layouts.get_mut(self.selected_layout_idx) {
-                                        let delta = response.drag_delta() / scale;
+                                        let total_delta = response.drag_delta() / scale;
+                                        let delta = total_delta - self.ui_drag_last_delta;
+                                        self.ui_drag_last_delta = total_delta;
                                         match etype.as_str() {
                                             "Button" => if let Some(btn) = nl.layout.buttons.get_mut(id as usize) {
                                                 btn.panel.position[0] += delta.x;
@@ -6461,6 +7414,7 @@ impl eframe::App for EditorApp {
 
                             // Push undo on drag release
                             if response.drag_stopped() {
+                                self.ui_drag_last_delta = egui::Vec2::ZERO;
                                 if let (Some(before), Some(etype), Some(id), Some(scene)) = (self.ui_drag_start_element.take(), &self.selected_ui_element_type, self.selected_ui_id, &mut self.current_scene) {
                                     if let Some(nl) = scene.ui_layouts.get(self.selected_layout_idx) {
                                         let after = match etype.as_str() {
@@ -6888,8 +7842,12 @@ impl eframe::App for EditorApp {
                     });
                 });
             });
-            if ui_dirty { self.scene_dirty = true; }
-            if !open { self.show_ui_editor = false; }
+            if ui_dirty {
+                self.scene_dirty = true;
+            }
+            if !open {
+                self.show_ui_editor = false;
+            }
         }
 
         // Unsaved Changes Warning Dialog
@@ -6899,7 +7857,9 @@ impl eframe::App for EditorApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
-                    let scene_name = self.current_scene.as_ref()
+                    let scene_name = self
+                        .current_scene
+                        .as_ref()
                         .map(|s| s.name.as_str())
                         .unwrap_or("Untitled");
                     ui.label(format!("Save changes to \"{}\"?", scene_name));
@@ -6915,7 +7875,10 @@ impl eframe::App for EditorApp {
                                     return;
                                 }
                             } else if let Some(scene) = &self.current_scene {
-                                let path = format!("scenes/{}.json", scene.name.to_lowercase().replace(" ", "_"));
+                                let path = format!(
+                                    "scenes/{}.json",
+                                    scene.name.to_lowercase().replace(" ", "_")
+                                );
                                 if let Err(e) = self.save_scene_to_path(&path) {
                                     self.status = format!("Error: {}", e);
                                     self.show_unsaved_warning = false;
@@ -6941,8 +7904,7 @@ impl eframe::App for EditorApp {
         // to save CPU/GPU when idle. Egui usually repaints on its own for most interactions.
         let needs_repaint = self.animation_editor_state.is_playing 
             || self.viewport_idle_frames < 20 // Keep viewport active for a bit after interaction
-            || event_received // New TCP event arrived
-            || self.scene_dirty;
+            || event_received; // New TCP event arrived
 
         if needs_repaint {
             ctx.request_repaint();

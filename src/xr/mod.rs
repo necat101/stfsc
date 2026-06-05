@@ -1,8 +1,10 @@
 use crate::graphics::GraphicsContext;
+use crate::world::scripting::{XrHand, XrHapticRequest, XrInputSnapshot, XrPose};
+use crate::world::Transform;
 use anyhow::{Context, Result};
 use ash::vk;
 use ash::vk::Handle; // Import Handle trait
-use log::info;
+use log::{info, warn};
 use openxr as xr;
 
 pub struct XrContext {
@@ -28,6 +30,352 @@ pub struct XrContext {
     // pub depth_image_views: Vec<vk::ImageView>,
     pub stage_space: xr::Space,
     pub blend_mode: xr::EnvironmentBlendMode,
+    pub actions: Option<XrActionBindings>,
+}
+
+pub struct XrActionBindings {
+    action_set: xr::ActionSet,
+    left_path: xr::Path,
+    right_path: xr::Path,
+    grip_pose_action: xr::Action<xr::Posef>,
+    aim_pose_action: xr::Action<xr::Posef>,
+    trigger_action: xr::Action<f32>,
+    grip_action: xr::Action<f32>,
+    thumbstick_action: xr::Action<xr::Vector2f>,
+    primary_button_action: xr::Action<bool>,
+    secondary_button_action: xr::Action<bool>,
+    menu_button_action: xr::Action<bool>,
+    thumbstick_click_action: xr::Action<bool>,
+    haptic_action: xr::Action<xr::Haptic>,
+    left_grip_space: xr::Space,
+    right_grip_space: xr::Space,
+    left_aim_space: xr::Space,
+    right_aim_space: xr::Space,
+}
+
+impl XrActionBindings {
+    pub fn new(instance: &xr::Instance, session: &xr::Session<xr::Vulkan>) -> Result<Self> {
+        let left_path = instance.string_to_path("/user/hand/left")?;
+        let right_path = instance.string_to_path("/user/hand/right")?;
+        let hand_paths = [left_path, right_path];
+
+        let action_set = instance.create_action_set("stfsc_gameplay", "STFSC Gameplay", 0)?;
+        let grip_pose_action =
+            action_set.create_action::<xr::Posef>("grip_pose", "Grip Pose", &hand_paths)?;
+        let aim_pose_action =
+            action_set.create_action::<xr::Posef>("aim_pose", "Aim Pose", &hand_paths)?;
+        let trigger_action =
+            action_set.create_action::<f32>("trigger_value", "Trigger", &hand_paths)?;
+        let grip_action = action_set.create_action::<f32>("grip_value", "Grip", &hand_paths)?;
+        let thumbstick_action =
+            action_set.create_action::<xr::Vector2f>("thumbstick", "Thumbstick", &hand_paths)?;
+        let primary_button_action =
+            action_set.create_action::<bool>("primary_button", "Primary Button", &hand_paths)?;
+        let secondary_button_action = action_set.create_action::<bool>(
+            "secondary_button",
+            "Secondary Button",
+            &hand_paths,
+        )?;
+        let menu_button_action =
+            action_set.create_action::<bool>("menu_button", "Menu Button", &hand_paths)?;
+        let thumbstick_click_action = action_set.create_action::<bool>(
+            "thumbstick_click",
+            "Thumbstick Click",
+            &hand_paths,
+        )?;
+        let haptic_action =
+            action_set.create_action::<xr::Haptic>("haptic", "Controller Haptics", &hand_paths)?;
+
+        let touch_profile =
+            instance.string_to_path("/interaction_profiles/oculus/touch_controller")?;
+        let bindings = [
+            xr::Binding::new(
+                &grip_pose_action,
+                instance.string_to_path("/user/hand/left/input/grip/pose")?,
+            ),
+            xr::Binding::new(
+                &grip_pose_action,
+                instance.string_to_path("/user/hand/right/input/grip/pose")?,
+            ),
+            xr::Binding::new(
+                &aim_pose_action,
+                instance.string_to_path("/user/hand/left/input/aim/pose")?,
+            ),
+            xr::Binding::new(
+                &aim_pose_action,
+                instance.string_to_path("/user/hand/right/input/aim/pose")?,
+            ),
+            xr::Binding::new(
+                &trigger_action,
+                instance.string_to_path("/user/hand/left/input/trigger/value")?,
+            ),
+            xr::Binding::new(
+                &trigger_action,
+                instance.string_to_path("/user/hand/right/input/trigger/value")?,
+            ),
+            xr::Binding::new(
+                &grip_action,
+                instance.string_to_path("/user/hand/left/input/squeeze/value")?,
+            ),
+            xr::Binding::new(
+                &grip_action,
+                instance.string_to_path("/user/hand/right/input/squeeze/value")?,
+            ),
+            xr::Binding::new(
+                &thumbstick_action,
+                instance.string_to_path("/user/hand/left/input/thumbstick")?,
+            ),
+            xr::Binding::new(
+                &thumbstick_action,
+                instance.string_to_path("/user/hand/right/input/thumbstick")?,
+            ),
+            xr::Binding::new(
+                &primary_button_action,
+                instance.string_to_path("/user/hand/left/input/x/click")?,
+            ),
+            xr::Binding::new(
+                &primary_button_action,
+                instance.string_to_path("/user/hand/right/input/a/click")?,
+            ),
+            xr::Binding::new(
+                &secondary_button_action,
+                instance.string_to_path("/user/hand/left/input/y/click")?,
+            ),
+            xr::Binding::new(
+                &secondary_button_action,
+                instance.string_to_path("/user/hand/right/input/b/click")?,
+            ),
+            xr::Binding::new(
+                &menu_button_action,
+                instance.string_to_path("/user/hand/left/input/menu/click")?,
+            ),
+            xr::Binding::new(
+                &thumbstick_click_action,
+                instance.string_to_path("/user/hand/left/input/thumbstick/click")?,
+            ),
+            xr::Binding::new(
+                &thumbstick_click_action,
+                instance.string_to_path("/user/hand/right/input/thumbstick/click")?,
+            ),
+            xr::Binding::new(
+                &haptic_action,
+                instance.string_to_path("/user/hand/left/output/haptic")?,
+            ),
+            xr::Binding::new(
+                &haptic_action,
+                instance.string_to_path("/user/hand/right/output/haptic")?,
+            ),
+        ];
+        instance.suggest_interaction_profile_bindings(touch_profile, &bindings)?;
+        session.attach_action_sets(&[&action_set])?;
+
+        let left_grip_space =
+            grip_pose_action.create_space(session.clone(), left_path, xr::Posef::IDENTITY)?;
+        let right_grip_space =
+            grip_pose_action.create_space(session.clone(), right_path, xr::Posef::IDENTITY)?;
+        let left_aim_space =
+            aim_pose_action.create_space(session.clone(), left_path, xr::Posef::IDENTITY)?;
+        let right_aim_space =
+            aim_pose_action.create_space(session.clone(), right_path, xr::Posef::IDENTITY)?;
+
+        Ok(Self {
+            action_set,
+            left_path,
+            right_path,
+            grip_pose_action,
+            aim_pose_action,
+            trigger_action,
+            grip_action,
+            thumbstick_action,
+            primary_button_action,
+            secondary_button_action,
+            menu_button_action,
+            thumbstick_click_action,
+            haptic_action,
+            left_grip_space,
+            right_grip_space,
+            left_aim_space,
+            right_aim_space,
+        })
+    }
+
+    pub fn update_snapshot(
+        &self,
+        session: &xr::Session<xr::Vulkan>,
+        stage_space: &xr::Space,
+        predicted_display_time: xr::Time,
+        player_start: &Transform,
+        snapshot: &mut XrInputSnapshot,
+    ) {
+        if let Err(err) = session.sync_actions(&[xr::ActiveActionSet::new(&self.action_set)]) {
+            warn!("XR action sync failed: {:?}", err);
+            return;
+        }
+
+        self.fill_controller(
+            session,
+            stage_space,
+            predicted_display_time,
+            player_start,
+            XrHand::Left,
+            self.left_path,
+            &self.left_grip_space,
+            &self.left_aim_space,
+            snapshot,
+        );
+        self.fill_controller(
+            session,
+            stage_space,
+            predicted_display_time,
+            player_start,
+            XrHand::Right,
+            self.right_path,
+            &self.right_grip_space,
+            &self.right_aim_space,
+            snapshot,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fill_controller(
+        &self,
+        session: &xr::Session<xr::Vulkan>,
+        stage_space: &xr::Space,
+        predicted_display_time: xr::Time,
+        player_start: &Transform,
+        hand: XrHand,
+        hand_path: xr::Path,
+        grip_space: &xr::Space,
+        aim_space: &xr::Space,
+        snapshot: &mut XrInputSnapshot,
+    ) {
+        let controller = snapshot.controller_mut(hand);
+
+        if let Ok(location) = grip_space.locate(stage_space, predicted_display_time) {
+            controller.grip_pose = script_pose_from_space_location(location, player_start);
+        }
+        if let Ok(location) = aim_space.locate(stage_space, predicted_display_time) {
+            controller.aim_pose = script_pose_from_space_location(location, player_start);
+        }
+
+        controller.tracked = controller.grip_pose.tracked || controller.aim_pose.tracked;
+        controller.active = controller.tracked;
+
+        controller.trigger = self
+            .trigger_action
+            .state(session, hand_path)
+            .ok()
+            .filter(|state| state.is_active)
+            .map(|state| state.current_state)
+            .unwrap_or(0.0);
+        controller.grip = self
+            .grip_action
+            .state(session, hand_path)
+            .ok()
+            .filter(|state| state.is_active)
+            .map(|state| state.current_state)
+            .unwrap_or(0.0);
+        controller.thumbstick = self
+            .thumbstick_action
+            .state(session, hand_path)
+            .ok()
+            .filter(|state| state.is_active)
+            .map(|state| glam::Vec2::new(state.current_state.x, state.current_state.y))
+            .unwrap_or(glam::Vec2::ZERO);
+        controller.primary_button = self
+            .primary_button_action
+            .state(session, hand_path)
+            .ok()
+            .filter(|state| state.is_active)
+            .map(|state| state.current_state)
+            .unwrap_or(false);
+        controller.secondary_button = self
+            .secondary_button_action
+            .state(session, hand_path)
+            .ok()
+            .filter(|state| state.is_active)
+            .map(|state| state.current_state)
+            .unwrap_or(false);
+        controller.menu_button = self
+            .menu_button_action
+            .state(session, hand_path)
+            .ok()
+            .filter(|state| state.is_active)
+            .map(|state| state.current_state)
+            .unwrap_or(false);
+        controller.thumbstick_clicked = self
+            .thumbstick_click_action
+            .state(session, hand_path)
+            .ok()
+            .filter(|state| state.is_active)
+            .map(|state| state.current_state)
+            .unwrap_or(false);
+    }
+
+    pub fn apply_haptic_requests(
+        &self,
+        session: &xr::Session<xr::Vulkan>,
+        requests: &[XrHapticRequest],
+    ) {
+        for request in requests {
+            let path = match request.hand {
+                XrHand::Left => self.left_path,
+                XrHand::Right => self.right_path,
+            };
+            let duration_nanos = (request.duration_seconds * 1_000_000_000.0) as i64;
+            let vibration = xr::HapticVibration::new()
+                .amplitude(request.amplitude)
+                .frequency(request.frequency_hz)
+                .duration(xr::Duration::from_nanos(duration_nanos));
+
+            if let Err(err) = self.haptic_action.apply_feedback(session, path, &vibration) {
+                warn!("XR haptic feedback failed: {:?}", err);
+            }
+        }
+    }
+}
+
+fn script_pose_from_space_location(
+    location: xr::SpaceLocation,
+    player_start: &Transform,
+) -> XrPose {
+    let position_valid = location
+        .location_flags
+        .contains(xr::SpaceLocationFlags::POSITION_VALID);
+    let orientation_valid = location
+        .location_flags
+        .contains(xr::SpaceLocationFlags::ORIENTATION_VALID);
+    let tracked = position_valid && orientation_valid;
+
+    if !tracked {
+        return XrPose::default();
+    }
+
+    let mut base_pos = player_start.position;
+    if base_pos.y > 1.5 && base_pos.y < 2.0 {
+        base_pos.y -= 1.7;
+    }
+
+    let (yaw, _, _) = player_start.rotation.to_euler(glam::EulerRot::YXZ);
+    let horizontal_rotation = glam::Quat::from_rotation_y(yaw);
+    let local_pos = glam::Vec3::new(
+        location.pose.position.x,
+        location.pose.position.y,
+        location.pose.position.z,
+    );
+    let local_rot = glam::Quat::from_xyzw(
+        location.pose.orientation.x,
+        location.pose.orientation.y,
+        location.pose.orientation.z,
+        location.pose.orientation.w,
+    )
+    .normalize();
+
+    XrPose::new(
+        base_pos + horizontal_rotation * local_pos,
+        horizontal_rotation * local_rot,
+        true,
+    )
 }
 
 impl XrContext {
@@ -310,6 +658,13 @@ impl XrContext {
         };
 
         let stage_space = session.create_reference_space(space_type, xr::Posef::IDENTITY)?;
+        let actions = match XrActionBindings::new(instance, &session) {
+            Ok(actions) => Some(actions),
+            Err(err) => {
+                warn!("XR controller actions unavailable: {:?}", err);
+                None
+            }
+        };
 
         Ok(Self {
             instance: instance.clone(),
@@ -330,6 +685,7 @@ impl XrContext {
             motion_swapchain_image_views,
             stage_space,
             blend_mode,
+            actions,
         })
     }
 }

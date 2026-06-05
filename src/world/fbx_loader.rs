@@ -49,9 +49,15 @@ impl Skeleton {
     pub fn get_bone_index(&self, name: &str) -> Option<usize> {
         self.bone_names.get(name).copied()
     }
-    
+
     /// Add a bone to the skeleton
-    pub fn add_bone(&mut self, name: String, parent: Option<usize>, inverse_bind: glam::Mat4, local: glam::Mat4) -> usize {
+    pub fn add_bone(
+        &mut self,
+        name: String,
+        parent: Option<usize>,
+        inverse_bind: glam::Mat4,
+        local: glam::Mat4,
+    ) -> usize {
         let index = self.bones.len();
         self.bone_names.insert(name.clone(), index);
         if parent.is_none() {
@@ -126,9 +132,13 @@ impl AnimationClip {
             events: Vec::new(),
         }
     }
-    
+
     /// Sample a specific bone's transform at a given time
-    pub fn sample_bone(&self, bone_index: usize, time: f32) -> (glam::Vec3, glam::Quat, glam::Vec3) {
+    pub fn sample_bone(
+        &self,
+        bone_index: usize,
+        time: f32,
+    ) -> (glam::Vec3, glam::Quat, glam::Vec3) {
         let t = if self.duration > 0.0 {
             time % self.duration
         } else {
@@ -159,7 +169,7 @@ impl AnimationClip {
             if channel.bone_index >= transforms.len() {
                 continue;
             }
-            
+
             let pos = self.sample_vec3(&channel.position_keys, t, glam::Vec3::ZERO);
             let rot = self.sample_quat(&channel.rotation_keys, t);
             let scale = self.sample_vec3(&channel.scale_keys, t, glam::Vec3::ONE);
@@ -171,7 +181,12 @@ impl AnimationClip {
         transforms
     }
 
-    fn sample_vec3(&self, keys: &[(f32, glam::Vec3)], time: f32, default: glam::Vec3) -> glam::Vec3 {
+    fn sample_vec3(
+        &self,
+        keys: &[(f32, glam::Vec3)],
+        time: f32,
+        default: glam::Vec3,
+    ) -> glam::Vec3 {
         if keys.is_empty() {
             return default;
         }
@@ -281,7 +296,7 @@ impl ModelScene {
             aabb_max: glam::Vec3::splat(f32::MIN),
         }
     }
-    
+
     /// Create a ModelScene from an OBJ file (uses tobj, no skinning)
     pub fn from_obj_bytes(data: &[u8]) -> Result<Self> {
         let mesh = crate::world::load_obj_from_bytes(data)?;
@@ -355,7 +370,7 @@ pub fn merge_fbx_meshes(scene: &ModelScene) -> Mesh {
 pub fn merge_model_meshes(scene: &ModelScene) -> Mesh {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
-    
+
     // Collect texture info from first mesh that has it
     let mut albedo_texture: Option<String> = None;
 
@@ -364,7 +379,7 @@ pub fn merge_model_meshes(scene: &ModelScene) -> Mesh {
         let base_idx = vertices.len() as u32;
         vertices.extend_from_slice(&mesh.vertices);
         indices.extend(mesh.indices.iter().map(|i| i + base_idx));
-        
+
         // Preserve first available texture reference
         if albedo_texture.is_none() && mesh.albedo_texture.is_some() {
             albedo_texture = mesh.albedo_texture.clone();
@@ -376,7 +391,7 @@ pub fn merge_model_meshes(scene: &ModelScene) -> Mesh {
         let base_idx = vertices.len() as u32;
         vertices.extend_from_slice(&skinned.mesh.vertices);
         indices.extend(skinned.mesh.indices.iter().map(|i| i + base_idx));
-        
+
         // Preserve first available texture reference
         if albedo_texture.is_none() && skinned.mesh.albedo_texture.is_some() {
             albedo_texture = skinned.mesh.albedo_texture.clone();
@@ -403,7 +418,7 @@ pub fn merge_model_meshes(scene: &ModelScene) -> Mesh {
         albedo: None,
         normal: None,
         metallic_roughness: None,
-        albedo_texture,  // Now preserves texture reference from merged meshes
+        albedo_texture, // Now preserves texture reference from merged meshes
         aabb_min,
         aabb_max,
         decoded_albedo: None,
@@ -450,7 +465,7 @@ mod tests {
         assert!(skeleton.bones.is_empty());
         assert!(skeleton.bone_names.is_empty());
     }
-    
+
     #[test]
     fn test_skeleton_add_bone() {
         let mut skeleton = Skeleton::new();
@@ -479,16 +494,13 @@ mod tests {
         let clip = AnimationClip::new("test", 1.0);
 
         // Test vec3 interpolation
-        let keys = vec![
-            (0.0, glam::Vec3::ZERO),
-            (1.0, glam::Vec3::ONE),
-        ];
+        let keys = vec![(0.0, glam::Vec3::ZERO), (1.0, glam::Vec3::ONE)];
         let result = clip.sample_vec3(&keys, 0.5, glam::Vec3::ZERO);
         assert!((result.x - 0.5).abs() < 0.001);
         assert!((result.y - 0.5).abs() < 0.001);
         assert!((result.z - 0.5).abs() < 0.001);
     }
-    
+
     #[test]
     fn test_model_scene_default() {
         let scene = ModelScene::default();

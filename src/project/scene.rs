@@ -1,8 +1,7 @@
-use serde::{Deserialize, Serialize};
+use crate::ui::{UiLayerType, UiLayout};
 use crate::world::animation::AnimatorConfig;
-use crate::ui::{UiLayout, UiLayerType};
-use crate::world::{LAYER_ENVIRONMENT, LAYER_PROP, LAYER_CHARACTER, LAYER_VEHICLE, LAYER_DEFAULT};
-
+use crate::world::{LAYER_CHARACTER, LAYER_DEFAULT, LAYER_ENVIRONMENT, LAYER_PROP, LAYER_VEHICLE};
+use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // PRIMITIVES LIBRARY
@@ -28,7 +27,7 @@ impl PrimitiveType {
             PrimitiveType::Cone,
         ]
     }
-    
+
     pub fn name(&self) -> &str {
         match self {
             PrimitiveType::Cube => "Cube",
@@ -39,7 +38,7 @@ impl PrimitiveType {
             PrimitiveType::Cone => "Cone",
         }
     }
-    
+
     pub fn icon(&self) -> &str {
         match self {
             PrimitiveType::Cube => "🟧",
@@ -97,7 +96,10 @@ pub struct SceneEntity {
     pub scale: [f32; 3],
     pub entity_type: EntityType,
     pub material: Material,
+    /// Legacy primary script field kept so old scene files still load cleanly.
     pub script: Option<String>,
+    #[serde(default)]
+    pub scripts: Vec<String>,
     #[serde(default)]
     pub collision_enabled: bool,
     #[serde(default = "default_layer")]
@@ -113,6 +115,35 @@ pub struct SceneEntity {
     // Transient flags
     #[serde(skip)]
     pub deployed: bool,
+}
+
+impl SceneEntity {
+    pub fn script_names(&self) -> Vec<String> {
+        if !self.scripts.is_empty() {
+            return Self::normalize_script_names(self.scripts.clone());
+        }
+
+        self.script
+            .iter()
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    pub fn set_script_names(&mut self, names: Vec<String>) {
+        let names = Self::normalize_script_names(names);
+        self.script = names.first().cloned();
+        self.scripts = names;
+    }
+
+    fn normalize_script_names(names: Vec<String>) -> Vec<String> {
+        names
+            .into_iter()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -206,11 +237,11 @@ impl Scene {
             ui_layout: UiLayout::default(),
         }
     }
-    
+
     pub fn get_or_create_layout(&mut self, idx: usize) -> &mut NamedUiLayout {
         if self.ui_layouts.is_empty() {
-             // Migrate legacy ui_layout if needed (simplified)
-             self.ui_layouts.push(NamedUiLayout::default());
+            // Migrate legacy ui_layout if needed (simplified)
+            self.ui_layouts.push(NamedUiLayout::default());
         }
         let idx = idx.min(self.ui_layouts.len() - 1);
         &mut self.ui_layouts[idx]
@@ -232,6 +263,7 @@ impl Scene {
             entity_type: EntityType::Ground,
             material: m.clone(),
             script: None,
+            scripts: vec![],
             collision_enabled: true,
             layer: LAYER_ENVIRONMENT,
             is_static: false,
@@ -253,6 +285,7 @@ impl Scene {
                 ..m.clone()
             },
             script: None,
+            scripts: vec![],
             collision_enabled: true,
             layer: LAYER_PROP,
             is_static: false,
@@ -271,6 +304,7 @@ impl Scene {
             entity_type: EntityType::Vehicle,
             material: m.clone(),
             script: Some("Vehicle".into()),
+            scripts: vec!["Vehicle".into()],
             collision_enabled: true,
             layer: LAYER_VEHICLE,
             is_static: false,
@@ -303,6 +337,7 @@ impl Scene {
                     ..m.clone()
                 },
                 script: Some("CrowdAgent".into()),
+                scripts: vec!["CrowdAgent".into()],
                 collision_enabled: false,
                 layer: LAYER_CHARACTER,
                 is_static: false,
@@ -327,6 +362,7 @@ impl Scene {
                     ..m.clone()
                 },
                 script: None,
+                scripts: vec![],
                 collision_enabled: false,
                 layer: LAYER_ENVIRONMENT,
                 is_static: true,
@@ -349,6 +385,7 @@ impl Scene {
                 ..m
             },
             script: None,
+            scripts: vec![],
             collision_enabled: false,
             layer: LAYER_DEFAULT,
             is_static: true,
@@ -373,6 +410,7 @@ impl Scene {
             },
             material: Material::default(),
             script: None,
+            scripts: vec![],
             collision_enabled: false,
             layer: LAYER_DEFAULT,
             is_static: true,

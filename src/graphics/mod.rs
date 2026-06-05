@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use ash::{vk, Device, Entry, Instance};
 #[cfg(target_os = "android")]
-use ash::vk::Handle;  // For as_raw/from_raw methods on vk types
+use ash::vk::Handle; // For as_raw/from_raw methods on vk types
+use ash::{vk, Device, Entry, Instance};
 use glam;
 #[cfg(target_os = "android")]
 use openxr as xr;
@@ -53,6 +53,105 @@ pub struct GpuMesh {
     pub aabb: occlusion::AABB,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GraphicsOptimizationSettings {
+    pub default_shadow_resolution: u32,
+    pub max_shadow_resolution: u32,
+    pub texture_anisotropy: f32,
+    pub texture_lod_bias: f32,
+    pub texture_streaming_budget_mb: usize,
+    pub max_mesh_uploads_per_frame: usize,
+    pub max_texture_uploads_per_frame: usize,
+    pub max_completed_uploads_per_frame: usize,
+    pub enable_frustum_culling: bool,
+}
+
+impl GraphicsOptimizationSettings {
+    pub const fn mobile_optimized() -> Self {
+        Self {
+            default_shadow_resolution: 2048,
+            max_shadow_resolution: 2048,
+            texture_anisotropy: 2.0,
+            texture_lod_bias: 0.5,
+            texture_streaming_budget_mb: 192,
+            max_mesh_uploads_per_frame: 2,
+            max_texture_uploads_per_frame: 1,
+            max_completed_uploads_per_frame: 4,
+            enable_frustum_culling: true,
+        }
+    }
+
+    pub const fn balanced() -> Self {
+        Self {
+            default_shadow_resolution: 2048,
+            max_shadow_resolution: 4096,
+            texture_anisotropy: 4.0,
+            texture_lod_bias: 0.0,
+            texture_streaming_budget_mb: 384,
+            max_mesh_uploads_per_frame: 6,
+            max_texture_uploads_per_frame: 2,
+            max_completed_uploads_per_frame: 8,
+            enable_frustum_culling: true,
+        }
+    }
+
+    pub const fn high_quality() -> Self {
+        Self {
+            default_shadow_resolution: 4096,
+            max_shadow_resolution: 8192,
+            texture_anisotropy: 8.0,
+            texture_lod_bias: 0.0,
+            texture_streaming_budget_mb: 1024,
+            max_mesh_uploads_per_frame: 24,
+            max_texture_uploads_per_frame: 8,
+            max_completed_uploads_per_frame: 24,
+            enable_frustum_culling: true,
+        }
+    }
+
+    pub const fn editor_viewport() -> Self {
+        Self {
+            default_shadow_resolution: 1024,
+            max_shadow_resolution: 2048,
+            texture_anisotropy: 2.0,
+            texture_lod_bias: 0.0,
+            texture_streaming_budget_mb: 128,
+            max_mesh_uploads_per_frame: 4,
+            max_texture_uploads_per_frame: 1,
+            max_completed_uploads_per_frame: 4,
+            enable_frustum_culling: true,
+        }
+    }
+
+    pub fn sanitized(mut self) -> Self {
+        self.default_shadow_resolution = self.default_shadow_resolution.clamp(512, 8192);
+        self.max_shadow_resolution = self.max_shadow_resolution.clamp(512, 8192);
+        if self.default_shadow_resolution > self.max_shadow_resolution {
+            self.default_shadow_resolution = self.max_shadow_resolution;
+        }
+        self.texture_anisotropy = self.texture_anisotropy.clamp(1.0, 16.0);
+        self.texture_lod_bias = self.texture_lod_bias.clamp(-1.0, 2.0);
+        self.texture_streaming_budget_mb = self.texture_streaming_budget_mb.max(32);
+        self.max_mesh_uploads_per_frame = self.max_mesh_uploads_per_frame.max(1);
+        self.max_texture_uploads_per_frame = self.max_texture_uploads_per_frame.max(1);
+        self.max_completed_uploads_per_frame = self.max_completed_uploads_per_frame.max(1);
+        self
+    }
+
+    pub fn resolve_shadow_resolution(&self, requested: Option<u32>) -> u32 {
+        let settings = self.sanitized();
+        requested
+            .unwrap_or(settings.default_shadow_resolution)
+            .clamp(512, settings.max_shadow_resolution)
+    }
+}
+
+impl Default for GraphicsOptimizationSettings {
+    fn default() -> Self {
+        Self::balanced()
+    }
+}
+
 pub struct SkyboxRenderer {
     pub pipeline: vk::Pipeline,
     pub pipeline_layout: vk::PipelineLayout,
@@ -78,6 +177,9 @@ pub struct GraphicsContext {
     pub material_set_layout: vk::DescriptorSetLayout,
     pub descriptor_pool: vk::DescriptorPool,
     pub default_material_descriptor_set: vk::DescriptorSet,
+    pub optimization_settings: GraphicsOptimizationSettings,
+    pub sampler_anisotropy_enabled: bool,
+    pub max_sampler_anisotropy: f32,
 
     // Shadow Resources
     pub shadow_render_pass: vk::RenderPass,
@@ -129,10 +231,10 @@ pub struct GraphicsContext {
 
 /// Calculate optimal shadow map resolution based on ground plane extent.
 /// Uses a target texel density to maintain consistent shadow quality.
-/// 
+///
 /// # Arguments
 /// * `ground_half_extent` - Half-size of the largest ground plane (from GroundPlane component)
-/// 
+///
 /// # Returns
 /// Shadow map resolution (width = height), clamped to [1024, 8192]
 pub fn calculate_shadow_resolution(ground_half_extent: f32) -> u32 {
@@ -141,29 +243,91 @@ pub fn calculate_shadow_resolution(ground_half_extent: f32) -> u32 {
     const TEXELS_PER_UNIT: f32 = 15.0;
     const MIN_RESOLUTION: u32 = 1024;
     const MAX_RESOLUTION: u32 = 8192;
-    
+
     let frustum_size = ground_half_extent * 4.0; // 2x extent for full coverage
     let ideal_resolution = (frustum_size * TEXELS_PER_UNIT) as u32;
-    
+
     // Round up to nearest power of 2 for GPU efficiency
     let resolution = ideal_resolution.next_power_of_two();
-    
+
     resolution.clamp(MIN_RESOLUTION, MAX_RESOLUTION)
 }
 
+pub fn calculate_shadow_resolution_for_settings(
+    ground_half_extent: f32,
+    settings: GraphicsOptimizationSettings,
+) -> u32 {
+    settings.resolve_shadow_resolution(Some(calculate_shadow_resolution(ground_half_extent)))
+}
+
 impl GraphicsContext {
+    fn feature_profile_for_device(
+        instance: &Instance,
+        physical_device: vk::PhysicalDevice,
+        settings: GraphicsOptimizationSettings,
+    ) -> (vk::PhysicalDeviceFeatures, bool, f32) {
+        let supported_features = unsafe { instance.get_physical_device_features(physical_device) };
+        let properties = unsafe { instance.get_physical_device_properties(physical_device) };
+        let wants_anisotropy = settings.texture_anisotropy > 1.0;
+        let supports_anisotropy = supported_features.sampler_anisotropy == vk::TRUE;
+        let sampler_anisotropy_enabled = wants_anisotropy && supports_anisotropy;
+        let max_sampler_anisotropy = if sampler_anisotropy_enabled {
+            settings
+                .texture_anisotropy
+                .min(properties.limits.max_sampler_anisotropy)
+                .max(1.0)
+        } else {
+            1.0
+        };
+
+        let enabled_features = vk::PhysicalDeviceFeatures {
+            sampler_anisotropy: if sampler_anisotropy_enabled {
+                vk::TRUE
+            } else {
+                vk::FALSE
+            },
+            ..Default::default()
+        };
+
+        (
+            enabled_features,
+            sampler_anisotropy_enabled,
+            max_sampler_anisotropy,
+        )
+    }
+
     #[cfg(target_os = "android")]
     pub fn new(xr_instance: &xr::Instance, xr_system: xr::SystemId) -> Result<Self> {
         Self::new_with_shadow_resolution(xr_instance, xr_system, None)
     }
 
     /// Create VR graphics context with custom shadow resolution.
-    /// 
+    ///
     /// # Arguments
     /// * `shadow_resolution` - Shadow map size. If None, uses default 4096.
     ///                        Calculate with `calculate_shadow_resolution(ground_half_extent)`.
     #[cfg(target_os = "android")]
-    pub fn new_with_shadow_resolution(xr_instance: &xr::Instance, xr_system: xr::SystemId, shadow_resolution: Option<u32>) -> Result<Self> {
+    pub fn new_with_shadow_resolution(
+        xr_instance: &xr::Instance,
+        xr_system: xr::SystemId,
+        shadow_resolution: Option<u32>,
+    ) -> Result<Self> {
+        Self::new_with_options(
+            xr_instance,
+            xr_system,
+            shadow_resolution,
+            GraphicsOptimizationSettings::mobile_optimized(),
+        )
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn new_with_options(
+        xr_instance: &xr::Instance,
+        xr_system: xr::SystemId,
+        shadow_resolution: Option<u32>,
+        optimization_settings: GraphicsOptimizationSettings,
+    ) -> Result<Self> {
+        let optimization_settings = optimization_settings.sanitized();
         let entry = unsafe { Entry::load()? };
 
         // 1. Get OpenXR Vulkan requirements
@@ -220,6 +384,9 @@ impl GraphicsContext {
             .queue_family_index(queue_family_index)
             .queue_priorities(&queue_priorities);
 
+        let (device_features, sampler_anisotropy_enabled, max_sampler_anisotropy) =
+            Self::feature_profile_for_device(&instance, physical_device, optimization_settings);
+
         // Use vulkan_legacy_device_extensions
         let xr_device_extensions = xr_instance.vulkan_legacy_device_extensions(xr_system)?;
         let xr_device_extensions_cstr: Vec<CString> = xr_device_extensions
@@ -233,7 +400,8 @@ impl GraphicsContext {
 
         let device_create_info = vk::DeviceCreateInfo::builder()
             .queue_create_infos(std::slice::from_ref(&queue_create_info))
-            .enabled_extension_names(&xr_device_extension_ptrs);
+            .enabled_extension_names(&xr_device_extension_ptrs)
+            .enabled_features(&device_features);
 
         let device = unsafe { instance.create_device(physical_device, &device_create_info, None)? };
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
@@ -432,7 +600,7 @@ impl GraphicsContext {
         let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None)? };
 
         // 8.7 Create Shadow Resources
-        let shadow_res = shadow_resolution.unwrap_or(4096);
+        let shadow_res = optimization_settings.resolve_shadow_resolution(shadow_resolution);
         let shadow_extent = vk::Extent2D {
             width: shadow_res,
             height: shadow_res,
@@ -506,9 +674,12 @@ impl GraphicsContext {
         let pipeline_layout =
             unsafe { device.create_pipeline_layout(&pipeline_layout_create_info, None)? };
 
-        let pipeline = Self::create_graphics_pipeline_internal(&device, pipeline_layout, render_pass)?;
-        let skinned_pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_create_info, None)? };
-        let skinned_pipeline = Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
+        let pipeline =
+            Self::create_graphics_pipeline_internal(&device, pipeline_layout, render_pass)?;
+        let skinned_pipeline_layout =
+            unsafe { device.create_pipeline_layout(&pipeline_layout_create_info, None)? };
+        let skinned_pipeline =
+            Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
 
         let mut ctx = Self {
             entry,
@@ -530,6 +701,9 @@ impl GraphicsContext {
             material_set_layout,
             descriptor_pool,
             default_material_descriptor_set: vk::DescriptorSet::null(),
+            optimization_settings,
+            sampler_anisotropy_enabled,
+            max_sampler_anisotropy,
             shadow_render_pass,
             shadow_pipeline_layout,
             shadow_pipeline,
@@ -575,7 +749,8 @@ impl GraphicsContext {
         };
 
         let (albedo, normal, mr) = ctx.create_default_pbr_textures()?;
-        ctx.default_material_descriptor_set = ctx.create_material_descriptor_set(&albedo, &normal, &mr)?;
+        ctx.default_material_descriptor_set =
+            ctx.create_material_descriptor_set(&albedo, &normal, &mr)?;
 
         Ok(ctx)
     }
@@ -586,12 +761,41 @@ impl GraphicsContext {
     }
 
     /// Create desktop graphics context with custom shadow resolution.
-    /// 
+    ///
     /// # Arguments
     /// * `shadow_resolution` - Shadow map size (e.g., 2048, 4096). If None, uses default 4096.
     ///                        Calculate with `calculate_shadow_resolution(ground_half_extent)`.
     #[cfg(not(target_os = "android"))]
-    pub fn new_desktop_with_shadow_resolution(window: &winit::window::Window, shadow_resolution: Option<u32>) -> Result<Self> {
+    pub fn new_desktop_with_shadow_resolution(
+        window: &winit::window::Window,
+        shadow_resolution: Option<u32>,
+    ) -> Result<Self> {
+        Self::new_desktop_with_options(
+            window,
+            shadow_resolution,
+            GraphicsOptimizationSettings::high_quality(),
+        )
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn new_desktop_mobile_optimized(
+        window: &winit::window::Window,
+        shadow_resolution: Option<u32>,
+    ) -> Result<Self> {
+        Self::new_desktop_with_options(
+            window,
+            shadow_resolution,
+            GraphicsOptimizationSettings::mobile_optimized(),
+        )
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn new_desktop_with_options(
+        window: &winit::window::Window,
+        shadow_resolution: Option<u32>,
+        optimization_settings: GraphicsOptimizationSettings,
+    ) -> Result<Self> {
+        let optimization_settings = optimization_settings.sanitized();
         use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
         let entry = unsafe { Entry::load()? };
 
@@ -609,14 +813,16 @@ impl GraphicsContext {
         let window_handle = window.raw_window_handle();
 
         let extension_names = ash_window::enumerate_required_extensions(display_handle)?;
-        
+
         let create_info = vk::InstanceCreateInfo::builder()
             .application_info(&app_info)
             .enabled_extension_names(extension_names);
 
         let instance = unsafe { entry.create_instance(&create_info, None)? };
         let surface_loader = ash::extensions::khr::Surface::new(&entry, &instance);
-        let surface = unsafe { ash_window::create_surface(&entry, &instance, display_handle, window_handle, None)? };
+        let surface = unsafe {
+            ash_window::create_surface(&entry, &instance, display_handle, window_handle, None)?
+        };
 
         // 2. Pick Physical Device
         let physical_devices = unsafe { instance.enumerate_physical_devices()? };
@@ -638,10 +844,14 @@ impl GraphicsContext {
             .queue_family_index(queue_family_index)
             .queue_priorities(&queue_priorities);
 
+        let (device_features, sampler_anisotropy_enabled, max_sampler_anisotropy) =
+            Self::feature_profile_for_device(&instance, physical_device, optimization_settings);
+
         let device_extensions = [ash::extensions::khr::Swapchain::name().as_ptr()];
         let device_create_info = vk::DeviceCreateInfo::builder()
             .queue_create_infos(std::slice::from_ref(&queue_create_info))
-            .enabled_extension_names(&device_extensions);
+            .enabled_extension_names(&device_extensions)
+            .enabled_features(&device_features);
 
         let device = unsafe { instance.create_device(physical_device, &device_create_info, None)? };
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
@@ -649,8 +859,12 @@ impl GraphicsContext {
         let swapchain_loader = ash::extensions::khr::Swapchain::new(&instance, &device);
 
         // 4. Swapchain
-        let surface_capabilities = unsafe { surface_loader.get_physical_device_surface_capabilities(physical_device, surface)? };
-        let surface_format = unsafe { surface_loader.get_physical_device_surface_formats(physical_device, surface)?[0] };
+        let surface_capabilities = unsafe {
+            surface_loader.get_physical_device_surface_capabilities(physical_device, surface)?
+        };
+        let surface_format = unsafe {
+            surface_loader.get_physical_device_surface_formats(physical_device, surface)?[0]
+        };
         let mut extent = surface_capabilities.current_extent;
         if extent.width == 0xFFFFFFFF {
             let window_size = window.inner_size();
@@ -669,10 +883,17 @@ impl GraphicsContext {
         // Final safety: ensures extent is at least 1x1 to prevent driver crashes
         extent.width = extent.width.max(1);
         extent.height = extent.height.max(1);
-        
+
+        let desired_image_count = surface_capabilities.min_image_count.max(2);
+        let image_count = if surface_capabilities.max_image_count > 0 {
+            desired_image_count.min(surface_capabilities.max_image_count)
+        } else {
+            desired_image_count
+        };
+
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
             .surface(surface)
-            .min_image_count(std::cmp::max(surface_capabilities.min_image_count, 2))
+            .min_image_count(image_count)
             .image_format(surface_format.format)
             .image_color_space(surface_format.color_space)
             .image_extent(extent)
@@ -686,87 +907,254 @@ impl GraphicsContext {
 
         let swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_create_info, None)? };
         let swapchain_images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
-        let swapchain_image_views: Vec<vk::ImageView> = swapchain_images.iter().map(|&image| {
-            let create_info = vk::ImageViewCreateInfo::builder()
-                .image(image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(surface_format.format)
-                .subresource_range(vk::ImageSubresourceRange::builder().aspect_mask(vk::ImageAspectFlags::COLOR).base_mip_level(0).level_count(1).base_array_layer(0).layer_count(1).build());
-            unsafe { device.create_image_view(&create_info, None) }
-        }).collect::<Result<Vec<_>, _>>()?;
+        let swapchain_image_views: Vec<vk::ImageView> = swapchain_images
+            .iter()
+            .map(|&image| {
+                let create_info = vk::ImageViewCreateInfo::builder()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(surface_format.format)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::builder()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(0)
+                            .layer_count(1)
+                            .build(),
+                    );
+                unsafe { device.create_image_view(&create_info, None) }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         // 5. Command Pool & Buffer
         let pool_create_info = vk::CommandPoolCreateInfo::builder()
             .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let command_pool = unsafe { device.create_command_pool(&pool_create_info, None)? };
-        let command_buffer = unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::builder().command_pool(command_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1))?[0] };
-        let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None)? };
+        let command_buffer = unsafe {
+            device.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::builder()
+                    .command_pool(command_pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            )?[0]
+        };
+        let fence = unsafe {
+            device.create_fence(
+                &vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED),
+                None,
+            )?
+        };
 
         // 6. Depth & Motion Vector Resources
-        let (desktop_depth_image, desktop_depth_memory, desktop_depth_view) = Self::create_image_resources_internal(&instance, &device, physical_device, extent.width, extent.height, depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
-        let (desktop_motion_image, desktop_motion_memory, desktop_motion_view) = Self::create_image_resources_internal(&instance, &device, physical_device, extent.width, extent.height, vk::Format::R16G16_SFLOAT, vk::ImageUsageFlags::COLOR_ATTACHMENT, vk::ImageAspectFlags::COLOR)?;
+        let (desktop_depth_image, desktop_depth_memory, desktop_depth_view) =
+            Self::create_image_resources_internal(
+                &instance,
+                &device,
+                physical_device,
+                extent.width,
+                extent.height,
+                depth_format,
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                vk::ImageAspectFlags::DEPTH,
+            )?;
+        let (desktop_motion_image, desktop_motion_memory, desktop_motion_view) =
+            Self::create_image_resources_internal(
+                &instance,
+                &device,
+                physical_device,
+                extent.width,
+                extent.height,
+                vk::Format::R16G16_SFLOAT,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                vk::ImageAspectFlags::COLOR,
+            )?;
 
         // 7. Render Pass (Desktop version)
         let render_pass_attachments = [
-            vk::AttachmentDescription::builder().format(surface_format.format).samples(vk::SampleCountFlags::TYPE_1).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).initial_layout(vk::ImageLayout::UNDEFINED).final_layout(vk::ImageLayout::PRESENT_SRC_KHR).build(),
-            vk::AttachmentDescription::builder().format(depth_format).samples(vk::SampleCountFlags::TYPE_1).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).initial_layout(vk::ImageLayout::UNDEFINED).final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL).build(),
-            vk::AttachmentDescription::builder().format(vk::Format::R16G16_SFLOAT).samples(vk::SampleCountFlags::TYPE_1).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).initial_layout(vk::ImageLayout::UNDEFINED).final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).build(),
+            vk::AttachmentDescription::builder()
+                .format(surface_format.format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .build(),
+            vk::AttachmentDescription::builder()
+                .format(depth_format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .build(),
+            vk::AttachmentDescription::builder()
+                .format(vk::Format::R16G16_SFLOAT)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .build(),
         ];
         let color_attachments = [
-            vk::AttachmentReference::builder().attachment(0).layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).build(), 
-            vk::AttachmentReference::builder().attachment(2).layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).build()
+            vk::AttachmentReference::builder()
+                .attachment(0)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .build(),
+            vk::AttachmentReference::builder()
+                .attachment(2)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .build(),
         ];
-        let depth_attachment = vk::AttachmentReference::builder().attachment(1).layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL).build();
-        let subpasses = [vk::SubpassDescription::builder().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&color_attachments).depth_stencil_attachment(&depth_attachment).build()];
+        let depth_attachment = vk::AttachmentReference::builder()
+            .attachment(1)
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .build();
+        let subpasses = [vk::SubpassDescription::builder()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_attachments)
+            .depth_stencil_attachment(&depth_attachment)
+            .build()];
         let dependencies = [
             vk::SubpassDependency::builder()
                 .src_subpass(vk::SUBPASS_EXTERNAL)
                 .dst_subpass(0)
-                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
-                .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
-                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .src_stage_mask(
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                        | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                )
+                .dst_stage_mask(
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                        | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                )
+                .dst_access_mask(
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                )
                 .build(),
             // Extra dependency to ensure shadow map (transitioned externally) is ready for fragment sampling
             vk::SubpassDependency::builder()
                 .src_subpass(vk::SUBPASS_EXTERNAL)
                 .dst_subpass(0)
                 .src_stage_mask(vk::PipelineStageFlags::LATE_FRAGMENT_TESTS) // Shadow finish
-                .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)     // Main sampling
+                .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER) // Main sampling
                 .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
                 .dst_access_mask(vk::AccessFlags::SHADER_READ)
                 .build(),
         ];
-        let render_pass = unsafe { device.create_render_pass(&vk::RenderPassCreateInfo::builder().attachments(&render_pass_attachments).subpasses(&subpasses).dependencies(&dependencies), None)? };
+        let render_pass = unsafe {
+            device.create_render_pass(
+                &vk::RenderPassCreateInfo::builder()
+                    .attachments(&render_pass_attachments)
+                    .subpasses(&subpasses)
+                    .dependencies(&dependencies),
+                None,
+            )?
+        };
 
         // 8. Framebuffers
-        let swapchain_framebuffers = swapchain_image_views.iter().map(|&view| {
-            let attachments = [view, desktop_depth_view, desktop_motion_view];
-            let create_info = vk::FramebufferCreateInfo::builder()
-                .render_pass(render_pass)
-                .attachments(&attachments)
-                .width(extent.width)
-                .height(extent.height)
-                .layers(1);
-            unsafe { device.create_framebuffer(&create_info, None) }
-        }).collect::<Result<Vec<_>, _>>()?;
+        let swapchain_framebuffers = swapchain_image_views
+            .iter()
+            .map(|&view| {
+                let attachments = [view, desktop_depth_view, desktop_motion_view];
+                let create_info = vk::FramebufferCreateInfo::builder()
+                    .render_pass(render_pass)
+                    .attachments(&attachments)
+                    .width(extent.width)
+                    .height(extent.height)
+                    .layers(1);
+                unsafe { device.create_framebuffer(&create_info, None) }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         // 9. Descriptor Set Layouts
         let global_bindings = [
-            vk::DescriptorSetLayoutBinding::builder().binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
-            vk::DescriptorSetLayoutBinding::builder().binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX).build(),
-            vk::DescriptorSetLayoutBinding::builder().binding(2).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
-            vk::DescriptorSetLayoutBinding::builder().binding(3).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX).build(),
-            vk::DescriptorSetLayoutBinding::builder().binding(4).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT).build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(4)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+                .build(),
         ];
-        let global_set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::builder().bindings(&global_bindings), None)? };
+        let global_set_layout = unsafe {
+            device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::builder().bindings(&global_bindings),
+                None,
+            )?
+        };
         let material_bindings = [
-            vk::DescriptorSetLayoutBinding::builder().binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
-            vk::DescriptorSetLayoutBinding::builder().binding(1).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
-            vk::DescriptorSetLayoutBinding::builder().binding(2).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
         ];
-        let material_set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::builder().bindings(&material_bindings), None)? };
-        let descriptor_pool = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::builder().pool_sizes(&[vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 300 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 100 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 300 }]).max_sets(100), None)? };
+        let material_set_layout = unsafe {
+            device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::builder().bindings(&material_bindings),
+                None,
+            )?
+        };
+        let descriptor_pool = unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::builder()
+                    .pool_sizes(&[
+                        vk::DescriptorPoolSize {
+                            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                            descriptor_count: 300,
+                        },
+                        vk::DescriptorPoolSize {
+                            ty: vk::DescriptorType::STORAGE_BUFFER,
+                            descriptor_count: 100,
+                        },
+                        vk::DescriptorPoolSize {
+                            ty: vk::DescriptorType::UNIFORM_BUFFER,
+                            descriptor_count: 300,
+                        },
+                    ])
+                    .max_sets(100),
+                None,
+            )?
+        };
 
         // 10. Pipeline Layouts
         let main_push_constant_ranges = [vk::PushConstantRange::builder()
@@ -794,27 +1182,103 @@ impl GraphicsContext {
         };
 
         // 11. Shadow Resources
-        let shadow_res = shadow_resolution.unwrap_or(4096);
-        let shadow_extent = vk::Extent2D { width: shadow_res, height: shadow_res };
+        let shadow_res = optimization_settings.resolve_shadow_resolution(shadow_resolution);
+        let shadow_extent = vk::Extent2D {
+            width: shadow_res,
+            height: shadow_res,
+        };
         let shadow_render_pass = Self::create_shadow_render_pass_internal(&device)?;
-        let shadow_pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&[vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::VERTEX).offset(0).size(64).build()]).set_layouts(&[global_set_layout]), None)? };
-        let shadow_pipeline = Self::create_shadow_pipeline_internal(&device, shadow_pipeline_layout, shadow_render_pass)?;
-        let (shadow_depth_image, shadow_depth_memory, shadow_depth_view) = Self::create_shadow_image_resources_internal(&instance, &device, physical_device, shadow_extent)?;
-        let shadow_framebuffer = unsafe { device.create_framebuffer(&vk::FramebufferCreateInfo::builder().render_pass(shadow_render_pass).attachments(&[shadow_depth_view]).width(shadow_extent.width).height(shadow_extent.height).layers(1), None)? };
-        let shadow_sampler = unsafe { device.create_sampler(&vk::SamplerCreateInfo::builder().mag_filter(vk::Filter::NEAREST).min_filter(vk::Filter::NEAREST).address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER).address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER).address_mode_w(vk::SamplerAddressMode::CLAMP_TO_BORDER).border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE).build(), None)? };
+        let shadow_pipeline_layout = unsafe {
+            device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::builder()
+                    .push_constant_ranges(&[vk::PushConstantRange::builder()
+                        .stage_flags(vk::ShaderStageFlags::VERTEX)
+                        .offset(0)
+                        .size(64)
+                        .build()])
+                    .set_layouts(&[global_set_layout]),
+                None,
+            )?
+        };
+        let shadow_pipeline = Self::create_shadow_pipeline_internal(
+            &device,
+            shadow_pipeline_layout,
+            shadow_render_pass,
+        )?;
+        let (shadow_depth_image, shadow_depth_memory, shadow_depth_view) =
+            Self::create_shadow_image_resources_internal(
+                &instance,
+                &device,
+                physical_device,
+                shadow_extent,
+            )?;
+        let shadow_framebuffer = unsafe {
+            device.create_framebuffer(
+                &vk::FramebufferCreateInfo::builder()
+                    .render_pass(shadow_render_pass)
+                    .attachments(&[shadow_depth_view])
+                    .width(shadow_extent.width)
+                    .height(shadow_extent.height)
+                    .layers(1),
+                None,
+            )?
+        };
+        let shadow_sampler = unsafe {
+            device.create_sampler(
+                &vk::SamplerCreateInfo::builder()
+                    .mag_filter(vk::Filter::NEAREST)
+                    .min_filter(vk::Filter::NEAREST)
+                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER)
+                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER)
+                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_BORDER)
+                    .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE)
+                    .build(),
+                None,
+            )?
+        };
 
-        let image_available_semaphore = unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? };
-        let render_finished_semaphore = unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? };
+        let image_available_semaphore =
+            unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? };
+        let render_finished_semaphore =
+            unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? };
 
-        let pipeline = Self::create_graphics_pipeline_internal(&device, pipeline_layout, render_pass)?;
-        let skinned_pipeline = Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
+        let pipeline =
+            Self::create_graphics_pipeline_internal(&device, pipeline_layout, render_pass)?;
+        let skinned_pipeline =
+            Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
 
         let mut ctx = Self {
-            entry, instance, physical_device, device, queue_family_index, queue, command_pool, command_buffer, fence, render_pass, 
-            pipeline_layout, pipeline, skinned_pipeline_layout, skinned_pipeline,
-            depth_format, global_set_layout, material_set_layout, descriptor_pool,
+            entry,
+            instance,
+            physical_device,
+            device,
+            queue_family_index,
+            queue,
+            command_pool,
+            command_buffer,
+            fence,
+            render_pass,
+            pipeline_layout,
+            pipeline,
+            skinned_pipeline_layout,
+            skinned_pipeline,
+            depth_format,
+            global_set_layout,
+            material_set_layout,
+            descriptor_pool,
             default_material_descriptor_set: vk::DescriptorSet::null(),
-            shadow_render_pass, shadow_pipeline_layout, shadow_pipeline, shadow_depth_image, shadow_depth_memory, shadow_depth_view, shadow_framebuffer, shadow_sampler, shadow_extent,
+            optimization_settings,
+            sampler_anisotropy_enabled,
+            max_sampler_anisotropy,
+            shadow_render_pass,
+            shadow_pipeline_layout,
+            shadow_pipeline,
+            shadow_depth_image,
+            shadow_depth_memory,
+            shadow_depth_view,
+            shadow_framebuffer,
+            shadow_sampler,
+            shadow_extent,
             queue_mutex: std::sync::Mutex::new(()),
             surface_loader: Some(surface_loader),
             surface: Some(surface),
@@ -835,7 +1299,8 @@ impl GraphicsContext {
         };
 
         let (albedo, normal, mr) = ctx.create_default_pbr_textures()?;
-        ctx.default_material_descriptor_set = ctx.create_material_descriptor_set(&albedo, &normal, &mr)?;
+        ctx.default_material_descriptor_set =
+            ctx.create_material_descriptor_set(&albedo, &normal, &mr)?;
 
         Ok(ctx)
     }
@@ -844,6 +1309,14 @@ impl GraphicsContext {
     /// Used by the editor for GPU-accelerated viewport rendering.
     #[cfg(not(target_os = "android"))]
     pub fn new_headless() -> Result<Self> {
+        Self::new_headless_with_options(GraphicsOptimizationSettings::editor_viewport())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn new_headless_with_options(
+        optimization_settings: GraphicsOptimizationSettings,
+    ) -> Result<Self> {
+        let optimization_settings = optimization_settings.sanitized();
         // 1. Create Vulkan Instance
         println!("DEBUG: Headless Vulkan - Creating Entry");
         let entry = unsafe { Entry::load()? };
@@ -858,8 +1331,7 @@ impl GraphicsContext {
             .engine_version(0)
             .api_version(vk::make_api_version(0, 1, 0, 0));
 
-        let create_info = vk::InstanceCreateInfo::builder()
-            .application_info(&app_info);
+        let create_info = vk::InstanceCreateInfo::builder().application_info(&app_info);
 
         let instance = unsafe { entry.create_instance(&create_info, None)? };
 
@@ -867,10 +1339,13 @@ impl GraphicsContext {
         println!("DEBUG: Headless Vulkan - Enumerating Physical Devices");
         let physical_devices = unsafe { instance.enumerate_physical_devices()? };
         if physical_devices.is_empty() {
-             anyhow::bail!("Vulkan: No physical devices found");
+            anyhow::bail!("Vulkan: No physical devices found");
         }
         let physical_device = physical_devices[0];
-        println!("DEBUG: Headless Vulkan - Selected Physical Device: {:?}", physical_device);
+        println!(
+            "DEBUG: Headless Vulkan - Selected Physical Device: {:?}",
+            physical_device
+        );
 
         // 3. Create Logical Device (no swapchain extension needed)
         println!("DEBUG: Headless Vulkan - Creating Logical Device");
@@ -889,9 +1364,13 @@ impl GraphicsContext {
             .queue_family_index(queue_family_index)
             .queue_priorities(&queue_priorities);
 
+        let (device_features, sampler_anisotropy_enabled, max_sampler_anisotropy) =
+            Self::feature_profile_for_device(&instance, physical_device, optimization_settings);
+
         // No device extensions needed for headless
         let device_create_info = vk::DeviceCreateInfo::builder()
-            .queue_create_infos(std::slice::from_ref(&queue_create_info));
+            .queue_create_infos(std::slice::from_ref(&queue_create_info))
+            .enabled_features(&device_features);
 
         let device = unsafe { instance.create_device(physical_device, &device_create_info, None)? };
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
@@ -903,10 +1382,22 @@ impl GraphicsContext {
             .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let command_pool = unsafe { device.create_command_pool(&pool_create_info, None)? };
-        let command_buffer = unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::builder().command_pool(command_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1))?[0] };
-        
+        let command_buffer = unsafe {
+            device.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::builder()
+                    .command_pool(command_pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            )?[0]
+        };
+
         println!("DEBUG: Headless Vulkan - Creating Fence");
-        let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None)? };
+        let fence = unsafe {
+            device.create_fence(
+                &vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED),
+                None,
+            )?
+        };
 
         // 5. Create offscreen render pass (renders to texture, not swapchain)
         println!("DEBUG: Headless Vulkan - Creating Render Pass (3 Attachments to match pipeline)");
@@ -939,105 +1430,288 @@ impl GraphicsContext {
                 .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .build(),
         ];
-        
-        let color_attachments = [
-            vk::AttachmentReference::builder().attachment(0).layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).build(), 
-            vk::AttachmentReference::builder().attachment(2).layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).build(), 
-        ];
-        let depth_attachment = vk::AttachmentReference::builder().attachment(1).layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL).build();
 
-        let subpasses = [
-            vk::SubpassDescription::builder()
-                .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-                .color_attachments(&color_attachments)
-                .depth_stencil_attachment(&depth_attachment)
-                .build()
+        let color_attachments = [
+            vk::AttachmentReference::builder()
+                .attachment(0)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .build(),
+            vk::AttachmentReference::builder()
+                .attachment(2)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .build(),
         ];
+        let depth_attachment = vk::AttachmentReference::builder()
+            .attachment(1)
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .build();
+
+        let subpasses = [vk::SubpassDescription::builder()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_attachments)
+            .depth_stencil_attachment(&depth_attachment)
+            .build()];
 
         let dependencies = [
             vk::SubpassDependency::builder()
                 .src_subpass(vk::SUBPASS_EXTERNAL)
                 .dst_subpass(0)
-                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
-                .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
-                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .src_stage_mask(
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                        | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                )
+                .dst_stage_mask(
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                        | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                )
+                .dst_access_mask(
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                )
                 .build(),
             // Dependency to ensure shadow map is ready for fragment sampling
             vk::SubpassDependency::builder()
                 .src_subpass(vk::SUBPASS_EXTERNAL)
                 .dst_subpass(0)
                 .src_stage_mask(vk::PipelineStageFlags::LATE_FRAGMENT_TESTS) // Shadow finish
-                .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)     // Main sampling
+                .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER) // Main sampling
                 .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
                 .dst_access_mask(vk::AccessFlags::SHADER_READ)
                 .build(),
         ];
 
-        let render_pass = unsafe { device.create_render_pass(&vk::RenderPassCreateInfo::builder().attachments(&render_pass_attachments).subpasses(&subpasses).dependencies(&dependencies), None)? };
+        let render_pass = unsafe {
+            device.create_render_pass(
+                &vk::RenderPassCreateInfo::builder()
+                    .attachments(&render_pass_attachments)
+                    .subpasses(&subpasses)
+                    .dependencies(&dependencies),
+                None,
+            )?
+        };
         println!("DEBUG: Headless Vulkan - Render Pass Created Successfully");
 
         // 6. Descriptor Set Layouts
         println!("DEBUG: Headless Vulkan - Creating Descriptor Set Layouts");
         let global_bindings = [
-            vk::DescriptorSetLayoutBinding::builder().binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
-            vk::DescriptorSetLayoutBinding::builder().binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX).build(),
-            vk::DescriptorSetLayoutBinding::builder().binding(2).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
-            vk::DescriptorSetLayoutBinding::builder().binding(3).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX).build(),
-            vk::DescriptorSetLayoutBinding::builder().binding(4).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT).build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(4)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+                .build(),
         ];
-        let global_set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::builder().bindings(&global_bindings), None)? };
-        
+        let global_set_layout = unsafe {
+            device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::builder().bindings(&global_bindings),
+                None,
+            )?
+        };
+
         let material_bindings = [
-            vk::DescriptorSetLayoutBinding::builder().binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
-            vk::DescriptorSetLayoutBinding::builder().binding(1).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
-            vk::DescriptorSetLayoutBinding::builder().binding(2).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
         ];
-        let material_set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::builder().bindings(&material_bindings), None)? };
-        
+        let material_set_layout = unsafe {
+            device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::builder().bindings(&material_bindings),
+                None,
+            )?
+        };
+
         println!("DEBUG: Headless Vulkan - Creating Descriptor Pool");
-        let descriptor_pool = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::builder().pool_sizes(&[vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 300 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 100 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 300 }]).max_sets(100), None)? };
+        let descriptor_pool = unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::builder()
+                    .pool_sizes(&[
+                        vk::DescriptorPoolSize {
+                            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                            descriptor_count: 300,
+                        },
+                        vk::DescriptorPoolSize {
+                            ty: vk::DescriptorType::STORAGE_BUFFER,
+                            descriptor_count: 100,
+                        },
+                        vk::DescriptorPoolSize {
+                            ty: vk::DescriptorType::UNIFORM_BUFFER,
+                            descriptor_count: 300,
+                        },
+                    ])
+                    .max_sets(100),
+                None,
+            )?
+        };
 
         // 7. Pipeline Layout
         println!("DEBUG: Headless Vulkan - Creating Pipeline Layouts");
         let push_constant_ranges = []; // Moved global data to UBO
-        let pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&push_constant_ranges).set_layouts(&[global_set_layout, material_set_layout]), None)? };
-        
-        let skinned_pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&push_constant_ranges).set_layouts(&[global_set_layout, material_set_layout]), None)? };
+        let pipeline_layout = unsafe {
+            device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::builder()
+                    .push_constant_ranges(&push_constant_ranges)
+                    .set_layouts(&[global_set_layout, material_set_layout]),
+                None,
+            )?
+        };
+
+        let skinned_pipeline_layout = unsafe {
+            device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::builder()
+                    .push_constant_ranges(&push_constant_ranges)
+                    .set_layouts(&[global_set_layout, material_set_layout]),
+                None,
+            )?
+        };
         println!("DEBUG: Headless Vulkan - Pipeline Layouts Created Successfully");
 
         // 8. Shadow Resources (minimal for headless)
         println!("DEBUG: Headless Vulkan - Creating Shadow Render Pass");
-        let shadow_extent = vk::Extent2D { width: 1024, height: 1024 };
+        let shadow_res = optimization_settings.resolve_shadow_resolution(None);
+        let shadow_extent = vk::Extent2D {
+            width: shadow_res,
+            height: shadow_res,
+        };
         let shadow_render_pass = Self::create_shadow_render_pass_internal(&device)?;
-        
+
         println!("DEBUG: Headless Vulkan - Creating Shadow Pipeline Layout");
-        let shadow_pipeline_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(&[vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::VERTEX).offset(0).size(64).build()]).set_layouts(&[global_set_layout]), None)? };
-        
+        let shadow_pipeline_layout = unsafe {
+            device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::builder()
+                    .push_constant_ranges(&[vk::PushConstantRange::builder()
+                        .stage_flags(vk::ShaderStageFlags::VERTEX)
+                        .offset(0)
+                        .size(64)
+                        .build()])
+                    .set_layouts(&[global_set_layout]),
+                None,
+            )?
+        };
+
         println!("DEBUG: Headless Vulkan - Creating Shadow Pipeline");
-        let shadow_pipeline = Self::create_shadow_pipeline_internal(&device, shadow_pipeline_layout, shadow_render_pass)?;
-        
+        let shadow_pipeline = Self::create_shadow_pipeline_internal(
+            &device,
+            shadow_pipeline_layout,
+            shadow_render_pass,
+        )?;
+
         println!("DEBUG: Headless Vulkan - Creating Shadow Image Resources");
-        let (shadow_depth_image, shadow_depth_memory, shadow_depth_view) = Self::create_shadow_image_resources_internal(&instance, &device, physical_device, shadow_extent)?;
-        
+        let (shadow_depth_image, shadow_depth_memory, shadow_depth_view) =
+            Self::create_shadow_image_resources_internal(
+                &instance,
+                &device,
+                physical_device,
+                shadow_extent,
+            )?;
+
         println!("DEBUG: Headless Vulkan - Creating Shadow Framebuffer");
-        let shadow_framebuffer = unsafe { device.create_framebuffer(&vk::FramebufferCreateInfo::builder().render_pass(shadow_render_pass).attachments(&[shadow_depth_view]).width(shadow_extent.width).height(shadow_extent.height).layers(1), None)? };
-        
+        let shadow_framebuffer = unsafe {
+            device.create_framebuffer(
+                &vk::FramebufferCreateInfo::builder()
+                    .render_pass(shadow_render_pass)
+                    .attachments(&[shadow_depth_view])
+                    .width(shadow_extent.width)
+                    .height(shadow_extent.height)
+                    .layers(1),
+                None,
+            )?
+        };
+
         println!("DEBUG: Headless Vulkan - Creating Shadow Sampler");
-        let shadow_sampler = unsafe { device.create_sampler(&vk::SamplerCreateInfo::builder().mag_filter(vk::Filter::LINEAR).min_filter(vk::Filter::LINEAR).address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER).address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER).address_mode_w(vk::SamplerAddressMode::CLAMP_TO_BORDER).border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE).build(), None)? };
+        let shadow_sampler = unsafe {
+            device.create_sampler(
+                &vk::SamplerCreateInfo::builder()
+                    .mag_filter(vk::Filter::LINEAR)
+                    .min_filter(vk::Filter::LINEAR)
+                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER)
+                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER)
+                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_BORDER)
+                    .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE)
+                    .build(),
+                None,
+            )?
+        };
 
         println!("DEBUG: Headless Vulkan - Creating Main Pipeline");
-        let pipeline = Self::create_graphics_pipeline_internal(&device, pipeline_layout, render_pass)?;
-        
+        let pipeline =
+            Self::create_graphics_pipeline_internal(&device, pipeline_layout, render_pass)?;
+
         println!("DEBUG: Headless Vulkan - Creating Skinned Pipeline");
-        let skinned_pipeline = Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
+        let skinned_pipeline =
+            Self::create_skinned_pipeline_internal(&device, skinned_pipeline_layout, render_pass)?;
         println!("DEBUG: Headless Vulkan - All Pipelines Created Successfully");
 
         let mut ctx = Self {
-            entry, instance, physical_device, device, queue_family_index, queue, command_pool, command_buffer, fence, render_pass, 
-            pipeline_layout, pipeline, skinned_pipeline_layout, skinned_pipeline,
-            depth_format, global_set_layout, material_set_layout, descriptor_pool,
+            entry,
+            instance,
+            physical_device,
+            device,
+            queue_family_index,
+            queue,
+            command_pool,
+            command_buffer,
+            fence,
+            render_pass,
+            pipeline_layout,
+            pipeline,
+            skinned_pipeline_layout,
+            skinned_pipeline,
+            depth_format,
+            global_set_layout,
+            material_set_layout,
+            descriptor_pool,
             default_material_descriptor_set: vk::DescriptorSet::null(),
-            shadow_render_pass, shadow_pipeline_layout, shadow_pipeline, shadow_depth_image, shadow_depth_memory, shadow_depth_view, shadow_framebuffer, shadow_sampler, shadow_extent,
+            optimization_settings,
+            sampler_anisotropy_enabled,
+            max_sampler_anisotropy,
+            shadow_render_pass,
+            shadow_pipeline_layout,
+            shadow_pipeline,
+            shadow_depth_image,
+            shadow_depth_memory,
+            shadow_depth_view,
+            shadow_framebuffer,
+            shadow_sampler,
+            shadow_extent,
             queue_mutex: std::sync::Mutex::new(()),
             surface_loader: None,
             surface: None,
@@ -1058,7 +1732,8 @@ impl GraphicsContext {
         };
 
         let (albedo, normal, mr) = ctx.create_default_pbr_textures()?;
-        ctx.default_material_descriptor_set = ctx.create_material_descriptor_set(&albedo, &normal, &mr)?;
+        ctx.default_material_descriptor_set =
+            ctx.create_material_descriptor_set(&albedo, &normal, &mr)?;
 
         Ok(ctx)
     }
@@ -1094,17 +1769,54 @@ impl GraphicsContext {
 
         let main_function_name = CString::new("main")?;
         let shader_stages = [
-            vk::PipelineShaderStageCreateInfo::builder().stage(vk::ShaderStageFlags::VERTEX).module(vert_module).name(&main_function_name).build(),
-            vk::PipelineShaderStageCreateInfo::builder().stage(vk::ShaderStageFlags::FRAGMENT).module(frag_module).name(&main_function_name).build(),
+            vk::PipelineShaderStageCreateInfo::builder()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vert_module)
+                .name(&main_function_name)
+                .build(),
+            vk::PipelineShaderStageCreateInfo::builder()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(frag_module)
+                .name(&main_function_name)
+                .build(),
         ];
 
-        let vertex_binding_descriptions = [vk::VertexInputBindingDescription { binding: 0, stride: std::mem::size_of::<crate::world::Vertex>() as u32, input_rate: vk::VertexInputRate::VERTEX }];
+        let vertex_binding_descriptions = [vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: std::mem::size_of::<crate::world::Vertex>() as u32,
+            input_rate: vk::VertexInputRate::VERTEX,
+        }];
         let vertex_attribute_descriptions = [
-            vk::VertexInputAttributeDescription { location: 0, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 0 },
-            vk::VertexInputAttributeDescription { location: 1, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 12 },
-            vk::VertexInputAttributeDescription { location: 2, binding: 0, format: vk::Format::R32G32_SFLOAT, offset: 24 },
-            vk::VertexInputAttributeDescription { location: 3, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 32 },
-            vk::VertexInputAttributeDescription { location: 4, binding: 0, format: vk::Format::R32G32B32A32_SFLOAT, offset: 44 },
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 0,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 12,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 2,
+                binding: 0,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: 24,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 3,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 32,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 4,
+                binding: 0,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: 44,
+            },
         ];
 
         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
@@ -1123,20 +1835,30 @@ impl GraphicsContext {
         let multisampling = vk::PipelineMultisampleStateCreateInfo::builder()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let color_blend_attachments = [
-            vk::PipelineColorBlendAttachmentState::builder().color_write_mask(vk::ColorComponentFlags::RGBA).blend_enable(false).build(),
-            vk::PipelineColorBlendAttachmentState::builder().color_write_mask(vk::ColorComponentFlags::RGBA).blend_enable(false).build(),
+            vk::PipelineColorBlendAttachmentState::builder()
+                .color_write_mask(vk::ColorComponentFlags::RGBA)
+                .blend_enable(false)
+                .build(),
+            vk::PipelineColorBlendAttachmentState::builder()
+                .color_write_mask(vk::ColorComponentFlags::RGBA)
+                .blend_enable(false)
+                .build(),
         ];
-        let color_blending = vk::PipelineColorBlendStateCreateInfo::builder()
-            .attachments(&color_blend_attachments);
+        let color_blending =
+            vk::PipelineColorBlendStateCreateInfo::builder().attachments(&color_blend_attachments);
         // Reversed-Z depth buffer: near=1.0, far=0.0 for better precision
         // This dramatically reduces z-fighting for large open worlds
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::builder()
             .depth_test_enable(true)
             .depth_write_enable(true)
             .depth_compare_op(vk::CompareOp::GREATER);
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR, vk::DynamicState::DEPTH_BIAS];
-        let dynamic_state = vk::PipelineDynamicStateCreateInfo::builder()
-            .dynamic_states(&dynamic_states);
+        let dynamic_states = [
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR,
+            vk::DynamicState::DEPTH_BIAS,
+        ];
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
 
         let pipeline_info = vk::GraphicsPipelineCreateInfo::builder()
             .stages(&shader_stages)
@@ -1152,8 +1874,20 @@ impl GraphicsContext {
             .render_pass(render_pass)
             .subpass(0);
 
-        let pipeline = unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info.build()], None).map_err(|e| e.1).unwrap()[0] };
-        unsafe { device.destroy_shader_module(vert_module, None); device.destroy_shader_module(frag_module, None); }
+        let pipeline = unsafe {
+            device
+                .create_graphics_pipelines(
+                    vk::PipelineCache::null(),
+                    &[pipeline_info.build()],
+                    None,
+                )
+                .map_err(|e| e.1)
+                .unwrap()[0]
+        };
+        unsafe {
+            device.destroy_shader_module(vert_module, None);
+            device.destroy_shader_module(frag_module, None);
+        }
         Ok(pipeline)
     }
 
@@ -1176,19 +1910,66 @@ impl GraphicsContext {
 
         let main_function_name = CString::new("main")?;
         let shader_stages = [
-            vk::PipelineShaderStageCreateInfo::builder().stage(vk::ShaderStageFlags::VERTEX).module(vert_module).name(&main_function_name).build(),
-            vk::PipelineShaderStageCreateInfo::builder().stage(vk::ShaderStageFlags::FRAGMENT).module(frag_module).name(&main_function_name).build(),
+            vk::PipelineShaderStageCreateInfo::builder()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vert_module)
+                .name(&main_function_name)
+                .build(),
+            vk::PipelineShaderStageCreateInfo::builder()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(frag_module)
+                .name(&main_function_name)
+                .build(),
         ];
 
-        let vertex_binding_descriptions = [vk::VertexInputBindingDescription { binding: 0, stride: std::mem::size_of::<crate::world::Vertex>() as u32, input_rate: vk::VertexInputRate::VERTEX }];
+        let vertex_binding_descriptions = [vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: std::mem::size_of::<crate::world::Vertex>() as u32,
+            input_rate: vk::VertexInputRate::VERTEX,
+        }];
         let vertex_attribute_descriptions = [
-            vk::VertexInputAttributeDescription { location: 0, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 0 },
-            vk::VertexInputAttributeDescription { location: 1, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 12 },
-            vk::VertexInputAttributeDescription { location: 2, binding: 0, format: vk::Format::R32G32_SFLOAT, offset: 24 },
-            vk::VertexInputAttributeDescription { location: 3, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 32 },
-            vk::VertexInputAttributeDescription { location: 4, binding: 0, format: vk::Format::R32G32B32A32_SFLOAT, offset: 44 },
-            vk::VertexInputAttributeDescription { location: 5, binding: 0, format: vk::Format::R32G32B32A32_UINT, offset: 60 },
-            vk::VertexInputAttributeDescription { location: 6, binding: 0, format: vk::Format::R32G32B32A32_SFLOAT, offset: 76 },
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 0,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 12,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 2,
+                binding: 0,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: 24,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 3,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 32,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 4,
+                binding: 0,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: 44,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 5,
+                binding: 0,
+                format: vk::Format::R32G32B32A32_UINT,
+                offset: 60,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 6,
+                binding: 0,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: 76,
+            },
         ];
 
         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
@@ -1207,18 +1988,28 @@ impl GraphicsContext {
         let multisampling = vk::PipelineMultisampleStateCreateInfo::builder()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let color_blend_attachments = [
-            vk::PipelineColorBlendAttachmentState::builder().color_write_mask(vk::ColorComponentFlags::RGBA).blend_enable(false).build(),
-            vk::PipelineColorBlendAttachmentState::builder().color_write_mask(vk::ColorComponentFlags::RGBA).blend_enable(false).build(),
+            vk::PipelineColorBlendAttachmentState::builder()
+                .color_write_mask(vk::ColorComponentFlags::RGBA)
+                .blend_enable(false)
+                .build(),
+            vk::PipelineColorBlendAttachmentState::builder()
+                .color_write_mask(vk::ColorComponentFlags::RGBA)
+                .blend_enable(false)
+                .build(),
         ];
-        let color_blending = vk::PipelineColorBlendStateCreateInfo::builder()
-            .attachments(&color_blend_attachments);
+        let color_blending =
+            vk::PipelineColorBlendStateCreateInfo::builder().attachments(&color_blend_attachments);
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::builder()
             .depth_test_enable(true)
             .depth_write_enable(true)
             .depth_compare_op(vk::CompareOp::GREATER);
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR, vk::DynamicState::DEPTH_BIAS];
-        let dynamic_state = vk::PipelineDynamicStateCreateInfo::builder()
-            .dynamic_states(&dynamic_states);
+        let dynamic_states = [
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR,
+            vk::DynamicState::DEPTH_BIAS,
+        ];
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
 
         let pipeline_info = vk::GraphicsPipelineCreateInfo::builder()
             .stages(&shader_stages)
@@ -1234,8 +2025,20 @@ impl GraphicsContext {
             .render_pass(render_pass)
             .subpass(0);
 
-        let pipeline = unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info.build()], None).map_err(|e| e.1).unwrap()[0] };
-        unsafe { device.destroy_shader_module(vert_module, None); device.destroy_shader_module(frag_module, None); }
+        let pipeline = unsafe {
+            device
+                .create_graphics_pipelines(
+                    vk::PipelineCache::null(),
+                    &[pipeline_info.build()],
+                    None,
+                )
+                .map_err(|e| e.1)
+                .unwrap()[0]
+        };
+        unsafe {
+            device.destroy_shader_module(vert_module, None);
+            device.destroy_shader_module(frag_module, None);
+        }
         Ok(pipeline)
     }
 
@@ -1395,20 +2198,19 @@ impl GraphicsContext {
         Ok((image, image_memory))
     }
 
-     fn find_memory_type_static(
+    fn find_memory_type_static(
         instance: &Instance,
         physical_device: vk::PhysicalDevice,
         type_filter: u32,
         properties: vk::MemoryPropertyFlags,
     ) -> Result<u32> {
-        let mem_properties = unsafe {
-            instance
-                .get_physical_device_memory_properties(physical_device)
-        };
+        let mem_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
         for i in 0..mem_properties.memory_type_count {
             if (type_filter & (1 << i)) != 0
-                && (mem_properties.memory_types[i as usize].property_flags & properties) == properties
+                && (mem_properties.memory_types[i as usize].property_flags & properties)
+                    == properties
             {
                 return Ok(i);
             }
@@ -1422,7 +2224,12 @@ impl GraphicsContext {
         type_filter: u32,
         properties: vk::MemoryPropertyFlags,
     ) -> Result<u32> {
-        Self::find_memory_type_static(&self.instance, self.physical_device, type_filter, properties)
+        Self::find_memory_type_static(
+            &self.instance,
+            self.physical_device,
+            type_filter,
+            properties,
+        )
     }
 
     pub fn begin_single_time_commands(&self) -> Result<vk::CommandBuffer> {
@@ -1641,8 +2448,8 @@ impl GraphicsContext {
             self.copy_buffer_to_image_mip(
                 staging_buffer,
                 image,
-                header.pixel_width >> i,
-                header.pixel_height >> i,
+                (header.pixel_width >> i).max(1),
+                (header.pixel_height >> i).max(1),
                 i as u32,
             )?;
 
@@ -1860,6 +2667,32 @@ impl GraphicsContext {
         Ok((texture_image, texture_memory, texture_image_view))
     }
 
+    pub fn create_texture_sampler(&self, mip_levels: u32) -> Result<vk::Sampler> {
+        let max_lod = mip_levels.saturating_sub(1) as f32;
+        let sampler_info = vk::SamplerCreateInfo::builder()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .anisotropy_enable(self.sampler_anisotropy_enabled)
+            .max_anisotropy(self.max_sampler_anisotropy)
+            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+            .unnormalized_coordinates(false)
+            .compare_enable(false)
+            .compare_op(vk::CompareOp::ALWAYS)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .mip_lod_bias(self.optimization_settings.texture_lod_bias)
+            .min_lod(0.0)
+            .max_lod(max_lod);
+
+        unsafe {
+            self.device
+                .create_sampler(&sampler_info, None)
+                .map_err(Into::into)
+        }
+    }
+
     pub fn create_default_pbr_textures(&self) -> Result<(Texture, Texture, Texture)> {
         // Albedo: 8x8 Checkerboard
         let width = 256;
@@ -1871,9 +2704,10 @@ impl GraphicsContext {
                 let checker_x = (x / 32) % 2;
                 let checker_y = (y / 32) % 2;
                 if checker_x == checker_y {
-                    albedo_img.put_pixel(x, y, image::Rgba([200, 200, 200, 255])); // Gray
+                    albedo_img.put_pixel(x, y, image::Rgba([200, 200, 200, 255]));
+                // Gray
                 } else {
-                    albedo_img.put_pixel(x, y, image::Rgba([60, 60, 60, 255]));    // Dark Gray
+                    albedo_img.put_pixel(x, y, image::Rgba([60, 60, 60, 255])); // Dark Gray
                 }
             }
         }
@@ -1991,24 +2825,7 @@ impl GraphicsContext {
 
         let image_view = unsafe { self.device.create_image_view(&view_info, None)? };
 
-        // Create Sampler
-        let sampler_info = vk::SamplerCreateInfo::builder()
-            .mag_filter(vk::Filter::LINEAR)
-            .min_filter(vk::Filter::LINEAR)
-            .address_mode_u(vk::SamplerAddressMode::REPEAT)
-            .address_mode_v(vk::SamplerAddressMode::REPEAT)
-            .address_mode_w(vk::SamplerAddressMode::REPEAT)
-            .anisotropy_enable(true) // Enable Anisotropy for better quality
-            .max_anisotropy(16.0)
-            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
-            .unnormalized_coordinates(false)
-            .compare_enable(false)
-            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-            .mip_lod_bias(0.0)
-            .min_lod(0.0)
-            .max_lod(0.0); // We only have 1 mip level for now
-
-        let sampler = unsafe { self.device.create_sampler(&sampler_info, None)? };
+        let sampler = self.create_texture_sampler(1)?;
 
         Ok(Texture {
             image,
@@ -2103,25 +2920,7 @@ impl GraphicsContext {
 
         let image_view = unsafe { self.device.create_image_view(&view_info, None)? };
 
-        // Create Sampler
-        let sampler_info = vk::SamplerCreateInfo::builder()
-            .mag_filter(vk::Filter::LINEAR)
-            .min_filter(vk::Filter::LINEAR)
-            .address_mode_u(vk::SamplerAddressMode::REPEAT)
-            .address_mode_v(vk::SamplerAddressMode::REPEAT)
-            .address_mode_w(vk::SamplerAddressMode::REPEAT)
-            .anisotropy_enable(false)
-            .max_anisotropy(16.0)
-            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
-            .unnormalized_coordinates(false)
-            .compare_enable(false)
-            .compare_op(vk::CompareOp::ALWAYS)
-            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-            .mip_lod_bias(0.0)
-            .min_lod(0.0)
-            .max_lod(0.0);
-
-        let sampler = unsafe { self.device.create_sampler(&sampler_info, None)? };
+        let sampler = self.create_texture_sampler(1)?;
 
         Ok(Texture {
             image,
@@ -2327,13 +3126,15 @@ impl GraphicsContext {
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(format)
-            .subresource_range(vk::ImageSubresourceRange::builder()
-                .aspect_mask(aspect_mask)
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1)
-                .build());
+            .subresource_range(
+                vk::ImageSubresourceRange::builder()
+                    .aspect_mask(aspect_mask)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1)
+                    .build(),
+            );
 
         let view = unsafe { device.create_image_view(&view_create_info, None)? };
 
@@ -2421,13 +3222,48 @@ impl GraphicsContext {
             input_rate: vk::VertexInputRate::VERTEX,
         }];
         let attribute_descriptions = [
-            vk::VertexInputAttributeDescription { location: 0, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 0 },
-            vk::VertexInputAttributeDescription { location: 1, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 12 },
-            vk::VertexInputAttributeDescription { location: 2, binding: 0, format: vk::Format::R32G32_SFLOAT, offset: 24 },
-            vk::VertexInputAttributeDescription { location: 3, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 32 },
-            vk::VertexInputAttributeDescription { location: 4, binding: 0, format: vk::Format::R32G32B32A32_SFLOAT, offset: 44 },
-            vk::VertexInputAttributeDescription { location: 5, binding: 0, format: vk::Format::R32G32B32A32_UINT, offset: 60 },
-            vk::VertexInputAttributeDescription { location: 6, binding: 0, format: vk::Format::R32G32B32A32_SFLOAT, offset: 76 },
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 0,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 12,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 2,
+                binding: 0,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: 24,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 3,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 32,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 4,
+                binding: 0,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: 44,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 5,
+                binding: 0,
+                format: vk::Format::R32G32B32A32_UINT,
+                offset: 60,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 6,
+                binding: 0,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: 76,
+            },
         ];
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::builder()
             .vertex_binding_descriptions(&binding_descriptions)
@@ -2709,41 +3545,78 @@ impl Drop for GraphicsContext {
             let _ = self.device.device_wait_idle();
 
             // Destroy common resources
-            self.device.destroy_descriptor_pool(self.descriptor_pool, None);
-            self.device.destroy_descriptor_set_layout(self.global_set_layout, None);
-            self.device.destroy_descriptor_set_layout(self.material_set_layout, None);
+            self.device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
+            self.device
+                .destroy_descriptor_set_layout(self.global_set_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.material_set_layout, None);
             self.device.destroy_pipeline(self.pipeline, None);
-            self.device.destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
             self.device.destroy_render_pass(self.render_pass, None);
             self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
 
             // Shadow resources
             self.device.destroy_sampler(self.shadow_sampler, None);
-            self.device.destroy_framebuffer(self.shadow_framebuffer, None);
+            self.device
+                .destroy_framebuffer(self.shadow_framebuffer, None);
             self.device.destroy_image_view(self.shadow_depth_view, None);
             self.device.destroy_image(self.shadow_depth_image, None);
             self.device.free_memory(self.shadow_depth_memory, None);
             self.device.destroy_pipeline(self.shadow_pipeline, None);
-            self.device.destroy_pipeline_layout(self.shadow_pipeline_layout, None);
-            self.device.destroy_render_pass(self.shadow_render_pass, None);
+            self.device
+                .destroy_pipeline_layout(self.shadow_pipeline_layout, None);
+            self.device
+                .destroy_render_pass(self.shadow_render_pass, None);
 
-            #[cfg(target_os = "linux")]
+            #[cfg(not(target_os = "android"))]
             {
-                if let Some(sem) = self.image_available_semaphore { self.device.destroy_semaphore(sem, None); }
-                if let Some(sem) = self.render_finished_semaphore { self.device.destroy_semaphore(sem, None); }
-                for &fb in &self.swapchain_framebuffers { self.device.destroy_framebuffer(fb, None); }
-                for &view in &self.swapchain_image_views { self.device.destroy_image_view(view, None); }
-                if let Some(sw) = self.swapchain { self.swapchain_loader.as_ref().unwrap().destroy_swapchain(sw, None); }
-                if let Some(surf) = self.surface { self.surface_loader.as_ref().unwrap().destroy_surface(surf, None); }
-                
-                if let Some(view) = self.desktop_depth_view { self.device.destroy_image_view(view, None); }
-                if let Some(img) = self.desktop_depth_image { self.device.destroy_image(img, None); }
-                if let Some(mem) = self.desktop_depth_memory { self.device.free_memory(mem, None); }
+                if let Some(sem) = self.image_available_semaphore {
+                    self.device.destroy_semaphore(sem, None);
+                }
+                if let Some(sem) = self.render_finished_semaphore {
+                    self.device.destroy_semaphore(sem, None);
+                }
+                for &fb in &self.swapchain_framebuffers {
+                    self.device.destroy_framebuffer(fb, None);
+                }
+                for &view in &self.swapchain_image_views {
+                    self.device.destroy_image_view(view, None);
+                }
+                if let Some(sw) = self.swapchain {
+                    self.swapchain_loader
+                        .as_ref()
+                        .unwrap()
+                        .destroy_swapchain(sw, None);
+                }
+                if let Some(surf) = self.surface {
+                    self.surface_loader
+                        .as_ref()
+                        .unwrap()
+                        .destroy_surface(surf, None);
+                }
 
-                if let Some(view) = self.desktop_motion_view { self.device.destroy_image_view(view, None); }
-                if let Some(img) = self.desktop_motion_image { self.device.destroy_image(img, None); }
-                if let Some(mem) = self.desktop_motion_memory { self.device.free_memory(mem, None); }
+                if let Some(view) = self.desktop_depth_view {
+                    self.device.destroy_image_view(view, None);
+                }
+                if let Some(img) = self.desktop_depth_image {
+                    self.device.destroy_image(img, None);
+                }
+                if let Some(mem) = self.desktop_depth_memory {
+                    self.device.free_memory(mem, None);
+                }
+
+                if let Some(view) = self.desktop_motion_view {
+                    self.device.destroy_image_view(view, None);
+                }
+                if let Some(img) = self.desktop_motion_image {
+                    self.device.destroy_image(img, None);
+                }
+                if let Some(mem) = self.desktop_motion_memory {
+                    self.device.free_memory(mem, None);
+                }
             }
 
             self.device.destroy_device(None);

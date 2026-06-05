@@ -1,17 +1,19 @@
+use crate::physics::PhysicsWorld;
 use glam;
-use rapier3d;
-use hecs::{World, Entity};
+use hecs::{Entity, World};
 use log::{info, warn};
+use rapier3d;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use crate::physics::PhysicsWorld;
 
-pub mod scripting;
-pub mod fbx_loader;
 pub mod animation;
+pub mod fbx_loader;
 pub mod gltf_loader;
-use scripting::{FuckScript, ScriptContext, ScriptRegistry};
-use animation::{Animator, AnimationState, AnimatorController, AnimationEventQueue};
+pub mod scripting;
+use animation::{AnimationEventQueue, AnimationState, Animator, AnimatorController};
+use scripting::{
+    FuckScript, ScriptContext, ScriptRegistry, XrHapticRequest, XrInputEvent, XrInputSnapshot,
+};
 
 pub struct GameWorld {
     pub ecs: World,
@@ -36,6 +38,14 @@ pub struct GameWorld {
     pub menu_stack: crate::ui::MenuStack,
     /// Flag for main.rs to check and release cursor when returning to pause menu
     pub cursor_should_release: bool,
+    /// Latest XR rig/controller snapshot exposed to scripts.
+    pub xr_input: XrInputSnapshot,
+    /// Previous XR snapshot for edge detection and debugging.
+    pub previous_xr_input: XrInputSnapshot,
+    /// XR input events waiting to be dispatched to scripts.
+    pub pending_xr_events: Vec<XrInputEvent>,
+    /// Haptic pulses requested by scripts, drained by the platform runtime.
+    pub pending_xr_haptics: Vec<XrHapticRequest>,
 }
 
 pub struct ChunkData {
@@ -124,7 +134,13 @@ impl Vertex {
     }
 
     /// Create a vertex with no bone influence (for static meshes)
-    pub fn new_static(position: [f32; 3], normal: [f32; 3], uv: [f32; 2], color: [f32; 3], tangent: [f32; 4]) -> Self {
+    pub fn new_static(
+        position: [f32; 3],
+        normal: [f32; 3],
+        uv: [f32; 2],
+        color: [f32; 3],
+        tangent: [f32; 4],
+    ) -> Self {
         Self {
             position,
             normal,
@@ -168,7 +184,7 @@ pub struct DecodedImage {
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Material {
     pub color: [f32; 4],
-    pub albedo_texture: Option<String>,  // Texture ID for custom albedo texture
+    pub albedo_texture: Option<String>, // Texture ID for custom albedo texture
     pub metallic: f32,
     pub roughness: f32,
 }
@@ -214,7 +230,7 @@ impl GroundPlane {
             half_extents: glam::Vec2::new(half_x, half_z),
         }
     }
-    
+
     /// Returns the maximum extent (for shadow frustum sizing)
     pub fn max_extent(&self) -> f32 {
         self.half_extents.x.max(self.half_extents.y)
@@ -248,8 +264,8 @@ pub enum AgentState {
     Idle,
     Walking,
     Running,
-    Fleeing,   // Running away from danger
-    Chasing,   // Following a target closely
+    Fleeing,     // Running away from danger
+    Chasing,     // Following a target closely
     Approaching, // Moving toward a point of interest
 }
 
@@ -277,15 +293,65 @@ pub const LAYER_CHARACTER: u32 = 8;
 pub const LAYER_VEHICLE: u32 = 16;
 
 /// Component to hold scripts on an entity
-pub struct DynamicScript {
+pub struct ScriptSlot {
+    pub name: String,
     pub script: Option<Box<dyn FuckScript>>,
     pub started: bool,
     pub enabled: bool,
 }
 
+impl ScriptSlot {
+    pub fn new(name: impl Into<String>, script: Box<dyn FuckScript>) -> Self {
+        Self {
+            name: name.into(),
+            script: Some(script),
+            started: false,
+            enabled: true,
+        }
+    }
+}
+
+/// Component to hold one or more scripts on an entity.
+pub struct DynamicScript {
+    pub scripts: Vec<ScriptSlot>,
+}
+
 impl DynamicScript {
     pub fn new(script: Box<dyn FuckScript>) -> Self {
-        Self { script: Some(script), started: false, enabled: true }
+        Self::from_named("Script", script)
+    }
+
+    pub fn from_named(name: impl Into<String>, script: Box<dyn FuckScript>) -> Self {
+        Self {
+            scripts: vec![ScriptSlot::new(name, script)],
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            scripts: Vec::new(),
+        }
+    }
+
+    pub fn push_named(&mut self, name: impl Into<String>, script: Box<dyn FuckScript>) {
+        self.scripts.push(ScriptSlot::new(name, script));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.scripts.is_empty()
+    }
+
+    fn take_slot(&mut self, index: usize) -> Option<ScriptSlot> {
+        if index < self.scripts.len() {
+            Some(self.scripts.remove(index))
+        } else {
+            None
+        }
+    }
+
+    fn insert_slot(&mut self, index: usize, slot: ScriptSlot) {
+        let index = index.min(self.scripts.len());
+        self.scripts.insert(index, slot);
     }
 }
 
@@ -413,11 +479,11 @@ pub enum SceneUpdate {
         rotation: [f32; 4],
         scale: [f32; 3],
         color: [f32; 3],
-        albedo_texture: Option<String>,  // Texture ID for custom albedo texture
+        albedo_texture: Option<String>, // Texture ID for custom albedo texture
         collision_enabled: bool,
         layer: u32,
         #[serde(default)]
-        is_static: bool,  // If true, object is not affected by gravity
+        is_static: bool, // If true, object is not affected by gravity
     },
     SpawnMesh {
         id: u32,
@@ -511,6 +577,11 @@ pub enum SceneUpdate {
         id: u32,
         name: String,
     },
+    /// Replace the full script component stack on an entity.
+    SetScripts {
+        id: u32,
+        names: Vec<String>,
+    },
     /// Attach an animator controller to an entity
     AttachAnimator {
         id: u32,
@@ -544,12 +615,12 @@ pub enum SceneUpdate {
     /// Spawn an FBX mesh with full model data
     SpawnFbxMesh {
         id: u32,
-        mesh_data: Vec<u8>,  // Raw FBX/OBJ file bytes
+        mesh_data: Vec<u8>, // Raw FBX/OBJ file bytes
         position: [f32; 3],
         rotation: [f32; 4],
         scale: [f32; 3],
         #[serde(default)]
-        albedo_texture: Option<String>,  // Optional texture ID
+        albedo_texture: Option<String>, // Optional texture ID
         #[serde(default)]
         collision_enabled: bool,
         #[serde(default)]
@@ -560,7 +631,7 @@ pub enum SceneUpdate {
     /// Spawn a glTF/GLB mesh with full model data and animation support
     SpawnGltfMesh {
         id: u32,
-        mesh_data: Vec<u8>,  // Raw GLB/GLTF file bytes
+        mesh_data: Vec<u8>, // Raw GLB/GLTF file bytes
         position: [f32; 3],
         rotation: [f32; 4],
         scale: [f32; 3],
@@ -683,6 +754,22 @@ impl GameWorld {
                 reg.register("WeaponNPC", || scripting::WeaponNPCScript);
                 reg.register("CollisionLogger", || scripting::CollisionLoggerScript);
                 reg.register("TouchToDestroy", || scripting::TouchToDestroyScript);
+                reg.register("HeadAnchor", || {
+                    scripting::XrPoseAnchorScript::new(scripting::XrTrackedTarget::Head)
+                });
+                reg.register("LeftHandAnchor", || {
+                    scripting::XrPoseAnchorScript::new(scripting::XrTrackedTarget::LeftGrip)
+                });
+                reg.register("RightHandAnchor", || {
+                    scripting::XrPoseAnchorScript::new(scripting::XrTrackedTarget::RightGrip)
+                });
+                reg.register("LeftAimAnchor", || {
+                    scripting::XrPoseAnchorScript::new(scripting::XrTrackedTarget::LeftAim)
+                });
+                reg.register("RightAimAnchor", || {
+                    scripting::XrPoseAnchorScript::new(scripting::XrTrackedTarget::RightAim)
+                });
+                reg.register("TriggerHaptics", || scripting::TriggerHapticsScript);
                 Arc::new(reg)
             },
             respawn_enabled: false,
@@ -691,9 +778,32 @@ impl GameWorld {
             ui_layers: crate::ui::UiLayerSet::new(),
             menu_stack: crate::ui::MenuStack::new(),
             cursor_should_release: false,
+            xr_input: XrInputSnapshot::default(),
+            previous_xr_input: XrInputSnapshot::default(),
+            pending_xr_events: Vec::new(),
+            pending_xr_haptics: Vec::new(),
         };
         // world.spawn_default_scene(); // Moved to streaming logic or separate init
         world
+    }
+
+    pub fn set_xr_input_snapshot(&mut self, mut snapshot: XrInputSnapshot) {
+        snapshot.populate_builtin_actions_from_controls();
+
+        let previous = self.xr_input.clone();
+        if snapshot.frame_index <= previous.frame_index {
+            snapshot.frame_index = previous.frame_index.saturating_add(1);
+        }
+        snapshot.update_edges_from(&previous);
+
+        self.pending_xr_events
+            .extend(snapshot.diff_events(&previous));
+        self.previous_xr_input = previous;
+        self.xr_input = snapshot;
+    }
+
+    pub fn drain_xr_haptics(&mut self) -> Vec<XrHapticRequest> {
+        std::mem::take(&mut self.pending_xr_haptics)
     }
 
     /// Helper to find an entity by its EditorEntityId
@@ -706,26 +816,120 @@ impl GameWorld {
         None
     }
 
+    fn take_script_slots(&mut self, entity: Entity) -> Vec<ScriptSlot> {
+        if let Ok(mut comp) = self.ecs.get::<&mut DynamicScript>(entity) {
+            std::mem::take(&mut comp.scripts)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn disable_script_slots(
+        &mut self,
+        physics: &mut PhysicsWorld,
+        entity: Entity,
+        slots: Vec<ScriptSlot>,
+    ) {
+        for mut slot in slots {
+            if !self.ecs.contains(entity) {
+                break;
+            }
+
+            if let Some(mut script) = slot.script.take() {
+                let xr = self.xr_input.clone();
+                let mut ctx = ScriptContext::new_with_xr(
+                    entity,
+                    &mut self.ecs,
+                    physics,
+                    0.0,
+                    xr,
+                    Some(&mut self.pending_xr_haptics),
+                );
+                script.on_disable(&mut ctx);
+            }
+        }
+    }
+
+    fn disable_all_scripts(&mut self, physics: &mut PhysicsWorld, entity: Entity) {
+        let slots = self.take_script_slots(entity);
+        self.disable_script_slots(physics, entity, slots);
+    }
+
+    fn call_each_script<F>(
+        &mut self,
+        physics: &mut PhysicsWorld,
+        entity: Entity,
+        dt: f32,
+        mut call: F,
+    ) where
+        F: FnMut(&mut dyn FuckScript, &mut ScriptContext),
+    {
+        let script_count = self
+            .ecs
+            .get::<&DynamicScript>(entity)
+            .map(|comp| comp.scripts.len())
+            .unwrap_or(0);
+
+        for script_index in 0..script_count {
+            let slot = if let Ok(mut comp) = self.ecs.get::<&mut DynamicScript>(entity) {
+                comp.take_slot(script_index)
+            } else {
+                break;
+            };
+
+            let Some(mut slot) = slot else {
+                continue;
+            };
+
+            if slot.enabled {
+                if let Some(mut script) = slot.script.take() {
+                    let xr = self.xr_input.clone();
+                    let mut ctx = ScriptContext::new_with_xr(
+                        entity,
+                        &mut self.ecs,
+                        physics,
+                        dt,
+                        xr,
+                        Some(&mut self.pending_xr_haptics),
+                    );
+                    call(script.as_mut(), &mut ctx);
+                    slot.script = Some(script);
+                }
+            }
+
+            if let Ok(mut comp) = self.ecs.get::<&mut DynamicScript>(entity) {
+                comp.insert_slot(script_index, slot);
+            } else {
+                break;
+            }
+        }
+    }
+
     /// Propagate world-space transforms from parents to children
     pub fn resolve_hierarchies(&mut self) {
         // Multi-pass to handle nested hierarchies (up to 8 levels)
         for _ in 0..8 {
             let mut updates = Vec::new();
-            
-            for (entity, (hierarchy, local_transform)) in self.ecs.query::<(&Hierarchy, &LocalTransform)>().iter() {
+
+            for (entity, (hierarchy, local_transform)) in
+                self.ecs.query::<(&Hierarchy, &LocalTransform)>().iter()
+            {
                 if let Some(parent) = hierarchy.parent {
                     if let Ok(parent_transform) = self.ecs.get::<&Transform>(parent) {
                         // Calculate world-space transform:
                         // world_pos = parent_pos + (parent_rot * (parent_scale * local_pos))
-                        let world_pos = parent_transform.position + (parent_transform.rotation * (parent_transform.scale * local_transform.position));
+                        let world_pos = parent_transform.position
+                            + (parent_transform.rotation
+                                * (parent_transform.scale * local_transform.position));
                         let world_rot = parent_transform.rotation * local_transform.rotation;
                         let world_scale = parent_transform.scale * local_transform.scale;
-                        
+
                         // Only add to updates if it actually changed to avoid infinite loops
                         if let Ok(t) = self.ecs.get::<&Transform>(entity) {
-                            if (t.position - world_pos).length_squared() > 0.0001 || 
-                               (t.rotation.dot(world_rot)).abs() < 0.9999 ||
-                               (t.scale - world_scale).length_squared() > 0.0001 {
+                            if (t.position - world_pos).length_squared() > 0.0001
+                                || (t.rotation.dot(world_rot)).abs() < 0.9999
+                                || (t.scale - world_scale).length_squared() > 0.0001
+                            {
                                 updates.push((entity, world_pos, world_rot, world_scale));
                             }
                         } else {
@@ -734,9 +938,11 @@ impl GameWorld {
                     }
                 }
             }
-            
-            if updates.is_empty() { break; }
-            
+
+            if updates.is_empty() {
+                break;
+            }
+
             for (entity, p, r, s) in updates {
                 if let Ok(mut t) = self.ecs.get::<&mut Transform>(entity) {
                     t.position = p;
@@ -770,11 +976,16 @@ impl GameWorld {
             // Parallelize the data generation for chunks (Read-only data access)
             // Use a local copy of procedural settings to avoid capturing &mut self
             let procedural_enabled = self.procedural_generation_enabled;
-            
-            let chunk_data: Vec<_> = chunks_to_generate.par_iter().map(|&(x, z)| {
-                if !procedural_enabled { return Vec::new(); }
-                self.calculate_chunk_entities(x, z, chunk_size)
-            }).collect();
+
+            let chunk_data: Vec<_> = chunks_to_generate
+                .par_iter()
+                .map(|&(x, z)| {
+                    if !procedural_enabled {
+                        return Vec::new();
+                    }
+                    self.calculate_chunk_entities(x, z, chunk_size)
+                })
+                .collect();
 
             // Sequential update of the world state
             for (i, entities) in chunk_data.into_iter().enumerate() {
@@ -826,12 +1037,20 @@ impl GameWorld {
                         },
                     ));
 
-                    let target_entity = self.ecs.query::<&EditorEntityId>().iter().find(|(_, id_comp)| id_comp.0 == id).map(|(e, _)| e);
+                    let target_entity = self
+                        .ecs
+                        .query::<&EditorEntityId>()
+                        .iter()
+                        .find(|(_, id_comp)| id_comp.0 == id)
+                        .map(|(e, _)| e);
                     if let Some(entity) = target_entity {
                         if collision_enabled {
                             // Use is_static to control gravity. Planes (3) are always static.
                             let is_dynamic = !is_static && primitive != 3;
-                            self.attach_physics_to_entity(entity, physics, primitive, position, rotation, scale, is_dynamic, layer);
+                            self.attach_physics_to_entity(
+                                entity, physics, primitive, position, rotation, scale, is_dynamic,
+                                layer,
+                            );
                         }
                     }
 
@@ -868,7 +1087,12 @@ impl GameWorld {
                     ));
                     info!("Spawned mesh with EditorEntityId({})", id);
                 }
-                SceneUpdate::UpdateTransform { id, position, rotation, scale } => {
+                SceneUpdate::UpdateTransform {
+                    id,
+                    position,
+                    rotation,
+                    scale,
+                } => {
                     // Find entity by EditorEntityId and update transform
                     for (entity, (editor_id, transform)) in
                         self.ecs.query_mut::<(&EditorEntityId, &mut Transform)>()
@@ -883,12 +1107,18 @@ impl GameWorld {
                             if let Some(s) = scale {
                                 transform.scale = glam::Vec3::from(s);
                             }
-                            
+
                             // Update LocalTransform too
                             if let Ok(mut local) = self.ecs.get::<&mut LocalTransform>(entity) {
-                                if let Some(pos) = position { local.position = glam::Vec3::from(pos); }
-                                if let Some(rot) = rotation { local.rotation = glam::Quat::from_array(rot); }
-                                if let Some(s) = scale { local.scale = glam::Vec3::from(s); }
+                                if let Some(pos) = position {
+                                    local.position = glam::Vec3::from(pos);
+                                }
+                                if let Some(rot) = rotation {
+                                    local.rotation = glam::Quat::from_array(rot);
+                                }
+                                if let Some(s) = scale {
+                                    local.scale = glam::Vec3::from(s);
+                                }
                             }
 
                             // Update physics if it exists
@@ -912,15 +1142,8 @@ impl GameWorld {
                     }
                     if let Some(entity) = to_delete {
                         // Call on_disable before despawn
-                        let mut script = None;
-                        if let Ok(mut comp) = self.ecs.get::<&mut DynamicScript>(entity) {
-                            script = comp.script.take();
-                        }
-                        if let Some(mut s) = script {
-                            let mut ctx = ScriptContext::new(entity, &mut self.ecs, physics, 0.0);
-                            s.on_disable(&mut ctx);
-                        }
-                        
+                        self.disable_all_scripts(physics, entity);
+
                         // Remove physics rigid body if it exists
                         if let Ok(rb_handle) = self.ecs.get::<&RigidBodyHandle>(entity) {
                             physics.remove_rigid_body(rb_handle.0);
@@ -949,14 +1172,7 @@ impl GameWorld {
                     let count = to_delete.len();
                     for entity in to_delete {
                         // Call on_disable before despawn
-                        let mut script = None;
-                        if let Ok(mut comp) = self.ecs.get::<&mut DynamicScript>(entity) {
-                            script = comp.script.take();
-                        }
-                        if let Some(mut s) = script {
-                            let mut ctx = ScriptContext::new(entity, &mut self.ecs, physics, 0.0);
-                            s.on_disable(&mut ctx);
-                        }
+                        self.disable_all_scripts(physics, entity);
                         let _ = self.ecs.despawn(entity);
                     }
                     self.loaded_chunks.clear(); // Clear chunk history too
@@ -1135,22 +1351,70 @@ impl GameWorld {
                         }
 
                         if let Some(entity) = target_entity {
-                            // Call on_disable on old script if it exists
-                            let mut old_script = None;
-                            if let Ok(mut comp) = self.ecs.get::<&mut DynamicScript>(entity) {
-                                old_script = comp.script.take();
+                            let has_script_component =
+                                self.ecs.get::<&DynamicScript>(entity).is_ok();
+
+                            if has_script_component {
+                                let mut comp = self
+                                    .ecs
+                                    .get::<&mut DynamicScript>(entity)
+                                    .expect("DynamicScript disappeared while attaching script");
+                                comp.push_named(name.clone(), script_box);
+                            } else {
+                                self.ecs
+                                    .insert_one(
+                                        entity,
+                                        DynamicScript::from_named(&name, script_box),
+                                    )
+                                    .expect("Failed to attach script");
                             }
-                            if let Some(mut s) = old_script {
-                                let mut ctx = ScriptContext::new(entity, &mut self.ecs, physics, 0.0);
-                                s.on_disable(&mut ctx);
-                            }
-                            self.ecs.insert_one(entity, DynamicScript::new(script_box)).expect("Failed to attach script");
                             info!("Attached script '{}' to entity {}", name, id);
                         } else {
                             warn!("AttachScript: No entity found with id {}", id);
                         }
                     } else {
                         warn!("AttachScript: Script '{}' not found in registry", name);
+                    }
+                }
+                SceneUpdate::SetScripts { id, names } => {
+                    let mut target_entity = None;
+                    for (entity, editor_id) in self.ecs.query::<&EditorEntityId>().iter() {
+                        if editor_id.0 == id {
+                            target_entity = Some(entity);
+                            break;
+                        }
+                    }
+
+                    if let Some(entity) = target_entity {
+                        self.disable_all_scripts(physics, entity);
+                        let _ = self.ecs.remove_one::<DynamicScript>(entity);
+
+                        let mut component = DynamicScript::empty();
+                        for name in names {
+                            let name = name.trim();
+                            if name.is_empty() {
+                                continue;
+                            }
+
+                            if let Some(script_box) = self.script_registry.create(name) {
+                                component.push_named(name.to_string(), script_box);
+                            } else {
+                                warn!("SetScripts: Script '{}' not found in registry", name);
+                            }
+                        }
+
+                        if !component.is_empty() {
+                            if let Err(err) = self.ecs.insert_one(entity, component) {
+                                warn!(
+                                    "SetScripts: Failed to attach scripts to entity {}: {:?}",
+                                    id, err
+                                );
+                            }
+                        }
+
+                        info!("SetScripts: Updated script stack for entity {}", id);
+                    } else {
+                        warn!("SetScripts: No entity found with id {}", id);
                     }
                 }
                 SceneUpdate::AttachAnimator { id, config } => {
@@ -1165,27 +1429,25 @@ impl GameWorld {
 
                     if let Some(entity) = target_entity {
                         use crate::world::animation::*;
-                        
+
                         // Create state machine from config
                         let mut state_machine = AnimationStateMachine::new();
-                        
+
                         // Add states
                         for state_cfg in &config.states {
                             state_machine.add_state(&state_cfg.name, state_cfg.clip_index);
-                            
+
                             // Automatically add a transition from ANY to this state if a trigger is provided
                             if let Some(ref trigger) = state_cfg.trigger_param {
-                                state_machine.transitions.push(
-                                    StateTransition::new(
-                                        "ANY",
-                                        &state_cfg.name,
-                                        TransitionCondition::Trigger(trigger.clone()),
-                                        0.2, // Default transition duration
-                                    )
-                                );
+                                state_machine.transitions.push(StateTransition::new(
+                                    "ANY",
+                                    &state_cfg.name,
+                                    TransitionCondition::Trigger(trigger.clone()),
+                                    0.2, // Default transition duration
+                                ));
                             }
                         }
-                        
+
                         // Add transitions
                         for trans_cfg in &config.transitions {
                             let condition: TransitionCondition = trans_cfg.condition.clone().into();
@@ -1195,10 +1457,11 @@ impl GameWorld {
                                     &trans_cfg.to_state,
                                     condition,
                                     trans_cfg.duration,
-                                ).with_priority(trans_cfg.priority)
+                                )
+                                .with_priority(trans_cfg.priority),
                             );
                         }
-                        
+
                         // Add parameters
                         for (name, param_cfg) in &config.parameters {
                             match param_cfg {
@@ -1208,17 +1471,17 @@ impl GameWorld {
                                 AnimParamConfig::Trigger => state_machine.set_trigger(name),
                             }
                         }
-                        
+
                         // Set default state
                         if !config.default_state.is_empty() {
                             state_machine.current_state = config.default_state.clone();
                         }
-                        
+
                         // Create controller
                         let mut controller = AnimatorController::new(state_machine);
                         controller.apply_root_motion = config.apply_root_motion;
                         controller.speed = config.speed;
-                        
+
                         // Attach to entity
                         let _ = self.ecs.insert_one(entity, controller);
                         info!("Attached AnimatorController to entity {} with {} states, {} transitions", 
@@ -1237,14 +1500,21 @@ impl GameWorld {
                     }
                 }
 
-                SceneUpdate::PreviewAnimationAt { id, clip_index, time } => {
+                SceneUpdate::PreviewAnimationAt {
+                    id,
+                    clip_index,
+                    time,
+                } => {
                     if let Some(entity) = self.find_by_editor_id(id) {
                         if let Ok(mut animator) = self.ecs.get::<&mut Animator>(entity) {
                             animator.play(clip_index);
                             animator.set_time(time);
                             // Set playing to false to stop automatic time updates during scrubbing
-                            animator.playing = false; 
-                            info!("Scrubbing animation clip {} on entity {} to time {}", clip_index, id, time);
+                            animator.playing = false;
+                            info!(
+                                "Scrubbing animation clip {} on entity {} to time {}",
+                                clip_index, id, time
+                            );
                         }
                     }
                 }
@@ -1265,7 +1535,7 @@ impl GameWorld {
                                 cam.active = false;
                             }
                         }
-                        
+
                         let _ = self.ecs.insert_one(entity, Camera { fov, active: true });
                         info!("Set entity {} as active camera (FOV: {})", id, fov);
                     }
@@ -1299,11 +1569,25 @@ impl GameWorld {
                         GroundPlane::new(half_extents[0], half_extents[1]),
                     ));
 
-                    let target_entity = self.ecs.query::<&EditorEntityId>().iter().find(|(_, id_comp)| id_comp.0 == id).map(|(e, _)| e);
+                    let target_entity = self
+                        .ecs
+                        .query::<&EditorEntityId>()
+                        .iter()
+                        .find(|(_, id_comp)| id_comp.0 == id)
+                        .map(|(e, _)| e);
                     if let Some(entity) = target_entity {
                         if collision_enabled {
                             // Ground is usually Environment
-                            self.attach_physics_to_entity(entity, physics, primitive, position, [0.0, 0.0, 0.0, 1.0], scale, false, layer);
+                            self.attach_physics_to_entity(
+                                entity,
+                                physics,
+                                primitive,
+                                position,
+                                [0.0, 0.0, 0.0, 1.0],
+                                scale,
+                                false,
+                                layer,
+                            );
                         }
                     }
 
@@ -1312,8 +1596,16 @@ impl GameWorld {
                         id, half_extents, collision_enabled
                     );
                 }
-                SceneUpdate::UpdateMaterial { id, color, albedo_texture, metallic, roughness } => {
-                    for (_entity, (editor_id, mat)) in self.ecs.query_mut::<(&EditorEntityId, &mut Material)>() {
+                SceneUpdate::UpdateMaterial {
+                    id,
+                    color,
+                    albedo_texture,
+                    metallic,
+                    roughness,
+                } => {
+                    for (_entity, (editor_id, mat)) in
+                        self.ecs.query_mut::<(&EditorEntityId, &mut Material)>()
+                    {
                         if editor_id.0 == id {
                             if let Some(c) = color {
                                 mat.color = c;
@@ -1343,7 +1635,7 @@ impl GameWorld {
 
                     if let Some(entity) = target_entity {
                         // Always remove existing body to ensure clean state update (layer change or disable)
-                         let mut rb_to_remove = None;
+                        let mut rb_to_remove = None;
                         if let Ok(rb_handle) = self.ecs.get::<&RigidBodyHandle>(entity) {
                             rb_to_remove = Some(rb_handle.0);
                         }
@@ -1357,11 +1649,27 @@ impl GameWorld {
                         }
 
                         if enabled {
-                            let transform = *self.ecs.get::<&Transform>(entity).expect("Entity must have transform");
-                            let primitive = if let Ok(h) = self.ecs.get::<&MeshHandle>(entity) { h.0 as u8 } else { 0 };
+                            let transform = *self
+                                .ecs
+                                .get::<&Transform>(entity)
+                                .expect("Entity must have transform");
+                            let primitive = if let Ok(h) = self.ecs.get::<&MeshHandle>(entity) {
+                                h.0 as u8
+                            } else {
+                                0
+                            };
                             // Infer dynamic. For primitives in editor, we used true unless ground (primitive 3).
-                            let is_dynamic = primitive != 3; 
-                            self.attach_physics_to_entity(entity, physics, primitive, transform.position.into(), transform.rotation.into(), transform.scale.into(), is_dynamic, layer);
+                            let is_dynamic = primitive != 3;
+                            self.attach_physics_to_entity(
+                                entity,
+                                physics,
+                                primitive,
+                                transform.position.into(),
+                                transform.rotation.into(),
+                                transform.scale.into(),
+                                is_dynamic,
+                                layer,
+                            );
                             info!("Updated collision for entity {} (Layer: {})", id, layer);
                         }
                     }
@@ -1380,13 +1688,13 @@ impl GameWorld {
                         Ok(model_scene) => {
                             // Merge meshes for rendering
                             let mut mesh = fbx_loader::merge_fbx_meshes(&model_scene);
-                            
+
                             if mesh.vertices.is_empty() {
                                 warn!("glTF file contains no mesh data for entity {}", id);
                             } else {
                                 let vert_count = mesh.vertices.len();
                                 let idx_count = mesh.indices.len();
-                                
+
                                 // Find the texture bytes for this mesh's albedo_texture
                                 if let Some(tex_name) = &mesh.albedo_texture {
                                     for texture in &model_scene.textures {
@@ -1396,7 +1704,7 @@ impl GameWorld {
                                         }
                                     }
                                 }
-                                
+
                                 // Fallback: if no texture was found by name but textures exist, use the first one
                                 if mesh.albedo.is_none() && !model_scene.textures.is_empty() {
                                     let first_texture = &model_scene.textures[0];
@@ -1428,23 +1736,22 @@ impl GameWorld {
                                 if let Some(skeleton) = model_scene.skeleton {
                                     self.ecs.insert_one(entity, skeleton).unwrap();
                                 }
-                                
+
                                 if !model_scene.animations.is_empty() {
                                     // Normally we would store these in a global registry or on the entity
                                     // For now, let's just log it
-                                    info!("glTF model {} loaded with {} animations", id, model_scene.animations.len());
+                                    info!(
+                                        "glTF model {} loaded with {} animations",
+                                        id,
+                                        model_scene.animations.len()
+                                    );
                                 }
 
                                 if collision_enabled {
                                     self.attach_physics_to_entity(
-                                        entity,
-                                        physics,
+                                        entity, physics,
                                         255, // 255 = custom mesh using its AABB
-                                        position,
-                                        rotation,
-                                        scale,
-                                        !is_static,
-                                        layer,
+                                        position, rotation, scale, !is_static, layer,
                                     );
                                 }
 
@@ -1465,10 +1772,16 @@ impl GameWorld {
                         }
                     }
                 }
-                SceneUpdate::SetRespawnSettings { enabled, y_threshold } => {
+                SceneUpdate::SetRespawnSettings {
+                    enabled,
+                    y_threshold,
+                } => {
                     self.respawn_enabled = enabled;
                     self.respawn_y = y_threshold;
-                    info!("Respawn settings updated: enabled={}, y={}", enabled, y_threshold);
+                    info!(
+                        "Respawn settings updated: enabled={}, y={}",
+                        enabled, y_threshold
+                    );
                 }
                 SceneUpdate::SpawnFbxMesh {
                     id,
@@ -1486,7 +1799,7 @@ impl GameWorld {
                             // Merge all meshes from the FBX file
                             let mut mesh = fbx_loader::merge_fbx_meshes(&fbx_scene);
                             mesh.albedo_texture = albedo_texture.clone();
-                            
+
                             if mesh.vertices.is_empty() {
                                 warn!("FBX file contains no mesh data for entity {}", id);
                             } else {
@@ -1510,14 +1823,9 @@ impl GameWorld {
 
                                 if collision_enabled {
                                     self.attach_physics_to_entity(
-                                        entity,
-                                        physics,
+                                        entity, physics,
                                         255, // 255 = custom mesh using its AABB
-                                        position,
-                                        rotation,
-                                        scale,
-                                        !is_static,
-                                        layer,
+                                        position, rotation, scale, !is_static, layer,
                                     );
                                 }
 
@@ -1542,19 +1850,31 @@ impl GameWorld {
                     // Backwards compatible: SetUiLayout sets the Hud layer and makes it visible
                     self.ui_layers.set_layer(crate::ui::UiLayer::Hud, layout);
                     self.ui_layers.show(crate::ui::UiLayer::Hud);
-                    info!("UI Layout updated (Hud layer): {} buttons, {} panels, {} texts", 
-                        self.ui_layers.get_layer(&crate::ui::UiLayer::Hud).map(|l| l.buttons.len()).unwrap_or(0),
-                        self.ui_layers.get_layer(&crate::ui::UiLayer::Hud).map(|l| l.panels.len()).unwrap_or(0),
-                        self.ui_layers.get_layer(&crate::ui::UiLayer::Hud).map(|l| l.texts.len()).unwrap_or(0)
+                    info!(
+                        "UI Layout updated (Hud layer): {} buttons, {} panels, {} texts",
+                        self.ui_layers
+                            .get_layer(&crate::ui::UiLayer::Hud)
+                            .map(|l| l.buttons.len())
+                            .unwrap_or(0),
+                        self.ui_layers
+                            .get_layer(&crate::ui::UiLayer::Hud)
+                            .map(|l| l.panels.len())
+                            .unwrap_or(0),
+                        self.ui_layers
+                            .get_layer(&crate::ui::UiLayer::Hud)
+                            .map(|l| l.texts.len())
+                            .unwrap_or(0)
                     );
                 }
                 SceneUpdate::SetUiLayer { layer, layout } => {
                     info!("Setting UI layer {:?}", layer);
-                    let should_show = matches!(layout.layer_type, 
-                        crate::ui::UiLayerType::InGameOverlay | crate::ui::UiLayerType::MainMenu);
-                    
+                    let should_show = matches!(
+                        layout.layer_type,
+                        crate::ui::UiLayerType::InGameOverlay | crate::ui::UiLayerType::MainMenu
+                    );
+
                     self.ui_layers.set_layer(layer.clone(), layout);
-                    
+
                     if should_show {
                         self.ui_layers.show(layer);
                     }
@@ -1571,23 +1891,21 @@ impl GameWorld {
                     // Load UI scene from assets/ui/{scene_path}.json
                     let path = format!("assets/ui/{}.json", scene_path);
                     match std::fs::read_to_string(&path) {
-                        Ok(data) => {
-                            match serde_json::from_str::<crate::ui::UiLayout>(&data) {
-                                Ok(layout) => {
-                                    self.ui_layers.set_layer(layer.clone(), layout);
-                                    self.ui_layers.show(layer);
-                                    info!("Loaded UI scene from {}", path);
-                                }
-                                Err(e) => warn!("Failed to parse UI scene {}: {}", path, e),
+                        Ok(data) => match serde_json::from_str::<crate::ui::UiLayout>(&data) {
+                            Ok(layout) => {
+                                self.ui_layers.set_layer(layer.clone(), layout);
+                                self.ui_layers.show(layer);
+                                info!("Loaded UI scene from {}", path);
                             }
-                        }
+                            Err(e) => warn!("Failed to parse UI scene {}: {}", path, e),
+                        },
                         Err(e) => warn!("Failed to load UI scene {}: {}", path, e),
                     }
                 }
                 SceneUpdate::MenuLoad { alias } => {
                     // Push the current menu (if any) and show the new one
                     info!("MenuLoad: Loading menu '{}'", alias);
-                    
+
                     // Check if the target menu is an IntermediateMenu - if so, hide the pause menu
                     let custom_layer = crate::ui::UiLayer::Custom(alias.clone());
                     if let Some(layout) = self.ui_layers.get_layer(&custom_layer) {
@@ -1595,7 +1913,7 @@ impl GameWorld {
                             self.ui_layers.hide(&crate::ui::UiLayer::PauseMenu);
                         }
                     }
-                    
+
                     self.menu_stack.push(&alias);
                     // Show the menu as a Custom layer
                     self.ui_layers.show(custom_layer);
@@ -1605,7 +1923,7 @@ impl GameWorld {
                     if let Some(current) = self.menu_stack.pop() {
                         info!("MenuBack: Closing menu '{}'", current);
                         self.ui_layers.hide(&crate::ui::UiLayer::Custom(current));
-                        
+
                         // If menu stack is now empty, restore the pause menu
                         if self.menu_stack.is_empty() {
                             self.ui_layers.show(crate::ui::UiLayer::PauseMenu);
@@ -1625,7 +1943,8 @@ impl GameWorld {
                 SceneUpdate::ResetPauseMenu => {
                     info!("ResetPauseMenu: Resetting pause menu to default");
                     let default_layout = crate::ui::create_default_pause_menu_layout();
-                    self.ui_layers.set_layer(crate::ui::UiLayer::PauseMenu, default_layout);
+                    self.ui_layers
+                        .set_layer(crate::ui::UiLayer::PauseMenu, default_layout);
                 }
             }
         }
@@ -1638,7 +1957,8 @@ impl GameWorld {
     /// Call this each frame to advance skeletal animations
     pub fn update_animations(&mut self, physics: &mut PhysicsWorld, dt: f32) {
         // Collect entities with Animator
-        let entities: Vec<hecs::Entity> = self.ecs
+        let entities: Vec<hecs::Entity> = self
+            .ecs
             .query::<&Animator>()
             .iter()
             .map(|(e, _)| e)
@@ -1664,12 +1984,13 @@ impl GameWorld {
 
             // 2. Update Animator (low-level playback and blending)
             let matrices = if let Ok(mut animator) = self.ecs.get::<&mut Animator>(entity) {
-                let speed_mult = if let Ok(controller) = self.ecs.get::<&AnimatorController>(entity) {
+                let speed_mult = if let Ok(controller) = self.ecs.get::<&AnimatorController>(entity)
+                {
                     controller.speed
                 } else {
                     1.0
                 };
-                
+
                 // Fetch event queue if present
                 let mut queue = self.ecs.get::<&mut AnimationEventQueue>(entity).ok();
 
@@ -1717,10 +2038,14 @@ impl GameWorld {
                                     // Alternatively, apply as velocity if preferred
                                     let p = transform.position;
                                     let r = transform.rotation;
-                                    body.set_next_kinematic_translation(rapier3d::na::Vector3::new(p.x, p.y, p.z));
-                                    body.set_next_kinematic_rotation(rapier3d::na::UnitQuaternion::from_quaternion(
-                                        rapier3d::na::Quaternion::new(r.w, r.x, r.y, r.z)
-                                    ));
+                                    body.set_next_kinematic_translation(
+                                        rapier3d::na::Vector3::new(p.x, p.y, p.z),
+                                    );
+                                    body.set_next_kinematic_rotation(
+                                        rapier3d::na::UnitQuaternion::from_quaternion(
+                                            rapier3d::na::Quaternion::new(r.w, r.x, r.y, r.z),
+                                        ),
+                                    );
                                 }
                             }
                         }
@@ -1735,7 +2060,12 @@ impl GameWorld {
         }
     }
 
-    pub fn update_logic(&mut self, physics: &mut PhysicsWorld, dt: f32, ui_events: Vec<crate::ui::UiEvent>) {
+    pub fn update_logic(
+        &mut self,
+        physics: &mut PhysicsWorld,
+        dt: f32,
+        ui_events: Vec<crate::ui::UiEvent>,
+    ) {
         // Resolve hierarchical transforms BEFORE script/physics updates if we want them to affect visibility,
         // or AFTER if we want them to reflect the latest parent movement.
         // Let's do it AFTER script/physics logic in the main loop to ensure we have the latest world positions.
@@ -1775,46 +2105,79 @@ impl GameWorld {
         self.update_agents_parallel(dt);
 
         // 2. Update Scripts
-        let entities: Vec<Entity> = self.ecs.query::<&DynamicScript>()
+        let xr_events = std::mem::take(&mut self.pending_xr_events);
+        let entities: Vec<Entity> = self
+            .ecs
+            .query::<&DynamicScript>()
             .iter()
             .map(|(e, _)| e)
             .collect();
 
         for entity in entities {
-            let (script, mut started, enabled) = if let Ok(mut s) = self.ecs.get::<&mut DynamicScript>(entity) {
-                (s.script.take(), s.started, s.enabled)
-            } else {
-                continue;
-            };
+            let script_count = self
+                .ecs
+                .get::<&DynamicScript>(entity)
+                .map(|comp| comp.scripts.len())
+                .unwrap_or(0);
 
-            if let Some(mut s) = script {
-                if enabled {
-                    // Check for animation events to dispatch
-                    let anim_events: Vec<String> = if let Ok(queue) = self.ecs.get::<&AnimationEventQueue>(entity) {
-                        queue.events.iter().map(|e| e.name.clone()).collect()
-                    } else {
-                        Vec::new()
-                    };
+            for script_index in 0..script_count {
+                let slot = if let Ok(mut comp) = self.ecs.get::<&mut DynamicScript>(entity) {
+                    comp.take_slot(script_index)
+                } else {
+                    break;
+                };
 
-                    let mut ctx = ScriptContext::new(entity, &mut self.ecs, physics, dt);
+                let Some(mut slot) = slot else {
+                    continue;
+                };
 
-                    // Dispatch animation events
-                    for event_name in anim_events {
-                        s.on_animation_event(&mut ctx, &event_name);
+                if slot.enabled {
+                    if let Some(mut s) = slot.script.take() {
+                        // Check for animation events to dispatch
+                        let anim_events: Vec<String> =
+                            if let Ok(queue) = self.ecs.get::<&AnimationEventQueue>(entity) {
+                                queue.events.iter().map(|e| e.name.clone()).collect()
+                            } else {
+                                Vec::new()
+                            };
+
+                        let xr = self.xr_input.clone();
+                        let mut ctx = ScriptContext::new_with_xr(
+                            entity,
+                            &mut self.ecs,
+                            physics,
+                            dt,
+                            xr,
+                            Some(&mut self.pending_xr_haptics),
+                        );
+
+                        if !slot.started {
+                            s.on_start(&mut ctx);
+                            s.on_enable(&mut ctx);
+                            slot.started = true;
+                        }
+                        for event in &xr_events {
+                            s.on_xr_input(&mut ctx, event);
+                        }
+                        let xr_frame = ctx.xr.clone();
+                        s.on_xr_frame(&mut ctx, &xr_frame);
+
+                        // Dispatch animation events
+                        for event_name in anim_events {
+                            s.on_animation_event(&mut ctx, &event_name);
+                        }
+
+                        s.on_fixed_update(&mut ctx);
+                        s.on_update(&mut ctx);
+                        s.on_late_update(&mut ctx);
+                        slot.script = Some(s);
                     }
-
-                    if !started {
-                        s.on_start(&mut ctx);
-                        s.on_enable(&mut ctx);
-                        started = true;
-                    }
-                    s.on_update(&mut ctx);
                 }
-                
-                // Put it back
+
                 if let Ok(mut comp) = self.ecs.get::<&mut DynamicScript>(entity) {
-                    comp.script = Some(s);
-                    comp.started = started;
+                    comp.insert_slot(script_index, slot);
+                } else {
+                    break;
                 }
             }
         }
@@ -1824,7 +2187,9 @@ impl GameWorld {
         use rayon::prelude::*;
 
         // Gather all agents and their transforms
-        let agent_data: Vec<_> = self.ecs.query_mut::<(&mut CrowdAgent, &Transform)>()
+        let agent_data: Vec<_> = self
+            .ecs
+            .query_mut::<(&mut CrowdAgent, &Transform)>()
             .into_iter()
             .map(|(e, (a, t))| (e, a.clone(), t.clone()))
             .collect();
@@ -1837,64 +2202,74 @@ impl GameWorld {
         }
 
         // Parallel update
-        let results: Vec<_> = agent_data.into_par_iter().map(|(entity, mut agent, transform)| {
-            let pos = transform.position;
-            
-            // Re-implementing the core CrowdAgent logic from scripting.rs for parallel speed
-            let mut seed = (entity.id() as u32).wrapping_mul(12345) ^ (pos.x * 100.0) as u32;
-            let mut rand = || {
-                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-                (seed as f32) / (u32::MAX as f32)
-            };
+        let results: Vec<_> = agent_data
+            .into_par_iter()
+            .map(|(entity, mut agent, transform)| {
+                let pos = transform.position;
 
-            if (pos - agent.last_pos).length() < 0.1 * dt {
-                agent.stuck_timer += dt;
-            } else {
-                agent.stuck_timer = 0.0;
-            }
-            agent.last_pos = pos;
-
-            if agent.stuck_timer > 1.5 {
-                agent.target = glam::Vec3::new((rand() - 0.5) * 60.0, pos.y, (rand() - 0.5) * 60.0);
-                agent.velocity = glam::Vec3::new(rand() - 0.5, 0.0, rand() - 0.5).normalize() * 2.0;
-                agent.stuck_timer = 0.0;
-            }
-
-            if let Some(p_pos) = player_pos {
-                if agent.state == AgentState::Fleeing && (p_pos - pos).length() < 12.0 {
-                    let away = (pos - p_pos).normalize();
-                    agent.target = pos + away * 15.0;
-                }
-            }
-
-            let to_target = agent.target - pos;
-            let dist = to_target.length();
-
-            if dist < 1.5 || agent.target.length_squared() < 0.001 {
-                agent.target = glam::Vec3::new((rand() - 0.5) * 60.0, pos.y, (rand() - 0.5) * 60.0);
-                agent.velocity = (agent.target - pos).normalize() * 0.1;
-                (entity, agent, None)
-            } else {
-                let desired = to_target.normalize() * agent.max_speed;
-                let steer_force = if agent.state == AgentState::Fleeing { 20.0 } else { 8.0 };
-                let steering = (desired - agent.velocity) * steer_force;
-
-                agent.velocity += steering * dt;
-                if agent.velocity.length() > agent.max_speed {
-                    agent.velocity = agent.velocity.normalize() * agent.max_speed;
-                }
-
-                let new_pos = pos + agent.velocity * dt;
-                let new_rot = if agent.velocity.length_squared() > 0.1 {
-                    let angle = agent.velocity.x.atan2(agent.velocity.z);
-                    glam::Quat::from_rotation_y(angle)
-                } else {
-                    transform.rotation
+                // Re-implementing the core CrowdAgent logic from scripting.rs for parallel speed
+                let mut seed = (entity.id() as u32).wrapping_mul(12345) ^ (pos.x * 100.0) as u32;
+                let mut rand = || {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    (seed as f32) / (u32::MAX as f32)
                 };
-                
-                (entity, agent, Some((new_pos, new_rot)))
-            }
-        }).collect();
+
+                if (pos - agent.last_pos).length() < 0.1 * dt {
+                    agent.stuck_timer += dt;
+                } else {
+                    agent.stuck_timer = 0.0;
+                }
+                agent.last_pos = pos;
+
+                if agent.stuck_timer > 1.5 {
+                    agent.target =
+                        glam::Vec3::new((rand() - 0.5) * 60.0, pos.y, (rand() - 0.5) * 60.0);
+                    agent.velocity =
+                        glam::Vec3::new(rand() - 0.5, 0.0, rand() - 0.5).normalize() * 2.0;
+                    agent.stuck_timer = 0.0;
+                }
+
+                if let Some(p_pos) = player_pos {
+                    if agent.state == AgentState::Fleeing && (p_pos - pos).length() < 12.0 {
+                        let away = (pos - p_pos).normalize();
+                        agent.target = pos + away * 15.0;
+                    }
+                }
+
+                let to_target = agent.target - pos;
+                let dist = to_target.length();
+
+                if dist < 1.5 || agent.target.length_squared() < 0.001 {
+                    agent.target =
+                        glam::Vec3::new((rand() - 0.5) * 60.0, pos.y, (rand() - 0.5) * 60.0);
+                    agent.velocity = (agent.target - pos).normalize() * 0.1;
+                    (entity, agent, None)
+                } else {
+                    let desired = to_target.normalize() * agent.max_speed;
+                    let steer_force = if agent.state == AgentState::Fleeing {
+                        20.0
+                    } else {
+                        8.0
+                    };
+                    let steering = (desired - agent.velocity) * steer_force;
+
+                    agent.velocity += steering * dt;
+                    if agent.velocity.length() > agent.max_speed {
+                        agent.velocity = agent.velocity.normalize() * agent.max_speed;
+                    }
+
+                    let new_pos = pos + agent.velocity * dt;
+                    let new_rot = if agent.velocity.length_squared() > 0.1 {
+                        let angle = agent.velocity.x.atan2(agent.velocity.z);
+                        glam::Quat::from_rotation_y(angle)
+                    } else {
+                        transform.rotation
+                    };
+
+                    (entity, agent, Some((new_pos, new_rot)))
+                }
+            })
+            .collect();
 
         // Apply results
         for (entity, agent, transform_update) in results {
@@ -1910,7 +2285,13 @@ impl GameWorld {
         }
     }
 
-    fn dispatch_collision_event(&mut self, physics: &mut PhysicsWorld, c1: rapier3d::prelude::ColliderHandle, c2: rapier3d::prelude::ColliderHandle, started: bool) {
+    fn dispatch_collision_event(
+        &mut self,
+        physics: &mut PhysicsWorld,
+        c1: rapier3d::prelude::ColliderHandle,
+        c2: rapier3d::prelude::ColliderHandle,
+        started: bool,
+    ) {
         let e1 = self.get_entity_from_collider(physics, c1);
         let e2 = self.get_entity_from_collider(physics, c2);
 
@@ -1928,137 +2309,132 @@ impl GameWorld {
         }
     }
 
-    fn get_entity_from_collider(&self, physics: &PhysicsWorld, handle: rapier3d::prelude::ColliderHandle) -> Option<Entity> {
+    fn get_entity_from_collider(
+        &self,
+        physics: &PhysicsWorld,
+        handle: rapier3d::prelude::ColliderHandle,
+    ) -> Option<Entity> {
         let collider = physics.collider_set.get(handle)?;
         let rb_handle = collider.parent()?;
         let rb = physics.rigid_body_set.get(rb_handle)?;
         let bits = rb.user_data as u64;
-        if bits == 0 { 
+        if bits == 0 {
             // println!("DEBUG: Collider {:?} has no user_data", handle);
-            return None; 
+            return None;
         }
         let entity = Entity::from_bits(bits);
         // println!("DEBUG: Collider {:?} mapped to entity {:?}", handle, entity);
         entity
     }
 
-    fn call_collision_on_script(&mut self, physics: &mut PhysicsWorld, entity: Entity, other: Entity, started: bool) {
-        let script = if let Ok(mut s) = self.ecs.get::<&mut DynamicScript>(entity) {
-            s.script.take()
-        } else {
-            None
-        };
-
-        if let Some(mut s) = script {
-            {
-                let mut ctx = ScriptContext::new(entity, &mut self.ecs, physics, 0.0);
-                if started {
-                    s.on_collision_start(&mut ctx, other);
-                } else {
-                    s.on_collision_end(&mut ctx, other);
-                }
+    fn call_collision_on_script(
+        &mut self,
+        physics: &mut PhysicsWorld,
+        entity: Entity,
+        other: Entity,
+        started: bool,
+    ) {
+        self.call_each_script(physics, entity, 0.0, |script, ctx| {
+            if started {
+                script.on_collision_start(ctx, other);
+            } else {
+                script.on_collision_end(ctx, other);
             }
-            if let Ok(mut comp) = self.ecs.get::<&mut DynamicScript>(entity) {
-                comp.script = Some(s);
-            }
-        }
+        });
     }
 
     fn dispatch_ui_event(&mut self, physics: &mut PhysicsWorld, event: &crate::ui::UiEvent) {
         // First, check if callback is a built-in engine command
         let crate::ui::UiEvent::ButtonClicked { callback, .. } = event;
         // Parse menu_load("alias") pattern
-            if callback.starts_with("menu_load(") && callback.ends_with(")") {
-                let inner = &callback[10..callback.len()-1];
-                // Extract alias from quotes (single or double)
-                let alias = inner.trim().trim_matches(|c| c == '"' || c == '\'');
-                if !alias.is_empty() {
-                    info!("Built-in menu_load: Loading menu '{}'", alias);
-                    
-                    // Special case: "main" or "pause" means go back to the pause menu
-                    if alias == "main" || alias == "pause" {
-                        info!("menu_load: '{}' -> showing PauseMenu", alias);
-                        // Hide all intermediate menus and clear the stack
-                        while let Some(current) = self.menu_stack.pop() {
-                            self.ui_layers.hide(&crate::ui::UiLayer::Custom(current));
-                        }
-                        // Show the pause menu
-                        self.ui_layers.show(crate::ui::UiLayer::PauseMenu);
-                        // Signal main.rs to release cursor (we're returning to pause menu)
-                        self.cursor_should_release = true;
-                        return;
+        if callback.starts_with("menu_load(") && callback.ends_with(")") {
+            let inner = &callback[10..callback.len() - 1];
+            // Extract alias from quotes (single or double)
+            let alias = inner.trim().trim_matches(|c| c == '"' || c == '\'');
+            if !alias.is_empty() {
+                info!("Built-in menu_load: Loading menu '{}'", alias);
+
+                // Special case: "main" or "pause" means go back to the pause menu
+                if alias == "main" || alias == "pause" {
+                    info!("menu_load: '{}' -> showing PauseMenu", alias);
+                    // Hide all intermediate menus and clear the stack
+                    while let Some(current) = self.menu_stack.pop() {
+                        self.ui_layers.hide(&crate::ui::UiLayer::Custom(current));
                     }
-                    
-                    // Check if the target menu is an IntermediateMenu - if so, hide the pause menu
-                    // so the intermediate menu appears on its own (not overlayed)
-                    let custom_layer = crate::ui::UiLayer::Custom(alias.to_string());
-                    if let Some(layout) = self.ui_layers.get_layer(&custom_layer) {
-                        info!("menu_load: Found layer '{}' with type {:?}", alias, layout.layer_type);
-                        if layout.layer_type == crate::ui::UiLayerType::IntermediateMenu {
-                            // Hide the pause menu while the intermediate menu is shown
-                            info!("menu_load: Hiding PauseMenu for IntermediateMenu");
-                            self.ui_layers.hide(&crate::ui::UiLayer::PauseMenu);
-                        }
-                    } else {
-                        info!("menu_load: Layer '{}' NOT FOUND in ui_layers", alias);
+                    // Show the pause menu
+                    self.ui_layers.show(crate::ui::UiLayer::PauseMenu);
+                    // Signal main.rs to release cursor (we're returning to pause menu)
+                    self.cursor_should_release = true;
+                    return;
+                }
+
+                // Check if the target menu is an IntermediateMenu - if so, hide the pause menu
+                // so the intermediate menu appears on its own (not overlayed)
+                let custom_layer = crate::ui::UiLayer::Custom(alias.to_string());
+                if let Some(layout) = self.ui_layers.get_layer(&custom_layer) {
+                    info!(
+                        "menu_load: Found layer '{}' with type {:?}",
+                        alias, layout.layer_type
+                    );
+                    if layout.layer_type == crate::ui::UiLayerType::IntermediateMenu {
+                        // Hide the pause menu while the intermediate menu is shown
+                        info!("menu_load: Hiding PauseMenu for IntermediateMenu");
+                        self.ui_layers.hide(&crate::ui::UiLayer::PauseMenu);
                     }
-                    
-                    self.menu_stack.push(alias);
-                    self.ui_layers.show(custom_layer);
-                    info!("menu_load: Showing layer '{}', menu_stack depth: {}", alias, self.menu_stack.depth());
-                    return; // Don't pass to scripts
+                } else {
+                    info!("menu_load: Layer '{}' NOT FOUND in ui_layers", alias);
+                }
+
+                self.menu_stack.push(alias);
+                self.ui_layers.show(custom_layer);
+                info!(
+                    "menu_load: Showing layer '{}', menu_stack depth: {}",
+                    alias,
+                    self.menu_stack.depth()
+                );
+                return; // Don't pass to scripts
+            }
+        }
+        // Parse menu_back() pattern
+        if callback == "menu_back()" || callback == "menu_back" {
+            if let Some(current) = self.menu_stack.pop() {
+                info!("Built-in menu_back: Closing menu '{}'", current);
+                self.ui_layers.hide(&crate::ui::UiLayer::Custom(current));
+
+                // If menu stack is now empty and we're still paused, restore the pause menu
+                if self.menu_stack.is_empty() {
+                    self.ui_layers.show(crate::ui::UiLayer::PauseMenu);
+                    self.cursor_should_release = true;
                 }
             }
-            // Parse menu_back() pattern
-            if callback == "menu_back()" || callback == "menu_back" {
-                if let Some(current) = self.menu_stack.pop() {
-                    info!("Built-in menu_back: Closing menu '{}'", current);
-                    self.ui_layers.hide(&crate::ui::UiLayer::Custom(current));
-                    
-                    // If menu stack is now empty and we're still paused, restore the pause menu
-                    if self.menu_stack.is_empty() {
-                        self.ui_layers.show(crate::ui::UiLayer::PauseMenu);
-                        self.cursor_should_release = true;
-                    }
-                }
-                return;
-            }
-            // Parse resume() pattern - unpause the game
-            if callback == "resume()" || callback == "resume" {
-                // This would require passing state back to main loop - for now just hide pause menu
-                info!("Built-in resume: Player wants to resume game");
-                // The pause state is managed in main.rs, but we can at least hide the menu
-                return;
-            }
-            // Parse quit() pattern - exit the game
-            if callback == "quit()" || callback == "quit" {
-                info!("Built-in quit: Player wants to quit game");
-                // Quit is handled in main.rs via the callback check - just return here
-                return;
-            }
-        
+            return;
+        }
+        // Parse resume() pattern - unpause the game
+        if callback == "resume()" || callback == "resume" {
+            // This would require passing state back to main loop - for now just hide pause menu
+            info!("Built-in resume: Player wants to resume game");
+            // The pause state is managed in main.rs, but we can at least hide the menu
+            return;
+        }
+        // Parse quit() pattern - exit the game
+        if callback == "quit()" || callback == "quit" {
+            info!("Built-in quit: Player wants to quit game");
+            // Quit is handled in main.rs via the callback check - just return here
+            return;
+        }
+
         // Then pass to scripts for custom callbacks
-        let entities: Vec<Entity> = self.ecs.query::<&DynamicScript>()
+        let entities: Vec<Entity> = self
+            .ecs
+            .query::<&DynamicScript>()
             .iter()
             .map(|(e, _)| e)
             .collect();
 
         for entity in entities {
-            let script = if let Ok(mut s) = self.ecs.get::<&mut DynamicScript>(entity) {
-                s.script.take()
-            } else {
-                None
-            };
-
-            if let Some(mut s) = script {
-                {
-                    let mut ctx = ScriptContext::new(entity, &mut self.ecs, physics, 0.0);
-                    s.on_ui_event(&mut ctx, event);
-                }
-                if let Ok(mut comp) = self.ecs.get::<&mut DynamicScript>(entity) {
-                    comp.script = Some(s);
-                }
-            }
+            self.call_each_script(physics, entity, 0.0, |script, ctx| {
+                script.on_ui_event(ctx, event);
+            });
         }
     }
 
@@ -2080,7 +2456,7 @@ impl GameWorld {
         layer: u32,
     ) {
         let entity_bits = entity.to_bits().get() as u128;
-        
+
         // Determine collision mask based on layer
         // Props (Cubes) should not collide with Characters
         let filter = if layer == LAYER_PROP {
@@ -2107,7 +2483,14 @@ impl GameWorld {
             }
             1 => {
                 // Sphere
-                physics.add_sphere_rigid_body(entity_bits, position, scale[0] * 0.5, is_dynamic, layer, filter)
+                physics.add_sphere_rigid_body(
+                    entity_bits,
+                    position,
+                    scale[0] * 0.5,
+                    is_dynamic,
+                    layer,
+                    filter,
+                )
             }
             2 | 5 => {
                 // Cylinder or Cone (as cylinder)
@@ -2137,7 +2520,7 @@ impl GameWorld {
                 // Custom Mesh: Use its AABB to create a box collider
                 let mut half_extents = [scale[0] * 0.5, scale[1] * 0.5, scale[2] * 0.5];
                 let mut y_offset = 0.0;
-                
+
                 if let Ok(mesh) = self.ecs.get::<&Mesh>(entity) {
                     let min = glam::Vec3::from(mesh.aabb_min);
                     let max = glam::Vec3::from(mesh.aabb_max);
@@ -2147,12 +2530,15 @@ impl GameWorld {
                         extent.y * scale[1] * 0.5,
                         extent.z * scale[2] * 0.5,
                     ];
-                    
+
                     // If normalization is Base-Origin, the bottom is at Y=0 and top at Y=1 (roughly)
                     // The Rapier box is centered at its origin, so we need to offset it UP by half-height
                     // to match the visual mesh which starts at 0 and goes UP.
                     y_offset = half_extents[1];
-                    info!("Custom mesh physics: half_extents={:?}, y_offset={}", half_extents, y_offset);
+                    info!(
+                        "Custom mesh physics: half_extents={:?}, y_offset={}",
+                        half_extents, y_offset
+                    );
                 }
 
                 physics.add_box_rigid_body_with_offset(
@@ -2191,9 +2577,14 @@ impl GameWorld {
         let _ = self.ecs.insert_one(entity, RigidBodyHandle(rb_handle));
     }
 
-    fn calculate_chunk_entities(&self, cx: i32, cz: i32, size: f32) -> Vec<(Transform, MeshHandle, Material)> {
+    fn calculate_chunk_entities(
+        &self,
+        cx: i32,
+        cz: i32,
+        size: f32,
+    ) -> Vec<(Transform, MeshHandle, Material)> {
         let mut entities = Vec::new();
-        
+
         // Skip center chunks (clear spawn area)
         if cx.abs() <= 1 && cz.abs() <= 1 {
             return entities;
@@ -2266,11 +2657,17 @@ pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
     for (model_idx, model) in models.iter().enumerate() {
         let mesh = &model.mesh;
         let base_vertex_idx = all_vertices.len() as u32;
-        
+
         let vertex_count = mesh.positions.len() / 3;
         let has_normals = mesh.normals.len() >= vertex_count * 3;
-        info!("  Model {} '{}': {} vertices, {} indices, has_normals: {}", 
-            model_idx, model.name, vertex_count, mesh.indices.len(), has_normals);
+        info!(
+            "  Model {} '{}': {} vertices, {} indices, has_normals: {}",
+            model_idx,
+            model.name,
+            vertex_count,
+            mesh.indices.len(),
+            has_normals
+        );
 
         // First pass: create vertices with placeholder normals if needed
         for i in 0..vertex_count {
@@ -2321,27 +2718,32 @@ pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
     // If no normals were provided, compute face normals and accumulate to vertices
     let needs_normals = all_vertices.iter().any(|v| v.normal == [0.0, 0.0, 0.0]);
     if needs_normals && all_indices.len() >= 3 {
-        info!("Computing face normals for {} triangles", all_indices.len() / 3);
-        
+        info!(
+            "Computing face normals for {} triangles",
+            all_indices.len() / 3
+        );
+
         // Accumulate face normals to vertices
         for tri in all_indices.chunks(3) {
-            if tri.len() < 3 { continue; }
+            if tri.len() < 3 {
+                continue;
+            }
             let i0 = tri[0] as usize;
             let i1 = tri[1] as usize;
             let i2 = tri[2] as usize;
-            
+
             if i0 >= all_vertices.len() || i1 >= all_vertices.len() || i2 >= all_vertices.len() {
                 continue;
             }
-            
+
             let p0 = glam::Vec3::from(all_vertices[i0].position);
             let p1 = glam::Vec3::from(all_vertices[i1].position);
             let p2 = glam::Vec3::from(all_vertices[i2].position);
-            
+
             let edge1 = p1 - p0;
             let edge2 = p2 - p0;
             let face_normal = edge1.cross(edge2);
-            
+
             // Accumulate (will normalize later)
             for &idx in &[i0, i1, i2] {
                 let v = &mut all_vertices[idx];
@@ -2350,7 +2752,7 @@ pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
                 v.normal[2] += face_normal.z;
             }
         }
-        
+
         // Normalize accumulated normals
         for v in &mut all_vertices {
             let n = glam::Vec3::from(v.normal);
@@ -2369,22 +2771,27 @@ pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
     if !all_vertices.is_empty() {
         let mut min = glam::Vec3::splat(f32::MAX);
         let mut max = glam::Vec3::splat(f32::MIN);
-        
+
         for v in &all_vertices {
             let p = glam::Vec3::from(v.position);
             min = min.min(p);
             max = max.max(p);
         }
-        
+
         let center = (min + max) * 0.5;
         let extent = max - min;
         let max_extent = extent.x.max(extent.y).max(extent.z);
-        
+
         if max_extent > 0.0001 {
             let scale = 1.0 / max_extent; // Normalize to 1 unit
-            
-            info!("Normalizing mesh (Base-Origin): min_y={}, center_xz={:?}, scale={}", min.y, (center.x, center.z), scale);
-            
+
+            info!(
+                "Normalizing mesh (Base-Origin): min_y={}, center_xz={:?}, scale={}",
+                min.y,
+                (center.x, center.z),
+                scale
+            );
+
             for v in &mut all_vertices {
                 let p = glam::Vec3::from(v.position);
                 // Center on X and Z, align bottom of Y to 0
@@ -2403,23 +2810,23 @@ pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
     let needs_uvs = all_vertices.iter().all(|v| v.uv == [0.0, 0.0]);
     if needs_uvs && !all_vertices.is_empty() {
         info!("Generating planar UV coordinates for mesh without UVs");
-        
+
         // Find bounds of normalized mesh for proper UV mapping
         let mut min_x = f32::MAX;
         let mut max_x = f32::MIN;
         let mut min_y = f32::MAX;
         let mut max_y = f32::MIN;
-        
+
         for v in &all_vertices {
             min_x = min_x.min(v.position[0]);
             max_x = max_x.max(v.position[0]);
             min_y = min_y.min(v.position[1]);
             max_y = max_y.max(v.position[1]);
         }
-        
+
         let range_x = (max_x - min_x).max(0.0001);
         let range_y = (max_y - min_y).max(0.0001);
-        
+
         // Map normalized positions to UV [0, 1]
         for v in &mut all_vertices {
             // X position -> U coordinate
@@ -2428,11 +2835,15 @@ pub fn load_obj_from_bytes(data: &[u8]) -> anyhow::Result<Mesh> {
             let v_coord = 1.0 - (v.position[1] - min_y) / range_y;
             v.uv = [u, v_coord];
         }
-        
+
         info!("Generated UVs for {} vertices", all_vertices.len());
     }
 
-    info!("OBJ total: {} vertices, {} indices", all_vertices.len(), all_indices.len());
+    info!(
+        "OBJ total: {} vertices, {} indices",
+        all_vertices.len(),
+        all_indices.len()
+    );
 
     // Final bounds check for Mesh struct
     let mut aabb_min = [0.0, 0.0, 0.0];
@@ -2571,9 +2982,9 @@ pub fn create_primitive(ptype: u8) -> Mesh {
             // Plane (XZ Quad)
             // Facing Up (Normal 0,1,0)
             let off = vertices.len() as u32;
-            vertices.push(make_vert([-0.5, 0.0, 0.5], [0.0, 1.0, 0.0], [0.0, 0.0]));  // BL
-            vertices.push(make_vert([0.5, 0.0, 0.5], [0.0, 1.0, 0.0], [1.0, 0.0]));   // BR
-            vertices.push(make_vert([0.5, 0.0, -0.5], [0.0, 1.0, 0.0], [1.0, 1.0]));  // TR
+            vertices.push(make_vert([-0.5, 0.0, 0.5], [0.0, 1.0, 0.0], [0.0, 0.0])); // BL
+            vertices.push(make_vert([0.5, 0.0, 0.5], [0.0, 1.0, 0.0], [1.0, 0.0])); // BR
+            vertices.push(make_vert([0.5, 0.0, -0.5], [0.0, 1.0, 0.0], [1.0, 1.0])); // TR
             vertices.push(make_vert([-0.5, 0.0, -0.5], [0.0, 1.0, 0.0], [0.0, 1.0])); // TL
             indices.extend_from_slice(&[off, off + 1, off + 2, off + 2, off + 3, off]);
         }
@@ -2695,5 +3106,29 @@ pub fn create_primitive(ptype: u8) -> Mesh {
         decoded_albedo: None,
         decoded_normal: None,
         decoded_mr: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoopScript;
+
+    impl FuckScript for NoopScript {}
+
+    #[test]
+    fn dynamic_script_can_stack_multiple_scripts() {
+        let mut component = DynamicScript::from_named("First", Box::new(NoopScript));
+        component.push_named("Second", Box::new(NoopScript));
+
+        assert_eq!(component.scripts.len(), 2);
+        assert_eq!(component.scripts[0].name, "First");
+        assert_eq!(component.scripts[1].name, "Second");
+
+        let slot = component.take_slot(0).expect("first script slot exists");
+        assert_eq!(slot.name, "First");
+        component.insert_slot(0, slot);
+        assert_eq!(component.scripts[0].name, "First");
     }
 }

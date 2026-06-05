@@ -3807,6 +3807,7 @@ dependencies = [
  "async-lock 3.4.0",
  "bincode",
  "bytemuck",
+ "crossbeam-channel",
  "eframe",
  "env_logger",
  "fontdue",

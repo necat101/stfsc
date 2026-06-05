@@ -67,23 +67,33 @@ impl BundledProject {
         // info!("BundledProject::load() - asset loading requires AndroidApp context");
         None
     }
-    
+
     /// Load bundled project with asset manager from AndroidApp
     #[cfg(target_os = "android")]
     pub fn load_with_asset_manager(&mut self, asset_manager: &ndk::asset::AssetManager) {
         // Try to open the bundle manifest
-        if let Some(mut manifest_asset) = asset_manager.open(&std::ffi::CString::new("bundle/project.json").unwrap()) {
+        if let Some(mut manifest_asset) =
+            asset_manager.open(&std::ffi::CString::new("bundle/project.json").unwrap())
+        {
             if let Ok(manifest_bytes) = manifest_asset.buffer() {
-                if let Ok(manifest) = serde_json::from_slice::<BundledProjectManifest>(manifest_bytes) {
+                if let Ok(manifest) =
+                    serde_json::from_slice::<BundledProjectManifest>(manifest_bytes)
+                {
                     info!("Loaded bundled project: {}", manifest.name);
                     self.manifest = manifest.clone();
-                    
+
                     // Load scene data
                     for scene_name in &manifest.scenes {
-                        let scene_path = std::ffi::CString::new(format!("bundle/scenes/{}", scene_name)).unwrap();
+                        let scene_path =
+                            std::ffi::CString::new(format!("bundle/scenes/{}", scene_name))
+                                .unwrap();
                         if let Some(mut scene_asset) = asset_manager.open(&scene_path) {
                             if let Ok(data) = scene_asset.buffer() {
-                                info!("Loaded bundled scene: {} ({} bytes)", scene_name, data.len());
+                                info!(
+                                    "Loaded bundled scene: {} ({} bytes)",
+                                    scene_name,
+                                    data.len()
+                                );
                                 self.scene_data.insert(scene_name.clone(), data.to_vec());
                             }
                         }
@@ -91,10 +101,15 @@ impl BundledProject {
 
                     // Load models
                     for model_path in &manifest.models {
-                        let path = std::ffi::CString::new(format!("bundle/models/{}", model_path)).unwrap();
+                        let path = std::ffi::CString::new(format!("bundle/models/{}", model_path))
+                            .unwrap();
                         if let Some(mut model_asset) = asset_manager.open(&path) {
                             if let Ok(data) = model_asset.buffer() {
-                                info!("Loaded bundled model: {} ({} bytes)", model_path, data.len());
+                                info!(
+                                    "Loaded bundled model: {} ({} bytes)",
+                                    model_path,
+                                    data.len()
+                                );
                                 self.assets.insert(model_path.clone(), data.to_vec());
                             }
                         }
@@ -102,10 +117,16 @@ impl BundledProject {
 
                     // Load textures
                     for texture_path in &manifest.textures {
-                        let path = std::ffi::CString::new(format!("bundle/textures/{}", texture_path)).unwrap();
+                        let path =
+                            std::ffi::CString::new(format!("bundle/textures/{}", texture_path))
+                                .unwrap();
                         if let Some(mut texture_asset) = asset_manager.open(&path) {
                             if let Ok(data) = texture_asset.buffer() {
-                                info!("Loaded bundled texture: {} ({} bytes)", texture_path, data.len());
+                                info!(
+                                    "Loaded bundled texture: {} ({} bytes)",
+                                    texture_path,
+                                    data.len()
+                                );
                                 self.assets.insert(texture_path.clone(), data.to_vec());
                             }
                         }
@@ -114,7 +135,7 @@ impl BundledProject {
             }
         }
     }
-    
+
     /// Non-Android stub - bundling only supported on Android for now
     #[cfg(not(target_os = "android"))]
     pub fn load() -> Option<Self> {
@@ -123,10 +144,10 @@ impl BundledProject {
         if !manifest_path.exists() {
             return None;
         }
-        
+
         let manifest_bytes = std::fs::read(manifest_path).ok()?;
         let manifest: BundledProjectManifest = serde_json::from_slice(&manifest_bytes).ok()?;
-        
+
         let mut scene_data = HashMap::new();
         for scene_name in &manifest.scenes {
             let scene_path = format!("assets/bundle/scenes/{}", scene_name);
@@ -150,14 +171,14 @@ impl BundledProject {
                 assets.insert(texture_path.clone(), data);
             }
         }
-        
+
         Some(BundledProject {
             manifest,
             scene_data,
             assets,
         })
     }
-    
+
     /// Get the startup scene data
     pub fn get_startup_scene_data(&self) -> Option<&Vec<u8>> {
         self.scene_data.get(&self.manifest.startup_scene)
