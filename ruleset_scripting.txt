@@ -1,95 +1,290 @@
 # STFSC Engine: "Fuck Script" Ruleset & Technical Guide
 
-This document serves as a guide for future AI agents and developers working with the STFSC engine's scripting system.
+This document is for future AI agents and developers working with the STFSC
+engine scripting system.
 
-
-This is where we get Intimate with the engine, hence the name "Fuck Script" :3
+This is where we get intimate with the engine, hence the name "Fuck Script" :3
 
 ## 1. System Overview
-"Fuck Scripts" (trait `FuckScript`) are the primary way to define dynamic entity behaviors in Rust. They are integrated into the engine's `hecs` ECS.
 
-## 2. Core Architecture
-- **Trait**: `FuckScript` defined in `src/world/scripting.rs`.
-- **Methods**:
-    - `on_start(&mut self, ctx: &mut ScriptContext)`: Called when the script first runs.
-    - `on_update(&mut self, ctx: &mut ScriptContext)`: Called every logic frame.
-    - `on_enable(&mut self, ctx: &mut ScriptContext)`: Called when the script/entity is enabled.
-    - `on_disable(&mut self, ctx: &mut ScriptContext)`: Called when disabled or removed (cleanup).
-    - `on_fixed_update(&mut self, ctx: &mut ScriptContext)`: Called on the fixed game-logic tick before `on_update`.
-    - `on_late_update(&mut self, ctx: &mut ScriptContext)`: Called after `on_update`, useful for XR pose followers.
-    - `on_collision_start(&mut self, ctx: &mut ScriptContext, other: Entity)`: Collision begins.
-    - `on_collision_end(&mut self, ctx: &mut ScriptContext, other: Entity)`: Collision ends.
-    - `on_trigger_start(&mut self, ctx: &mut ScriptContext, other: Entity)`: Trigger volume overlap starts.
-    - `on_xr_frame(&mut self, ctx: &mut ScriptContext, xr: &XrInputSnapshot)`: Called with the latest HMD/controller snapshot.
-    - `on_xr_input(&mut self, ctx: &mut ScriptContext, event: &XrInputEvent)`: Called for XR action/button edges and analog changes.
-- **ScriptContext Helpers**:
-    - `get_component<T>()`: Get a read-only ref to a component.
-    - `get_component_mut<T>()`: Get a mutable ref to a component.
-    - `transform()` / `transform_mut()`: Quick access to the entity's transform.
-    - `despawn_self()`: Safely remove the current entity from the world.
-    - `head_pose()`, `controller(hand)`, `xr_pose(space)`: Query tracked XR poses.
-    - `action_pressed(name)`, `action_just_pressed(name)`, `action_value(name)`: Query abstract XR actions.
-    - `request_haptic(hand, amplitude, duration_seconds)`: Queue a platform haptic pulse.
-    - `track_transform_to_xr_pose(space, position_offset, rotation_offset)`: Attach an entity transform to an XR pose.
+"Fuck Scripts" are dynamic entity behaviors built around the Rust trait
+`FuckScript` in `src/world/scripting.rs`. Runtime scripts are native Rust
+objects stored in the ECS as boxed trait objects.
 
-## 3. ECS Integration
-- **DynamicScript Component**: Holds the script in an `Option<Box<dyn FuckScript>>`.
-- **Logic Thread**: `GameWorld::update_logic(dt)` iterates over `DynamicScript` components.
-- **Safety Pattern (The Take Pattern)**:
-    To allow scripts to mutably borrow the ECS world while they are being updated, we MUST use the `take()` pattern:
-    1. `Option::take()` the script from the `DynamicScript` component.
-    2. Call `on_update` with a `ScriptContext` that borrows the world.
-    3. Put the script back into the component.
-    *Failure to do this will result in borrow checker errors (E0502).*
+The editor supports multiple script components on a single object. Keep the
+preset scripts, but allow users to stack, edit, remove, disable, and add custom
+scripts.
 
-## 4. Player Tracking
-- **Player Marker**: A `Player` component exists in the ECS. 
-- **Platform Sync**: The engine (in `main.rs` and `lib.rs`) automatically spawns a `Player` entity and syncs its `Transform` to the camera/headset pose every frame.
-- **Accessing Player**: Use a query to find the player position in scripts:
-  ```rust
-  for (_e, (t, _p)) in ctx.world.query::<(&Transform, &Player)>().iter() {
-      let player_pos = t.position;
-      // ... logic
-  }
-  ```
+Hard rule: an entity may have at most `MAX_SCRIPTS_PER_ENTITY == 32` script
+components. This constant lives in `src/project/scene.rs` and is enforced by
+scene metadata, the editor, and `DynamicScript`.
 
-## 5. Built-in Script Archetypes
-- **TestBounce**: Simple oscillating movement.
-- **CrowdAgent**: Standard NPC movement with target seeking, steering, and **Stuck Detection** (picks new target if stationary for 1.5s).
-- **PoliceAgent**: Chases the player within a 30m radius using steering.
-- **TrafficAI**: Vehicle AI that handles physics-based suspensions and uses raycasts (5m) to **Stop for Obstacles** or other cars.
-- **WeaponNPC**: Basic combat logic that makes the entity rotate smoothly to face the player.
-- **HeadAnchor / LeftHandAnchor / RightHandAnchor / LeftAimAnchor / RightAimAnchor**: Follow tracked XR poses.
-- **TriggerHaptics**: Test script that pulses the active controller when its trigger crosses the press threshold.
+## 2. Core Runtime Trait
 
-## 6. Registration & Deployment
-- **ScriptRegistry**: Maps string names to script constructors in `GameWorld::new()`.
-- **Deployment**: The editor sends `SceneUpdate::AttachScript { id, name }`. Ensure new script names are registered in `src/world/mod.rs`.
+Implement native scripts by implementing:
 
-## 7. Scripting Standards
-- Scripts should be `Send + Sync`.
-- Avoid heavy allocations inside `on_update`.
-- For movements, prefer updating the `Transform` position or applying forces to a `RigidBodyHandle` if the entity is physics-enabled.
+```rust
+pub trait FuckScript: Send + Sync {
+    fn on_start(&mut self, _ctx: &mut ScriptContext) {}
+    fn on_update(&mut self, _ctx: &mut ScriptContext) {}
+    fn on_fixed_update(&mut self, _ctx: &mut ScriptContext) {}
+    fn on_late_update(&mut self, _ctx: &mut ScriptContext) {}
+    fn on_enable(&mut self, _ctx: &mut ScriptContext) {}
+    fn on_disable(&mut self, _ctx: &mut ScriptContext) {}
+    fn on_collision_start(&mut self, _ctx: &mut ScriptContext, _other: Entity) {}
+    fn on_collision_end(&mut self, _ctx: &mut ScriptContext, _other: Entity) {}
+    fn on_trigger_start(&mut self, _ctx: &mut ScriptContext, _other: Entity) {}
+    fn on_trigger_end(&mut self, _ctx: &mut ScriptContext, _other: Entity) {}
+    fn on_player_respawn(&mut self, _ctx: &mut ScriptContext) {}
+    fn on_ui_event(&mut self, _ctx: &mut ScriptContext, _event: &crate::ui::UiEvent) {}
+    fn on_animation_event(&mut self, _ctx: &mut ScriptContext, _event_name: &str) {}
+    fn on_xr_frame(&mut self, _ctx: &mut ScriptContext, _xr: &XrInputSnapshot) {}
+    fn on_xr_input(&mut self, _ctx: &mut ScriptContext, _event: &XrInputEvent) {}
+}
+```
 
-## 9. Advanced Features (Scripting Update v2)
+Use only the hooks you need. Empty defaults are intentional.
 
-### Collision & Trigger Events
-Scripts can now react to physics interactions.
-- **`on_collision_start`**: Triggered the frame a collision begins.
-- **`on_collision_end`**: Triggered the frame a collision ends.
-- **Mapping**: The engine uses `RigidBody` user-data to map handles back to ECS `Entity` IDs. Ensure any manually spawned physics entities set their `user_data` to `entity.to_bits().get() as u128`.
+## 3. ScriptContext Helpers
 
-### Component Access
-Use the `ScriptContext` helpers for ergonomic ECS manipulation:
-- `ctx.get_component::<T>()` -> `Option<Ref<T>>`
-- `ctx.get_component_mut::<T>()` -> `Option<RefMut<T>>`
-- `ctx.despawn_self()`: Deletes the entity the script is attached to.
+Use `ScriptContext` instead of reaching around engine internals.
 
-### Lifecycle Flow
-1. **`on_start`**: Initialization.
-2. **`on_enable`**: Activation (can be called multiple times if toggle-able).
-3. **`on_update`**: Per-frame logic.
-4. **`on_disable`**: Cleanup/Deactivation (called on entity deletion or script removal).
+- `get_component<T>()`: read-only component access.
+- `get_component_mut<T>()`: mutable component access.
+- `transform()` / `transform_mut()`: quick access to this entity's `Transform`.
+- `despawn_self()`: remove the current entity.
+- `head_pose()`, `controller(hand)`, `xr_pose(space)`: tracked XR poses.
+- `action_pressed(name)`, `action_just_pressed(name)`, `action_value(name)`: abstract XR actions.
+- `request_haptic(hand, amplitude, duration_seconds)`: queue a haptic pulse.
+- `track_transform_to_xr_pose(space, position_offset, rotation_offset)`: make an entity follow an XR pose.
+
+## 4. Scene Metadata Model
+
+`SceneEntity` has legacy script fields plus the new canonical component stack:
+
+- `script: Option<String>`: legacy first script name.
+- `scripts: Vec<String>`: legacy/runtime enabled script names.
+- `script_components: Vec<ScriptComponent>`: canonical editable script slots.
+
+Future agents should prefer `script_components` when editing scene files. Keep
+the legacy fields in sync by calling `sync_legacy_script_fields()` after
+changing components.
+
+`ScriptComponent` fields:
+
+- `name`: runtime script name. For presets this must match the registry name.
+- `enabled`: disabled slots are preserved in the editor but omitted from runtime `SetScripts`.
+- `source`: editable cache source shown in the inspector.
+- `compile_mode`: `BuiltinNative`, `EditableNativeCache`, or `CustomNativeCache`.
+- `cache_key`: optional future cache override.
+
+Important helper behavior:
+
+- `script_names()` returns enabled runtime names and clamps to 32.
+- `set_script_names(names)` preserves existing source text by slot where possible.
+- `ensure_script_components()` migrates legacy `script`/`scripts` into component slots.
+- `clamp_script_components()` truncates at 32.
+
+## 5. Script Stack Execution
+
+Runtime `DynamicScript` contains `Vec<ScriptSlot>`, not just one script.
+
+Scripts execute in stack order. Do not reorder scripts unless the user asks for
+that. Order can matter for gameplay.
+
+For each enabled slot, the engine:
+
+1. Takes the slot out of `DynamicScript`.
+2. Calls `on_start` and `on_enable` once if it has not started yet.
+3. Delivers pending XR input events.
+4. Calls `on_xr_frame`.
+5. Delivers animation events.
+6. Calls `on_fixed_update`.
+7. Calls `on_update`.
+8. Calls `on_late_update`.
+9. Puts the slot back.
+
+This is the required take pattern. Do not hold a mutable borrow of the
+`DynamicScript` component while calling into a script, because scripts also need
+mutable ECS access through `ScriptContext`.
+
+## 6. Built-in Preset Scripts
+
+Presets are first-class and should be kept available in the editor.
+
+Current preset names:
+
+- `TestBounce`: oscillating movement test.
+- `CrowdAgent`: NPC wandering/steering with stuck recovery.
+- `Vehicle`: physics vehicle bootstrap and suspension-style force logic.
+- `PoliceAgent`: chase behavior around the player.
+- `TrafficAI`: obstacle-aware vehicle AI.
+- `WeaponNPC`: smooth facing/combat placeholder behavior.
+- `CollisionLogger`: logs collision start/end events.
+- `TouchToDestroy`: despawns itself on collision.
+- `HeadAnchor`: follows the HMD/head pose.
+- `LeftHandAnchor`: follows left grip pose.
+- `RightHandAnchor`: follows right grip pose.
+- `LeftAimAnchor`: follows left aim pose.
+- `RightAimAnchor`: follows right aim pose.
+- `TriggerHaptics`: trigger-edge haptic test.
+
+If adding a new preset:
+
+1. Implement the Rust struct in `src/world/scripting.rs`.
+2. Implement `FuckScript`.
+3. Register it in `GameWorld::new()` in `src/world/mod.rs`.
+4. Add its name to `BUILTIN_SCRIPT_NAMES` in `src/world/scripting.rs`.
+5. Add or update tests if behavior is non-trivial.
+
+## 7. Custom FuckScript
+
+The editor has a `Custom FuckScript` option. Its runtime name is
+`CustomFuckScript`.
+
+Current behavior:
+
+- `ScriptComponent::custom()` creates an editable custom source template.
+- Runtime deploy uses `CustomFuckScript`, a native placeholder script registered
+  in the script registry.
+- Export writes custom/edited source into the native script cache manifest.
+
+Do not claim that arbitrary custom source is fully interpreted at runtime yet.
+The current system preserves and exports custom source, and gives it a native
+placeholder during live preview. The native codegen/binding layer is prepared
+through export artifacts and can be extended later.
+
+## 8. Compile Cache / IL2CPP-Like Export Path
+
+The engine is moving toward an IL2CPP-like model: resolve script stacks at build
+time into native Rust-backed bindings for fast re-execution.
+
+During export, `ProjectExporter::prepare_script_compile_cache()` writes:
+
+- `script_cache/script_manifest.json`
+- `script_cache/generated_script_bindings.rs`
+
+The manifest includes scene path, entity id, slot index, script name, enabled
+state, compile mode, source hash, cache key, and native symbol.
+
+Future agents adding source-to-Rust generation should build on this manifest
+instead of inventing a second cache format.
+
+## 9. Deployment Rules
+
+The editor sends runtime script stacks with:
+
+```rust
+SceneUpdate::SetScripts { id, names }
+```
+
+`names` must be enabled runtime names only, max 32. Unknown names are logged and
+ignored by the runtime registry.
+
+`SceneUpdate::AttachScript { id, name }` still exists, but for editor workflows
+prefer `SetScripts` because it replaces the whole stack and preserves ordering.
+
+## 10. Writing Good Runtime Scripts
+
+- Scripts must be `Send + Sync`.
+- Avoid allocations inside `on_update`; cache state inside the script struct.
+- Prefer `on_start` for one-time component insertion/setup.
+- Prefer `on_fixed_update` for physics-step logic and force application.
+- Prefer `on_late_update` for camera/hand/pose followers.
+- For simple movement, mutate `Transform`.
+- For physics entities, apply forces through `RigidBodyHandle` and `PhysicsWorld`.
+- Avoid nested ECS mutable borrows. Gather read data first, release borrows, then mutate.
+- Keep user-facing behavior deterministic when possible.
+
+## 11. Player Tracking
+
+The runtime spawns a `Player` marker component and syncs its transform from the
+desktop camera or XR head pose.
+
+Find the player like this:
+
+```rust
+for (_entity, (transform, _player)) in ctx.world.query::<(&Transform, &Player)>().iter() {
+    let player_pos = transform.position;
+    // Use player_pos here.
+}
+```
+
+## 12. Collision And Trigger Events
+
+Collision callbacks are dispatched through Rapier events. Rigid bodies must have
+their `user_data` set to `entity.to_bits().get() as u128` for collision events
+to map back to ECS entities.
+
+Use:
+
+- `on_collision_start`
+- `on_collision_end`
+- `on_trigger_start`
+- `on_trigger_end`
+
+## 13. Example Native Script
+
+```rust
+pub struct FacePlayerScript {
+    turn_speed: f32,
+}
+
+impl Default for FacePlayerScript {
+    fn default() -> Self {
+        Self { turn_speed: 8.0 }
+    }
+}
+
+impl FuckScript for FacePlayerScript {
+    fn on_update(&mut self, ctx: &mut ScriptContext) {
+        let mut player_pos = None;
+        for (_entity, (transform, _player)) in ctx.world.query::<(&Transform, &Player)>().iter() {
+            player_pos = Some(transform.position);
+            break;
+        }
+
+        let Some(player_pos) = player_pos else {
+            return;
+        };
+
+        if let Some(mut transform) = ctx.transform_mut() {
+            let to_player = player_pos - transform.position;
+            if to_player.length_squared() > 0.001 {
+                let target_yaw = to_player.x.atan2(to_player.z);
+                let target = glam::Quat::from_rotation_y(target_yaw);
+                transform.rotation = transform
+                    .rotation
+                    .slerp(target, (ctx.dt * self.turn_speed).clamp(0.0, 1.0));
+            }
+        }
+    }
+}
+```
+
+Register it:
+
+```rust
+reg.register("FacePlayer", || FacePlayerScript::default());
+```
+
+Then add `"FacePlayer"` to `BUILTIN_SCRIPT_NAMES` if it should appear as an
+editor preset.
+
+## 14. Agent Checklist
+
+When an AI agent writes or edits scripts:
+
+1. Decide whether this is a built-in native preset or a custom editable script.
+2. Keep script stacks under 32 components.
+3. Preserve existing preset scripts unless the user explicitly asks to remove them.
+4. Keep `script_components`, `script`, and `scripts` synchronized.
+5. Register new native presets in both the registry and `BUILTIN_SCRIPT_NAMES`.
+6. Update export/cache behavior only through the existing `script_cache` manifest path.
+7. Run at least `cargo check --bins` and preferably `cargo test`.
 
 ---
-*Note: Always remember to handle the 'Take Pattern' when calling functions that might re-borrow the world.*
+
+Always remember: runtime Rust scripts are native and fast; editable/custom source
+is currently preserved and exported for native cache generation, with live
+preview backed by the registered runtime script name.
