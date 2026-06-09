@@ -20,6 +20,8 @@ pub const BUILTIN_SCRIPT_NAMES: &[&str] = &[
     "TriggerHaptics",
 ];
 
+pub const CUSTOM_FUCKSCRIPT_RUNTIME_NAME: &str = "CustomFuckScript";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum XrHand {
     Left,
@@ -1177,6 +1179,18 @@ impl FuckScript for TouchToDestroyScript {
     fn on_collision_start(&mut self, ctx: &mut ScriptContext, other: Entity) {
         log::info!("TouchToDestroy: Hit {:?}, despawning self!", other);
         ctx.despawn_self();
+    }
+}
+
+/// Editable script placeholder used by the editor before export-time native cache generation.
+pub struct CustomFuckScript;
+
+impl FuckScript for CustomFuckScript {
+    fn on_start(&mut self, ctx: &mut ScriptContext) {
+        log::info!(
+            "CustomFuckScript placeholder active on {:?}; export cache will bind edited source",
+            ctx.entity
+        );
     }
 }
 

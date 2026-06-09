@@ -349,7 +349,11 @@ impl AssetManifest {
         manifest.scenes = Self::scan_directory(root, "scenes", &["json"]);
 
         // Scan scripts
-        manifest.scripts = Self::scan_directory(root, "scripts", &["lua", "rhai", "json"]);
+        manifest.scripts = Self::scan_directory(
+            root,
+            "scripts",
+            &["fuck", "fs", "fscript", "lua", "rhai", "json", "rs"],
+        );
 
         // Scan UI layouts
         manifest.ui_layouts = Self::scan_directory(root, "ui", &["json"]);
@@ -496,6 +500,35 @@ impl Default for TargetPlatform {
 // PROJECT METADATA
 // ============================================================================
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectKind {
+    #[default]
+    General,
+    Sandbox,
+    UrbanOpenWorld,
+    Hybrid,
+}
+
+impl ProjectKind {
+    pub fn name(&self) -> &'static str {
+        match self {
+            ProjectKind::General => "General",
+            ProjectKind::Sandbox => "Sandbox Survival",
+            ProjectKind::UrbanOpenWorld => "Urban Open World",
+            ProjectKind::Hybrid => "Hybrid",
+        }
+    }
+
+    pub fn all() -> Vec<ProjectKind> {
+        vec![
+            ProjectKind::General,
+            ProjectKind::Sandbox,
+            ProjectKind::UrbanOpenWorld,
+            ProjectKind::Hybrid,
+        ]
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ProjectMetadata {
     /// Project format version for migrations
@@ -516,8 +549,14 @@ pub struct ProjectMetadata {
     pub modified_at: String,
     /// Primary target platform
     pub target_platform: TargetPlatform,
+    /// Broad project optimization profile.
+    #[serde(default)]
+    pub project_kind: ProjectKind,
     /// Procedural generation settings
     pub procedural_gen: ProceduralGenSettings,
+    /// Seeded sandbox/open-world settings for survival, creative, and hybrid projects.
+    #[serde(default)]
+    pub sandbox: crate::world::sandbox::SandboxWorldSettings,
     /// Build configurations per platform
     #[serde(default)]
     pub build_configs: HashMap<TargetPlatform, BuildConfiguration>,
@@ -546,7 +585,9 @@ impl Default for ProjectMetadata {
             created_at: now.clone(),
             modified_at: now,
             target_platform: TargetPlatform::Quest3,
+            project_kind: ProjectKind::General,
             procedural_gen: ProceduralGenSettings::default(),
+            sandbox: crate::world::sandbox::SandboxWorldSettings::default(),
             build_configs,
             startup_scene: None,
             input_mappings: InputMappings::default_vr_mappings(),
@@ -740,7 +781,9 @@ impl Project {
             created_at: now.clone(),
             modified_at: now,
             target_platform: legacy.target_platform,
+            project_kind: ProjectKind::General,
             procedural_gen: legacy.procedural_gen,
+            sandbox: crate::world::sandbox::SandboxWorldSettings::default(),
             build_configs,
             startup_scene: None,
             input_mappings: InputMappings::default_vr_mappings(),

@@ -257,7 +257,8 @@ impl Camera3D {
 // ============================================================================
 use stfsc_engine::project::scene::{
     EntityType, LightType as LightTypeEditor, Material, NamedUiLayout, PrimitiveType, Scene,
-    SceneEntity,
+    SceneEntity, ScriptCompileMode, ScriptComponent, CUSTOM_FUCKSCRIPT_NAME,
+    MAX_SCRIPTS_PER_ENTITY,
 };
 
 // Helper for default layer (if needed by editor logic, otherwise handled by serde in scene.rs)
@@ -938,6 +939,7 @@ impl EditorApp {
                 material: Material::default(),
                 script: None,
                 scripts: vec![],
+                script_components: vec![],
                 collision_enabled: true,
                 layer: LAYER_PROP, // Default new primitives to Props
                 is_static: false,
@@ -1362,6 +1364,7 @@ impl EditorApp {
             material: Material::default(),
             script: None,
             scripts: vec![],
+            script_components: vec![],
             collision_enabled: false,
             layer: LAYER_PROP,
             is_static: animator_config.is_none(), // Animated models are not static
@@ -4871,6 +4874,7 @@ impl eframe::App for EditorApp {
                                 },
                                 script: None,
                                 scripts: vec![],
+                                script_components: vec![],
                                 collision_enabled: true,
                                 layer: LAYER_VEHICLE,
                                 is_static: false,
@@ -4899,6 +4903,7 @@ impl eframe::App for EditorApp {
                                 material: Material::default(),
                                 script: Some("CrowdAgent".into()),
                                 scripts: vec!["CrowdAgent".into()],
+                                script_components: vec![ScriptComponent::builtin("CrowdAgent")],
                                 collision_enabled: true,
                                 layer: LAYER_CHARACTER,
                                 is_static: false,
@@ -4927,6 +4932,7 @@ impl eframe::App for EditorApp {
                                 },
                                 script: None,
                                 scripts: vec![],
+                                script_components: vec![],
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
@@ -4962,6 +4968,7 @@ impl eframe::App for EditorApp {
                                 },
                                 script: None,
                                 scripts: vec![],
+                                script_components: vec![],
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
@@ -4995,6 +5002,7 @@ impl eframe::App for EditorApp {
                                 },
                                 script: None,
                                 scripts: vec![],
+                                script_components: vec![],
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
@@ -5028,6 +5036,7 @@ impl eframe::App for EditorApp {
                                 },
                                 script: None,
                                 scripts: vec![],
+                                script_components: vec![],
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
@@ -5064,6 +5073,7 @@ impl eframe::App for EditorApp {
                                 },
                                 script: None,
                                 scripts: vec![],
+                                script_components: vec![],
                                 collision_enabled: false,
                                 layer: LAYER_DEFAULT,
                                 is_static: true,
@@ -5382,11 +5392,18 @@ impl eframe::App for EditorApp {
                             ui.vertical(|ui| {
                                 let mut script_names = entity.script_names();
                                 let mut scripts_changed = false;
+                                let mut script_source_changed = false;
                                 let mut remove_script_index = None;
 
                                 if script_names.is_empty() {
                                     ui.label("No script components");
                                 }
+
+                                ui.label(format!(
+                                    "{} / {} script slots",
+                                    script_names.len(),
+                                    MAX_SCRIPTS_PER_ENTITY
+                                ));
 
                                 for (script_index, script_name) in script_names.iter_mut().enumerate() {
                                     ui.horizontal(|ui| {
@@ -5405,18 +5422,88 @@ impl eframe::App for EditorApp {
                                     scripts_changed = true;
                                 }
 
-                                ui.menu_button("+ Add Component", |ui| {
-                                    for script_name in BUILTIN_SCRIPT_NAMES {
-                                        if ui.button(*script_name).clicked() {
-                                            script_names.push((*script_name).to_string());
-                                            scripts_changed = true;
+                                if script_names.len() < MAX_SCRIPTS_PER_ENTITY {
+                                    ui.menu_button("+ Add Component", |ui| {
+                                        for script_name in BUILTIN_SCRIPT_NAMES {
+                                            if ui.button(*script_name).clicked() {
+                                                if script_names.len() < MAX_SCRIPTS_PER_ENTITY {
+                                                    script_names.push((*script_name).to_string());
+                                                    scripts_changed = true;
+                                                }
+                                                ui.close_menu();
+                                            }
+                                        }
+                                        ui.separator();
+                                        if ui.button("Custom FuckScript").clicked() {
+                                            if script_names.len() < MAX_SCRIPTS_PER_ENTITY {
+                                                script_names.push(CUSTOM_FUCKSCRIPT_NAME.to_string());
+                                                scripts_changed = true;
+                                            }
                                             ui.close_menu();
+                                        }
+                                    });
+                                } else {
+                                    ui.label("Max script components reached");
+                                }
+
+                                ui.collapsing("Edit Script Sources", |ui| {
+                                    let entity_id_for_scripts = entity.id;
+                                    let components = entity.ensure_script_components();
+                                    for (script_index, component) in components.iter_mut().enumerate() {
+                                        ui.separator();
+                                        ui.horizontal(|ui| {
+                                            if ui.checkbox(&mut component.enabled, "Enabled").changed() {
+                                                script_source_changed = true;
+                                            }
+                                            ui.label(format!("Script {}", script_index + 1));
+                                            egui::ComboBox::from_id_source(format!("script_compile_mode_{}_{}", entity_id_for_scripts, script_index))
+                                                .selected_text(match component.compile_mode {
+                                                    ScriptCompileMode::BuiltinNative => "Preset Native",
+                                                    ScriptCompileMode::EditableNativeCache => "Edited Native Cache",
+                                                    ScriptCompileMode::CustomNativeCache => "Custom Native Cache",
+                                                })
+                                                .show_ui(ui, |ui| {
+                                                    script_source_changed |= ui.selectable_value(
+                                                        &mut component.compile_mode,
+                                                        ScriptCompileMode::BuiltinNative,
+                                                        "Preset Native",
+                                                    ).changed();
+                                                    script_source_changed |= ui.selectable_value(
+                                                        &mut component.compile_mode,
+                                                        ScriptCompileMode::EditableNativeCache,
+                                                        "Edited Native Cache",
+                                                    ).changed();
+                                                    script_source_changed |= ui.selectable_value(
+                                                        &mut component.compile_mode,
+                                                        ScriptCompileMode::CustomNativeCache,
+                                                        "Custom Native Cache",
+                                                    ).changed();
+                                                });
+                                        });
+
+                                        if component.name == CUSTOM_FUCKSCRIPT_NAME {
+                                            component.compile_mode = ScriptCompileMode::CustomNativeCache;
+                                        }
+
+                                        let edit = egui::TextEdit::multiline(&mut component.source)
+                                            .desired_rows(7)
+                                            .code_editor()
+                                            .desired_width(f32::INFINITY);
+                                        if ui.add(edit).changed() {
+                                            if matches!(component.compile_mode, ScriptCompileMode::BuiltinNative) {
+                                                component.compile_mode = ScriptCompileMode::EditableNativeCache;
+                                            }
+                                            script_source_changed = true;
                                         }
                                     }
                                 });
 
                                 if scripts_changed {
                                     entity.set_script_names(script_names);
+                                }
+
+                                if scripts_changed || script_source_changed {
+                                    entity.sync_legacy_script_fields();
                                     inspector_dirty = true;
                                     if self.is_connected {
                                         let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetScripts {
@@ -6323,6 +6410,16 @@ impl eframe::App for EditorApp {
                                                 }
                                             });
                                         ui.end_row();
+
+                                        ui.label("Project Kind:");
+                                        egui::ComboBox::from_id_source("project_kind")
+                                            .selected_text(proj.metadata.project_kind.name())
+                                            .show_ui(ui, |ui| {
+                                                for kind in stfsc_engine::project::ProjectKind::all() {
+                                                    ui.selectable_value(&mut proj.metadata.project_kind, kind, kind.name());
+                                                }
+                                            });
+                                        ui.end_row();
                                         
                                         ui.label("Created:");
                                         ui.label(&proj.metadata.created_at);
@@ -6340,6 +6437,67 @@ impl eframe::App for EditorApp {
                                     if proj.metadata.procedural_gen.enabled {
                                         ui.add(egui::Slider::new(&mut proj.metadata.procedural_gen.seed, 0..=9999999).text("Seed"));
                                         ui.add(egui::Slider::new(&mut proj.metadata.procedural_gen.density, 0.0..=1.0).text("Density"));
+                                    }
+
+                                    ui.add_space(12.0);
+                                    ui.heading("Sandbox Worlds");
+                                    ui.add_space(4.0);
+                                    let sandbox = &mut proj.metadata.sandbox;
+                                    ui.checkbox(&mut sandbox.enabled, "Enable Sandbox Planning");
+                                    if sandbox.enabled {
+                                        egui::Grid::new("sandbox_grid").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+                                            ui.label("Profile:");
+                                            egui::ComboBox::from_id_source("sandbox_profile")
+                                                .selected_text(sandbox.profile.name())
+                                                .show_ui(ui, |ui| {
+                                                    for profile in stfsc_engine::world::sandbox::SandboxProfile::all() {
+                                                        ui.selectable_value(&mut sandbox.profile, profile, profile.name());
+                                                    }
+                                                });
+                                            ui.end_row();
+
+                                            ui.label("Mode:");
+                                            egui::ComboBox::from_id_source("sandbox_game_mode")
+                                                .selected_text(sandbox.game_mode.name())
+                                                .show_ui(ui, |ui| {
+                                                    for mode in stfsc_engine::world::sandbox::GameMode::all() {
+                                                        ui.selectable_value(&mut sandbox.game_mode, mode, mode.name());
+                                                    }
+                                                });
+                                            ui.end_row();
+
+                                            ui.label("Seed:");
+                                            ui.add(egui::Slider::new(&mut sandbox.seed, 0..=999999999).text(""));
+                                            ui.end_row();
+
+                                            ui.label("Chunk Size:");
+                                            ui.add(egui::Slider::new(&mut sandbox.chunk_size, 8.0..=256.0).text("m"));
+                                            ui.end_row();
+
+                                            ui.label("Load Radius:");
+                                            ui.add(egui::Slider::new(&mut sandbox.load_radius, 1..=24));
+                                            ui.end_row();
+
+                                            ui.label("Day Length:");
+                                            ui.add(egui::Slider::new(&mut sandbox.day_length_seconds, 60.0..=7200.0).text("sec"));
+                                            ui.end_row();
+
+                                            ui.label("Trees:");
+                                            ui.add(egui::Slider::new(&mut sandbox.tree_density, 0.0..=1.0));
+                                            ui.end_row();
+
+                                            ui.label("Resources:");
+                                            ui.add(egui::Slider::new(&mut sandbox.resource_density, 0.0..=1.0));
+                                            ui.end_row();
+
+                                            ui.label("Passive Mobs:");
+                                            ui.add(egui::Slider::new(&mut sandbox.passive_mob_density, 0.0..=1.0));
+                                            ui.end_row();
+
+                                            ui.label("Night Enemies:");
+                                            ui.add(egui::Slider::new(&mut sandbox.hostile_mob_density, 0.0..=1.0));
+                                            ui.end_row();
+                                        });
                                     }
                                 }
                                 1 => {

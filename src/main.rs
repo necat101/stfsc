@@ -391,6 +391,7 @@ fn main() {
                     scene.name,
                     scene.entities.len()
                 );
+                game_world.set_sandbox_settings(scene.sandbox.clone());
 
                 // Spawn entities from scene
                 for entity in &scene.entities {

@@ -618,6 +618,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                             scene.name,
                             scene.entities.len()
                         );
+                        state.world.set_sandbox_settings(scene.sandbox.clone());
 
                         for entity_data in scene.entities {
                             let pos = glam::Vec3::from(entity_data.position);

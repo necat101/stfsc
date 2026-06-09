@@ -18,14 +18,11 @@ This engine is built from the ground up for one audacious goal: **open-world gam
 
 ---
 
-## 🎮 Target Project: 556
+## Target Projects
 
-STFSC is the foundation for **556**—an upcoming open-world crime simulator aiming to be the "GTA-V of standalone VR." Featuring:
+STFSC is being shaped for ambitious open-world games that need smooth simulation under pressure. The near-term engine target is **Twilight**, a Rust/Minecraft-like survival sandbox with seeded procedural worlds, object-based building, day/night danger, survival play, and god-mode creation tools.
 
-- Immersive open-world exploration
-- **556 Downtown** — Online multiplayer mode
-- Xbox 360-level graphical fidelity on mobile VR hardware
-- Authentic crime simulator experience
+The engine still keeps its 556-class goals: dense city streaming, vehicles, crowds, multiplayer-ready architecture, and standalone VR performance. Sandbox support is an added optimization profile, not a narrowing of the engine.
 
 ---
 
@@ -43,6 +40,12 @@ STFSC is the foundation for **556**—an upcoming open-world crime simulator aim
 - **Real-time Material Sync**: Instant inspection/tweaking of PBR properties and textures on Quest 3 without re-spawning.
 - **Missing Asset Diagnostics**: Built-in warnings for missing project files with easy re-linking guidance.
 - **Parallel Viewport Prep**: Smooth editor UI performance via multi-threaded viewport projection math.
+
+### Sandbox/Open-World Foundations
+- **Seeded Chunk Planning**: deterministic sandbox chunk plans for trees, resources, mobs, and build budgets.
+- **Survival/God Mode Rules**: project metadata can distinguish resource-constrained survival from free-building creative play.
+- **Day/Night Runtime Clock**: sandbox-aware clock hooks for hostile night spawning, lighting, and scripts.
+- **Parallel Planning Windows**: chunk plan generation uses Rayon so wide sandbox worlds can stream without blocking the frame.
 
 ### Rendering
 - **Vulkan-based renderer** with multiview stereo rendering
@@ -171,21 +174,21 @@ That's it! The Linux client provides a windowed preview with WASD + mouse contro
 - [x] **Robust Asset Persistence** (Local textures, Search fallbacks)
 - [x] Real-time Material live-sync
 
-### v0.4 (Combat & Persistence)
-- [ ] Weapon/Ballistics system
-- [ ] Collision system
-- [ ] Global Save/Load state
-- [ ] Navmesh pathfinding for NPCs
-- [ ] Advanced Traffic steering behaviors
+### v0.4 (Sandbox & Persistence)
+- [ ] Persistent sandbox save/load state
+- [ ] Object-based building placement and stability hooks
+- [ ] Resource inventory and crafting interfaces
+- [ ] Mob spawn scheduler and night threat director
+- [ ] Navmesh/pathfinding support for mobs and NPCs
 
 ### v0.5 (Connected World)
 - [ ] Multiplayer netcode foundation
 - [ ] GPU-side occlusion culling (Hi-Z)
 - [ ] Compressed texture streaming (KTX2/ASTC)
 
-### v1.0 (556 Launch)
-- [ ] Complete open-world streaming
-- [ ] Full multiplayer gameplay
+### v1.0 (Open-World Launch)
+- [ ] Complete open-world streaming for sandbox and city profiles
+- [ ] Full multiplayer gameplay foundation
 - [ ] Performance parity with consoles
 
 ---

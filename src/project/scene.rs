@@ -1,5 +1,6 @@
 use crate::ui::{UiLayerType, UiLayout};
 use crate::world::animation::AnimatorConfig;
+use crate::world::sandbox::SandboxWorldSettings;
 use crate::world::{LAYER_CHARACTER, LAYER_DEFAULT, LAYER_ENVIRONMENT, LAYER_PROP, LAYER_VEHICLE};
 use serde::{Deserialize, Serialize};
 
@@ -87,6 +88,88 @@ fn default_layer() -> u32 {
     0 // Default layer
 }
 
+fn default_true() -> bool {
+    true
+}
+
+pub const MAX_SCRIPTS_PER_ENTITY: usize = 32;
+pub const CUSTOM_FUCKSCRIPT_NAME: &str = "CustomFuckScript";
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ScriptCompileMode {
+    BuiltinNative,
+    EditableNativeCache,
+    CustomNativeCache,
+}
+
+impl Default for ScriptCompileMode {
+    fn default() -> Self {
+        Self::BuiltinNative
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ScriptComponent {
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub compile_mode: ScriptCompileMode,
+    #[serde(default)]
+    pub cache_key: Option<String>,
+}
+
+impl ScriptComponent {
+    pub fn builtin(name: impl Into<String>) -> Self {
+        let name = name.into();
+        if name == CUSTOM_FUCKSCRIPT_NAME {
+            return Self::custom();
+        }
+
+        Self {
+            source: builtin_script_template(&name),
+            name,
+            enabled: true,
+            compile_mode: ScriptCompileMode::BuiltinNative,
+            cache_key: None,
+        }
+    }
+
+    pub fn custom() -> Self {
+        Self {
+            name: CUSTOM_FUCKSCRIPT_NAME.to_string(),
+            enabled: true,
+            source: custom_script_template(),
+            compile_mode: ScriptCompileMode::CustomNativeCache,
+            cache_key: None,
+        }
+    }
+
+    pub fn runtime_name(&self) -> String {
+        self.name.trim().to_string()
+    }
+
+    pub fn has_editable_source(&self) -> bool {
+        !self.source.trim().is_empty()
+            || matches!(
+                self.compile_mode,
+                ScriptCompileMode::EditableNativeCache | ScriptCompileMode::CustomNativeCache
+            )
+    }
+}
+
+pub fn builtin_script_template(name: &str) -> String {
+    format!(
+        "// Editable cache source for {name}.\n// Built-in presets still run as native Rust unless this source is promoted\n// into generated bindings during project export.\n\nscript {name} {{\n    on_update(ctx) {{\n        // Add high-level FuckScript logic here.\n    }}\n}}\n"
+    )
+}
+
+pub fn custom_script_template() -> String {
+    "// Custom FuckScript\n// Export will include this source in the native script cache manifest.\n\nscript CustomFuckScript {\n    on_start(ctx) {\n    }\n\n    on_update(ctx) {\n    }\n}\n".to_string()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SceneEntity {
     pub id: u32,
@@ -100,6 +183,8 @@ pub struct SceneEntity {
     pub script: Option<String>,
     #[serde(default)]
     pub scripts: Vec<String>,
+    #[serde(default)]
+    pub script_components: Vec<ScriptComponent>,
     #[serde(default)]
     pub collision_enabled: bool,
     #[serde(default = "default_layer")]
@@ -119,6 +204,17 @@ pub struct SceneEntity {
 
 impl SceneEntity {
     pub fn script_names(&self) -> Vec<String> {
+        if !self.script_components.is_empty() {
+            return self
+                .script_components
+                .iter()
+                .filter(|component| component.enabled)
+                .map(ScriptComponent::runtime_name)
+                .filter(|name| !name.is_empty())
+                .take(MAX_SCRIPTS_PER_ENTITY)
+                .collect();
+        }
+
         if !self.scripts.is_empty() {
             return Self::normalize_script_names(self.scripts.clone());
         }
@@ -133,8 +229,58 @@ impl SceneEntity {
 
     pub fn set_script_names(&mut self, names: Vec<String>) {
         let names = Self::normalize_script_names(names);
+        let old_components = std::mem::take(&mut self.script_components);
+        let script_components = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let mut component = old_components
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| ScriptComponent::builtin(name));
+                component.name = name.clone();
+                component
+            })
+            .collect();
+
+        self.script = names.first().cloned();
+        self.scripts = names.clone();
+        self.script_components = script_components;
+    }
+
+    pub fn ensure_script_components(&mut self) -> &mut Vec<ScriptComponent> {
+        if self.script_components.is_empty() {
+            let names = if !self.scripts.is_empty() {
+                Self::normalize_script_names(self.scripts.clone())
+            } else {
+                Self::normalize_script_names(
+                    self.script
+                        .iter()
+                        .map(|script| script.to_string())
+                        .collect::<Vec<_>>(),
+                )
+            };
+            self.script_components = names.into_iter().map(ScriptComponent::builtin).collect();
+        }
+        self.clamp_script_components();
+        &mut self.script_components
+    }
+
+    pub fn sync_legacy_script_fields(&mut self) {
+        let names: Vec<String> = self
+            .script_components
+            .iter()
+            .filter(|component| component.enabled)
+            .map(ScriptComponent::runtime_name)
+            .filter(|name| !name.is_empty())
+            .take(MAX_SCRIPTS_PER_ENTITY)
+            .collect();
         self.script = names.first().cloned();
         self.scripts = names;
+    }
+
+    pub fn clamp_script_components(&mut self) {
+        self.script_components.truncate(MAX_SCRIPTS_PER_ENTITY);
     }
 
     fn normalize_script_names(names: Vec<String>) -> Vec<String> {
@@ -142,6 +288,7 @@ impl SceneEntity {
             .into_iter()
             .map(|name| name.trim().to_string())
             .filter(|name| !name.is_empty())
+            .take(MAX_SCRIPTS_PER_ENTITY)
             .collect()
     }
 }
@@ -216,6 +363,9 @@ pub struct Scene {
     pub entities: Vec<SceneEntity>,
     pub respawn_enabled: bool,
     pub respawn_y: f32,
+    /// Per-scene sandbox settings. Disabled by default so existing scenes keep current behavior.
+    #[serde(default)]
+    pub sandbox: SandboxWorldSettings,
     /// Multiple named UI layouts with tabs
     #[serde(default)]
     pub ui_layouts: Vec<NamedUiLayout>,
@@ -233,6 +383,7 @@ impl Scene {
             entities: Vec::new(),
             respawn_enabled: false,
             respawn_y: -20.0,
+            sandbox: SandboxWorldSettings::default(),
             ui_layouts: vec![NamedUiLayout::default()],
             ui_layout: UiLayout::default(),
         }
@@ -264,6 +415,7 @@ impl Scene {
             material: m.clone(),
             script: None,
             scripts: vec![],
+            script_components: vec![],
             collision_enabled: true,
             layer: LAYER_ENVIRONMENT,
             is_static: false,
@@ -286,6 +438,7 @@ impl Scene {
             },
             script: None,
             scripts: vec![],
+            script_components: vec![],
             collision_enabled: true,
             layer: LAYER_PROP,
             is_static: false,
@@ -305,6 +458,7 @@ impl Scene {
             material: m.clone(),
             script: Some("Vehicle".into()),
             scripts: vec!["Vehicle".into()],
+            script_components: vec![ScriptComponent::builtin("Vehicle")],
             collision_enabled: true,
             layer: LAYER_VEHICLE,
             is_static: false,
@@ -338,6 +492,7 @@ impl Scene {
                 },
                 script: Some("CrowdAgent".into()),
                 scripts: vec!["CrowdAgent".into()],
+                script_components: vec![ScriptComponent::builtin("CrowdAgent")],
                 collision_enabled: false,
                 layer: LAYER_CHARACTER,
                 is_static: false,
@@ -363,6 +518,7 @@ impl Scene {
                 },
                 script: None,
                 scripts: vec![],
+                script_components: vec![],
                 collision_enabled: false,
                 layer: LAYER_ENVIRONMENT,
                 is_static: true,
@@ -386,6 +542,7 @@ impl Scene {
             },
             script: None,
             scripts: vec![],
+            script_components: vec![],
             collision_enabled: false,
             layer: LAYER_DEFAULT,
             is_static: true,
@@ -411,6 +568,7 @@ impl Scene {
             material: Material::default(),
             script: None,
             scripts: vec![],
+            script_components: vec![],
             collision_enabled: false,
             layer: LAYER_DEFAULT,
             is_static: true,

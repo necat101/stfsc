@@ -1,4 +1,5 @@
 use crate::physics::PhysicsWorld;
+use crate::project::scene::MAX_SCRIPTS_PER_ENTITY;
 use glam;
 use hecs::{Entity, World};
 use log::{info, warn};
@@ -9,6 +10,7 @@ use tokio::sync::mpsc;
 pub mod animation;
 pub mod fbx_loader;
 pub mod gltf_loader;
+pub mod sandbox;
 pub mod scripting;
 use animation::{AnimationEventQueue, AnimationState, Animator, AnimatorController};
 use scripting::{
@@ -25,6 +27,10 @@ pub struct GameWorld {
     pub loaded_chunks: std::collections::HashSet<(i32, i32)>,
     /// Enable procedural world generation (buildings, props). Off by default.
     pub procedural_generation_enabled: bool,
+    /// Seeded sandbox/open-world settings used by survival and creative style projects.
+    pub sandbox_settings: sandbox::SandboxWorldSettings,
+    /// Runtime day/night clock for sandbox-aware gameplay.
+    pub sandbox_clock: sandbox::SandboxClock,
     pub player_start_transform: Transform,
     pub pending_audio_uploads: std::collections::HashMap<String, Vec<u8>>,
     pub pending_texture_uploads: std::collections::HashMap<String, Vec<u8>>,
@@ -333,8 +339,12 @@ impl DynamicScript {
         }
     }
 
-    pub fn push_named(&mut self, name: impl Into<String>, script: Box<dyn FuckScript>) {
+    pub fn push_named(&mut self, name: impl Into<String>, script: Box<dyn FuckScript>) -> bool {
+        if self.scripts.len() >= MAX_SCRIPTS_PER_ENTITY {
+            return false;
+        }
         self.scripts.push(ScriptSlot::new(name, script));
+        true
     }
 
     pub fn is_empty(&self) -> bool {
@@ -504,6 +514,19 @@ pub enum SceneUpdate {
     /// Toggle procedural generation on/off (off by default)
     SetProceduralGeneration {
         enabled: bool,
+    },
+    /// Replace sandbox/open-world settings without committing to a specific game.
+    SetSandboxSettings {
+        settings: sandbox::SandboxWorldSettings,
+    },
+    /// Switch between survival rules and free-building god mode.
+    SetGameMode {
+        mode: sandbox::GameMode,
+    },
+    /// Set deterministic day/night time for sandbox worlds.
+    SetSandboxClock {
+        time_of_day: f32,
+        day_index: u32,
     },
     SetPlayerStart {
         position: [f32; 3],
@@ -737,6 +760,8 @@ impl GameWorld {
             command_sender: cmd_tx,
             loaded_chunks: std::collections::HashSet::new(),
             procedural_generation_enabled: false, // Off by default
+            sandbox_settings: sandbox::SandboxWorldSettings::default(),
+            sandbox_clock: sandbox::SandboxClock::default(),
             player_start_transform: Transform {
                 position: glam::Vec3::new(0.0, 1.7, 0.0), // Default standing height
                 rotation: glam::Quat::IDENTITY,
@@ -770,6 +795,9 @@ impl GameWorld {
                     scripting::XrPoseAnchorScript::new(scripting::XrTrackedTarget::RightAim)
                 });
                 reg.register("TriggerHaptics", || scripting::TriggerHapticsScript);
+                reg.register(scripting::CUSTOM_FUCKSCRIPT_RUNTIME_NAME, || {
+                    scripting::CustomFuckScript
+                });
                 Arc::new(reg)
             },
             respawn_enabled: false,
@@ -785,6 +813,47 @@ impl GameWorld {
         };
         // world.spawn_default_scene(); // Moved to streaming logic or separate init
         world
+    }
+
+    pub fn set_sandbox_settings(&mut self, mut settings: sandbox::SandboxWorldSettings) {
+        settings.clamp_runtime_limits();
+        self.sandbox_clock = sandbox::SandboxClock::from_settings(&settings);
+        self.sandbox_settings = settings;
+        self.loaded_chunks.clear();
+    }
+
+    pub fn set_game_mode(&mut self, mode: sandbox::GameMode) {
+        self.sandbox_settings.game_mode = mode;
+    }
+
+    pub fn advance_sandbox_clock(&mut self, dt: f32) {
+        if self.sandbox_settings.enabled {
+            self.sandbox_clock.advance(dt);
+        }
+    }
+
+    pub fn plan_sandbox_chunk(&self, cx: i32, cz: i32) -> sandbox::SandboxChunkPlan {
+        let generator = sandbox::SandboxChunkGenerator::new(self.sandbox_settings.seed);
+        generator.generate_chunk(
+            sandbox::SandboxChunkCoord { x: cx, z: cz },
+            &self.sandbox_settings,
+        )
+    }
+
+    pub fn plan_sandbox_chunks_around(
+        &self,
+        player_pos: glam::Vec3,
+    ) -> Vec<sandbox::SandboxChunkPlan> {
+        let center = sandbox::SandboxChunkCoord::from_world_pos(
+            player_pos,
+            self.sandbox_settings.chunk_size,
+        );
+        let generator = sandbox::SandboxChunkGenerator::new(self.sandbox_settings.seed);
+        generator.generate_window(
+            center,
+            self.sandbox_settings.load_radius,
+            &self.sandbox_settings,
+        )
     }
 
     pub fn set_xr_input_snapshot(&mut self, mut snapshot: XrInputSnapshot) {
@@ -1199,6 +1268,30 @@ impl GameWorld {
                         info!("Procedural generation DISABLED");
                     }
                 }
+                SceneUpdate::SetSandboxSettings { settings } => {
+                    let enabled = settings.enabled;
+                    let seed = settings.seed;
+                    let profile = settings.profile;
+                    self.set_sandbox_settings(settings);
+                    info!(
+                        "Sandbox settings updated: enabled={}, seed={}, profile={:?}",
+                        enabled, seed, profile
+                    );
+                }
+                SceneUpdate::SetGameMode { mode } => {
+                    self.set_game_mode(mode);
+                    info!("Sandbox game mode set to {:?}", mode);
+                }
+                SceneUpdate::SetSandboxClock {
+                    time_of_day,
+                    day_index,
+                } => {
+                    self.sandbox_clock.set_time(time_of_day, day_index);
+                    info!(
+                        "Sandbox clock set to day {}, time {:.3}",
+                        self.sandbox_clock.day_index, self.sandbox_clock.time_of_day
+                    );
+                }
                 SceneUpdate::SetPlayerStart { position, rotation } => {
                     self.player_start_transform.position = glam::Vec3::from(position);
                     self.player_start_transform.rotation = glam::Quat::from_array(rotation);
@@ -1359,7 +1452,12 @@ impl GameWorld {
                                     .ecs
                                     .get::<&mut DynamicScript>(entity)
                                     .expect("DynamicScript disappeared while attaching script");
-                                comp.push_named(name.clone(), script_box);
+                                if !comp.push_named(name.clone(), script_box) {
+                                    warn!(
+                                        "AttachScript: Entity {} already has the max of {} scripts",
+                                        id, MAX_SCRIPTS_PER_ENTITY
+                                    );
+                                }
                             } else {
                                 self.ecs
                                     .insert_one(
@@ -1390,14 +1488,14 @@ impl GameWorld {
                         let _ = self.ecs.remove_one::<DynamicScript>(entity);
 
                         let mut component = DynamicScript::empty();
-                        for name in names {
+                        for name in names.into_iter().take(MAX_SCRIPTS_PER_ENTITY) {
                             let name = name.trim();
                             if name.is_empty() {
                                 continue;
                             }
 
                             if let Some(script_box) = self.script_registry.create(name) {
-                                component.push_named(name.to_string(), script_box);
+                                let _ = component.push_named(name.to_string(), script_box);
                             } else {
                                 warn!("SetScripts: Script '{}' not found in registry", name);
                             }
@@ -2066,6 +2164,8 @@ impl GameWorld {
         dt: f32,
         ui_events: Vec<crate::ui::UiEvent>,
     ) {
+        self.advance_sandbox_clock(dt);
+
         // Resolve hierarchical transforms BEFORE script/physics updates if we want them to affect visibility,
         // or AFTER if we want them to reflect the latest parent movement.
         // Let's do it AFTER script/physics logic in the main loop to ensure we have the latest world positions.
@@ -3120,7 +3220,7 @@ mod tests {
     #[test]
     fn dynamic_script_can_stack_multiple_scripts() {
         let mut component = DynamicScript::from_named("First", Box::new(NoopScript));
-        component.push_named("Second", Box::new(NoopScript));
+        assert!(component.push_named("Second", Box::new(NoopScript)));
 
         assert_eq!(component.scripts.len(), 2);
         assert_eq!(component.scripts[0].name, "First");
@@ -3130,5 +3230,16 @@ mod tests {
         assert_eq!(slot.name, "First");
         component.insert_slot(0, slot);
         assert_eq!(component.scripts[0].name, "First");
+    }
+
+    #[test]
+    fn dynamic_script_stack_is_capped() {
+        let mut component = DynamicScript::empty();
+        for index in 0..MAX_SCRIPTS_PER_ENTITY {
+            assert!(component.push_named(format!("Script{}", index), Box::new(NoopScript)));
+        }
+
+        assert!(!component.push_named("Overflow", Box::new(NoopScript)));
+        assert_eq!(component.scripts.len(), MAX_SCRIPTS_PER_ENTITY);
     }
 }

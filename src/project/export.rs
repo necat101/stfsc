@@ -3,13 +3,38 @@
 //! Handles packaging and exporting STFSC projects as distributable games
 //! for various target platforms (Linux, Quest, etc.)
 
+use serde::Serialize;
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 
 use super::{OptLevel, Project, TargetPlatform};
+use crate::project::scene::{Scene, MAX_SCRIPTS_PER_ENTITY};
+
+#[derive(Serialize)]
+struct ScriptCompileManifest {
+    version: u32,
+    max_scripts_per_entity: usize,
+    entries: Vec<ScriptCompileEntry>,
+}
+
+#[derive(Serialize)]
+struct ScriptCompileEntry {
+    scene: String,
+    entity_id: u32,
+    entity_name: String,
+    slot: usize,
+    name: String,
+    enabled: bool,
+    compile_mode: String,
+    source_hash: u64,
+    cache_key: String,
+    native_symbol: String,
+}
 
 /// Result of an export operation
 #[derive(Debug)]
@@ -1496,8 +1521,166 @@ impl ProjectExporter {
             }
         }
 
+        self.prepare_script_compile_cache(project, export_path)?;
+
         Ok(())
     }
+
+    fn prepare_script_compile_cache(
+        &self,
+        project: &Project,
+        export_path: &Path,
+    ) -> io::Result<()> {
+        let cache_dir = export_path.join("script_cache");
+        fs::create_dir_all(&cache_dir)?;
+
+        let mut entries = Vec::new();
+        for scene_asset in &project.assets.scenes {
+            let scene_path = project.root_path.join(&scene_asset.path);
+            if !scene_path.exists() {
+                continue;
+            }
+
+            let scene_json = fs::read_to_string(&scene_path)?;
+            let scene: Scene = serde_json::from_str(&scene_json).map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to parse scene '{}': {}", scene_asset.path, err),
+                )
+            })?;
+
+            for entity in scene.entities {
+                let mut entity = entity;
+                let entity_id = entity.id;
+                let entity_name = entity.name.clone();
+                let components = entity.ensure_script_components().clone();
+
+                for (slot, component) in components
+                    .into_iter()
+                    .take(MAX_SCRIPTS_PER_ENTITY)
+                    .enumerate()
+                {
+                    let name = component.runtime_name();
+                    if name.is_empty() {
+                        continue;
+                    }
+
+                    let source_hash = hash_script_source(
+                        &scene_asset.path,
+                        entity_id,
+                        slot,
+                        &name,
+                        &component.source,
+                    );
+                    let cache_key = format!("{:016x}", source_hash);
+                    let native_symbol = format!(
+                        "stfsc_script_{}_{}_{}_{}",
+                        sanitize_symbol(&scene.name),
+                        entity_id,
+                        slot,
+                        sanitize_symbol(&name)
+                    );
+
+                    entries.push(ScriptCompileEntry {
+                        scene: scene_asset.path.clone(),
+                        entity_id,
+                        entity_name: entity_name.clone(),
+                        slot,
+                        name,
+                        enabled: component.enabled,
+                        compile_mode: format!("{:?}", component.compile_mode),
+                        source_hash,
+                        cache_key,
+                        native_symbol,
+                    });
+                }
+            }
+        }
+
+        let manifest = ScriptCompileManifest {
+            version: 1,
+            max_scripts_per_entity: MAX_SCRIPTS_PER_ENTITY,
+            entries,
+        };
+
+        let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to serialize script cache manifest: {}", err),
+            )
+        })?;
+        fs::write(cache_dir.join("script_manifest.json"), manifest_json)?;
+        fs::write(
+            cache_dir.join("generated_script_bindings.rs"),
+            render_script_bindings(&manifest),
+        )?;
+
+        Ok(())
+    }
+}
+
+fn hash_script_source(scene: &str, entity_id: u32, slot: usize, name: &str, source: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    scene.hash(&mut hasher);
+    entity_id.hash(&mut hasher);
+    slot.hash(&mut hasher);
+    name.hash(&mut hasher);
+    source.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn sanitize_symbol(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+    out.trim_matches('_').to_string()
+}
+
+fn render_script_bindings(manifest: &ScriptCompileManifest) -> String {
+    let mut out = String::new();
+    out.push_str("// Generated by STFSC export. Do not edit by hand.\n");
+    out.push_str("pub struct CachedScriptBinding {\n");
+    out.push_str("    pub scene: &'static str,\n");
+    out.push_str("    pub entity_id: u32,\n");
+    out.push_str("    pub slot: usize,\n");
+    out.push_str("    pub name: &'static str,\n");
+    out.push_str("    pub enabled: bool,\n");
+    out.push_str("    pub source_hash: u64,\n");
+    out.push_str("    pub native_symbol: &'static str,\n");
+    out.push_str("}\n\n");
+    out.push_str("pub const MAX_SCRIPTS_PER_ENTITY: usize = ");
+    out.push_str(&manifest.max_scripts_per_entity.to_string());
+    out.push_str(";\n\n");
+    out.push_str("pub const SCRIPT_BINDINGS: &[CachedScriptBinding] = &[\n");
+
+    for entry in &manifest.entries {
+        out.push_str("    CachedScriptBinding {\n");
+        out.push_str(&format!("        scene: {:?},\n", entry.scene));
+        out.push_str(&format!("        entity_id: {},\n", entry.entity_id));
+        out.push_str(&format!("        slot: {},\n", entry.slot));
+        out.push_str(&format!("        name: {:?},\n", entry.name));
+        out.push_str(&format!("        enabled: {},\n", entry.enabled));
+        out.push_str(&format!(
+            "        source_hash: 0x{:016x},\n",
+            entry.source_hash
+        ));
+        out.push_str(&format!(
+            "        native_symbol: {:?},\n",
+            entry.native_symbol
+        ));
+        out.push_str("    },\n");
+    }
+
+    out.push_str("];\n");
+    out
 }
 
 #[cfg(test)]
