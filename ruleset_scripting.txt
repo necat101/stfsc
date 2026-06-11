@@ -1,27 +1,118 @@
-# STFSC Engine: "Fuck Script" Ruleset & Technical Guide
+# STFSC FuckScript Ruleset
 
-This document is for future AI agents and developers working with the STFSC
-engine scripting system.
+This file is for AI agents and humans who write STFSC scripts.
 
-This is where we get intimate with the engine, hence the name "Fuck Script" :3
+Write scripts like a tired small local model must understand them. Be plain.
+Do not be clever. Do not invent helpers. Use short names. Use one behavior per
+script when possible.
 
-## 1. System Overview
+## 0. The Tiny Mental Model
 
-"Fuck Scripts" are dynamic entity behaviors built around the Rust trait
-`FuckScript` in `src/world/scripting.rs`. Runtime scripts are native Rust
-objects stored in the ECS as boxed trait objects.
+There are two kinds of FuckScript work:
 
-The editor supports multiple script components on a single object. Keep the
-preset scripts, but allow users to stack, edit, remove, disable, and add custom
-scripts.
+1. Native Rust scripts.
+   These run now. They implement the Rust trait `FuckScript`.
 
-Hard rule: an entity may have at most `MAX_SCRIPTS_PER_ENTITY == 32` script
-components. This constant lives in `src/project/scene.rs` and is enforced by
-scene metadata, the editor, and `DynamicScript`.
+2. Editable FuckScript source.
+   This is saved in `ScriptComponent.source` and exported into the native script
+   cache. Live preview still runs the registered runtime script name, usually
+   `CustomFuckScript`, until generated native bindings are connected.
 
-## 2. Core Runtime Trait
+Important: do not claim editable source is interpreted live. It is preserved and
+exported. Native Rust presets are what actually run today.
 
-Implement native scripts by implementing:
+## 1. Hard Rules
+
+- Max scripts on one entity: `MAX_SCRIPTS_PER_ENTITY == 32`.
+- Script order matters. Keep the user's order.
+- Do not remove existing scripts unless the user asks.
+- Prefer `SetScripts { id, names }` for editor deploys.
+- Use enabled script names only in `SetScripts`.
+- Unknown script names are ignored by the runtime registry.
+- Keep `script_components`, `script`, and `scripts` in sync for scene files.
+- New native presets must be registered and added to the built-in name list.
+- Use `ScriptContext`. Do not reach around it unless native Rust code must.
+
+## 2. Current Built-In Script Names
+
+These names can be put in script stacks:
+
+```text
+TestBounce
+CrowdAgent
+Vehicle
+PoliceAgent
+TrafficAI
+WeaponNPC
+CollisionLogger
+TouchToDestroy
+HeadAnchor
+LeftHandAnchor
+RightHandAnchor
+LeftAimAnchor
+RightAimAnchor
+TriggerHaptics
+CustomFuckScript
+```
+
+Use these before writing new scripts.
+
+## 3. Runtime Hook Order
+
+Each enabled script slot runs in stack order.
+
+For each script, the engine does this:
+
+```text
+if script has not started:
+    on_start(ctx)
+    on_enable(ctx)
+
+on_xr_input(ctx, event) for each XR event
+on_xr_frame(ctx, xr_snapshot)
+on_animation_event(ctx, event_name) for each animation event
+on_fixed_update(ctx)
+on_update(ctx)
+on_late_update(ctx)
+```
+
+Simple rule:
+
+- Use `on_start` for setup.
+- Use `on_update` for normal gameplay.
+- Use `on_fixed_update` for physics.
+- Use `on_late_update` for head/hand/camera following.
+- Use collision hooks for collision behavior.
+- Use XR hooks for controller edges and XR pose data.
+
+## 4. Allowed Hook Names
+
+Use only these hook names:
+
+```text
+on_start(ctx)
+on_update(ctx)
+on_fixed_update(ctx)
+on_late_update(ctx)
+on_enable(ctx)
+on_disable(ctx)
+on_collision_start(ctx, other)
+on_collision_end(ctx, other)
+on_trigger_start(ctx, other)
+on_trigger_end(ctx, other)
+on_player_respawn(ctx)
+on_ui_event(ctx, event)
+on_animation_event(ctx, event_name)
+on_xr_frame(ctx, xr)
+on_xr_input(ctx, event)
+```
+
+Do not write `Update`, `tick`, `awake`, `ready`, `process`, `Start`, or Unity
+style names.
+
+## 5. Native Rust Trait
+
+Native scripts implement this trait in `src/world/scripting.rs`:
 
 ```rust
 pub trait FuckScript: Send + Sync {
@@ -43,326 +134,212 @@ pub trait FuckScript: Send + Sync {
 }
 ```
 
-Use only the hooks you need. Empty defaults are intentional.
+Only implement the hooks you need.
 
-## 3. ScriptContext Helpers
+## 6. Native ScriptContext Helpers
 
-Use `ScriptContext` instead of reaching around engine internals.
+These exist in Rust today:
 
-- `get_component<T>()`: read-only component access.
-- `get_component_mut<T>()`: mutable component access.
-- `transform()` / `transform_mut()`: quick access to this entity's `Transform`.
-- `despawn_self()`: remove the current entity.
-- `head_pose()`, `controller(hand)`, `xr_pose(space)`: tracked XR poses.
-- `action_pressed(name)`, `action_just_pressed(name)`, `action_value(name)`: abstract XR actions.
-- `request_haptic(hand, amplitude, duration_seconds)`: queue a haptic pulse.
-- `track_transform_to_xr_pose(space, position_offset, rotation_offset)`: make an entity follow an XR pose.
+```rust
+ctx.entity
+ctx.world
+ctx.physics
+ctx.dt
+ctx.xr
+ctx.get_component::<T>()
+ctx.get_component_mut::<T>()
+ctx.transform()
+ctx.transform_mut()
+ctx.despawn_self()
+ctx.xr_pose(space)
+ctx.head_pose()
+ctx.controller(hand)
+ctx.action(name)
+ctx.action_pressed(name)
+ctx.action_just_pressed(name)
+ctx.action_just_released(name)
+ctx.action_value(name)
+ctx.request_haptic(hand, amplitude, seconds)
+ctx.track_transform_to_xr_pose(space, position_offset, rotation_offset)
+```
 
-## 4. Scene Metadata Model
+Do not use non-existent native helpers like `ctx.player_position()` or
+`ctx.menu_back()` in Rust unless you add them first.
 
-`SceneEntity` has legacy script fields plus the new canonical component stack:
+## 7. Editable Source Syntax
 
-- `script: Option<String>`: legacy first script name.
-- `scripts: Vec<String>`: legacy/runtime enabled script names.
-- `script_components: Vec<ScriptComponent>`: canonical editable script slots.
-
-Future agents should prefer `script_components` when editing scene files. Keep
-the legacy fields in sync by calling `sync_legacy_script_fields()` after
-changing components.
-
-`ScriptComponent` fields:
-
-- `name`: runtime script name. For presets this must match the registry name.
-- `enabled`: disabled slots are preserved in the editor but omitted from runtime `SetScripts`.
-- `source`: editable cache source shown in the inspector.
-- `compile_mode`: `BuiltinNative`, `EditableNativeCache`, or `CustomNativeCache`.
-- `cache_key`: optional future cache override.
-
-Important helper behavior:
-
-- `script_names()` returns enabled runtime names and clamps to 32.
-- `set_script_names(names)` preserves existing source text by slot where possible.
-- `ensure_script_components()` migrates legacy `script`/`scripts` into component slots.
-- `clamp_script_components()` truncates at 32.
-
-## 5. Script Stack Execution
-
-Runtime `DynamicScript` contains `Vec<ScriptSlot>`, not just one script.
-
-Scripts execute in stack order. Do not reorder scripts unless the user asks for
-that. Order can matter for gameplay.
-
-For each enabled slot, the engine:
-
-1. Takes the slot out of `DynamicScript`.
-2. Calls `on_start` and `on_enable` once if it has not started yet.
-3. Delivers pending XR input events.
-4. Calls `on_xr_frame`.
-5. Delivers animation events.
-6. Calls `on_fixed_update`.
-7. Calls `on_update`.
-8. Calls `on_late_update`.
-9. Puts the slot back.
-
-This is the required take pattern. Do not hold a mutable borrow of the
-`DynamicScript` component while calling into a script, because scripts also need
-mutable ECS access through `ScriptContext`.
-
-## 6. Built-in Preset Scripts
-
-Presets are first-class and should be kept available in the editor.
-
-Current preset names:
-
-- `TestBounce`: oscillating movement test.
-- `CrowdAgent`: NPC wandering/steering with stuck recovery.
-- `Vehicle`: physics vehicle bootstrap and suspension-style force logic.
-- `PoliceAgent`: chase behavior around the player.
-- `TrafficAI`: obstacle-aware vehicle AI.
-- `WeaponNPC`: smooth facing/combat placeholder behavior.
-- `CollisionLogger`: logs collision start/end events.
-- `TouchToDestroy`: despawns itself on collision.
-- `HeadAnchor`: follows the HMD/head pose.
-- `LeftHandAnchor`: follows left grip pose.
-- `RightHandAnchor`: follows right grip pose.
-- `LeftAimAnchor`: follows left aim pose.
-- `RightAimAnchor`: follows right aim pose.
-- `TriggerHaptics`: trigger-edge haptic test.
-
-If adding a new preset:
-
-1. Implement the Rust struct in `src/world/scripting.rs`.
-2. Implement `FuckScript`.
-3. Register it in `GameWorld::new()` in `src/world/mod.rs`.
-4. Add its name to `BUILTIN_SCRIPT_NAMES` in `src/world/scripting.rs`.
-5. Add or update tests if behavior is non-trivial.
-
-## 7. Custom FuckScript
-
-The editor has a `Custom FuckScript` option. Its runtime name is
-`CustomFuckScript`.
-
-Current behavior:
-
-- `ScriptComponent::custom()` creates an editable custom source template.
-- Runtime deploy uses `CustomFuckScript`, a native placeholder script registered
-  in the script registry.
-- Export writes custom/edited source into the native script cache manifest.
-
-Do not claim that arbitrary custom source is fully interpreted at runtime yet.
-The current system preserves and exports custom source, and gives it a native
-placeholder during live preview. The native codegen/binding layer is prepared
-through export artifacts and can be extended later.
-
-## 8. Editable FuckScript Source Syntax
-
-This section is intentionally concrete. Cheaper/local agents should copy these
-patterns instead of inventing new syntax.
-
-Current status: this source is preserved in `ScriptComponent.source` and written
-to the export script cache. Live preview still dispatches the registered native
-runtime script name, usually `CustomFuckScript`, until generated native bindings
-are connected. Treat these examples as the canonical editable/cache source style
-for the native codegen path.
-
-### 8.1 Minimal Script Shape
-
-Always wrap behavior in one `script Name { ... }` block. The script name should
-match the slot's runtime name when possible.
+Editable source is intentionally tiny. Use this shape:
 
 ```fuckscript
 script CustomFuckScript {
     on_start(ctx) {
-        log("Custom script started");
     }
 
     on_update(ctx) {
-        // Per-frame visual/gameplay logic.
-    }
-
-    on_fixed_update(ctx) {
-        // Physics-step logic.
-    }
-
-    on_late_update(ctx) {
-        // Camera, hand, and follow logic after normal update.
     }
 }
 ```
 
-Use `//` for comments. Use semicolons after assignments and function calls. Use
-lower_snake_case for local variables. Keep field names explicit and boring.
+Small-agent syntax rules:
 
-### 8.2 Common Values And Helpers
+- Always start with `script Name {`.
+- Always close braces.
+- Use `//` comments.
+- Use semicolons after assignments and calls.
+- Use `ctx.state.name` for script memory.
+- Use `ctx.transform.position`, `ctx.transform.rotation`, and
+  `ctx.transform.scale` for simple movement.
+- Use `ctx.dt` for time.
+- Use numbers like `1.0`, not `1`.
+- Prefer one `if` at a time.
+- Avoid nested logic if possible.
+- Avoid one-line tricks.
+- Avoid ternary expressions.
+- Avoid custom syntax.
 
-Preferred literal/value style:
+Approved value helpers for editable source:
 
-```fuckscript
-let speed = 3.0;
-let turn_speed = 8.0;
-let up = vec3(0.0, 1.0, 0.0);
-let identity = quat_identity();
+```text
+vec3(x, y, z)
+quat_identity()
+quat_from_rotation_y(yaw)
+sin(x)
+atan2(y, x)
+length(v)
+length_squared(v)
+normalize(v)
+clamp(value, min, max)
+slerp(a, b, t)
 ```
 
-Preferred context style:
+Approved context helper names for editable source:
 
-```fuckscript
-let dt = ctx.dt;
-let self_pos = ctx.transform.position;
-ctx.transform.position = self_pos + vec3(0.0, 1.0, 0.0) * dt;
+```text
+ctx.log(text)
+ctx.despawn_self()
+ctx.action_pressed(name)
+ctx.action_just_pressed(name)
+ctx.action_just_released(name)
+ctx.action_value(name)
+ctx.request_haptic(hand, amplitude, seconds)
+ctx.track_transform_to_xr_pose(space, position_offset, rotation_offset)
 ```
 
-Expected helper names for generated bindings:
+Use hand strings:
 
-- `ctx.transform.position`, `ctx.transform.rotation`, `ctx.transform.scale`
-- `ctx.player_position()`
-- `ctx.has_component("ComponentName")`
-- `ctx.despawn_self()`
-- `ctx.log(message)` or `log(message)`
-- `ctx.action_pressed("name")`
-- `ctx.action_just_pressed("name")`
-- `ctx.action_value("name")`
-- `ctx.head_pose()`
-- `ctx.controller("left")`, `ctx.controller("right")`
-- `ctx.xr_pose("head")`, `ctx.xr_pose("left_grip")`, `ctx.xr_pose("right_grip")`
-- `ctx.request_haptic("left", amplitude, seconds)`
-- `ctx.request_haptic("right", amplitude, seconds)`
-- `ctx.track_transform_to_xr_pose(space, position_offset, rotation_offset)`
+```text
+"left"
+"right"
+```
 
-When a helper does not exist yet in generated bindings, map it to the nearest
-native `ScriptContext` method instead of adding a second scripting API.
+Use XR pose strings:
 
-### 8.3 Move Up And Down
+```text
+"head"
+"left_grip"
+"right_grip"
+"left_aim"
+"right_aim"
+```
 
-Simple visual movement should mutate `ctx.transform`. This is the safest starter
-example.
+If a helper is not in this file, do not invent it.
+
+## 8. Best Default Custom Script
+
+When unsure, write this:
 
 ```fuckscript
-script HoverBob {
+script CustomFuckScript {
     on_start(ctx) {
-        ctx.state.base_y = ctx.transform.position.y;
+        ctx.log("started");
+    }
+
+    on_update(ctx) {
+    }
+}
+```
+
+This is boring. Boring is good.
+
+## 9. Simple Editable Examples
+
+### Move Up Slowly
+
+```fuckscript
+script MoveUp {
+    on_update(ctx) {
+        let p = ctx.transform.position;
+        let speed = 1.0;
+
+        ctx.transform.position = vec3(p.x, p.y + speed * ctx.dt, p.z);
+    }
+}
+```
+
+### Spin Around
+
+```fuckscript
+script Spin {
+    on_start(ctx) {
+        ctx.state.yaw = 0.0;
+    }
+
+    on_update(ctx) {
+        ctx.state.yaw = ctx.state.yaw + 1.5 * ctx.dt;
+        ctx.transform.rotation = quat_from_rotation_y(ctx.state.yaw);
+    }
+}
+```
+
+### Bounce Up And Down
+
+```fuckscript
+script Bounce {
+    on_start(ctx) {
         ctx.state.time = 0.0;
+        ctx.state.base_y = ctx.transform.position.y;
     }
 
     on_update(ctx) {
         ctx.state.time = ctx.state.time + ctx.dt;
 
         let p = ctx.transform.position;
-        let bob = sin(ctx.state.time * 2.0) * 0.25;
-        ctx.transform.position = vec3(p.x, ctx.state.base_y + bob, p.z);
+        let y = ctx.state.base_y + sin(ctx.state.time * 2.0) * 0.5;
+
+        ctx.transform.position = vec3(p.x, y, p.z);
     }
 }
 ```
 
-### 8.4 Face The Player
-
-This matches the native Rust example later in this file, but in editable source
-form.
-
-```fuckscript
-script FacePlayer {
-    on_update(ctx) {
-        let player = ctx.player_position();
-        let self_pos = ctx.transform.position;
-        let to_player = player - self_pos;
-
-        if length_squared(to_player) > 0.001 {
-            let yaw = atan2(to_player.x, to_player.z);
-            let target = quat_from_rotation_y(yaw);
-            ctx.transform.rotation = slerp(
-                ctx.transform.rotation,
-                target,
-                clamp(ctx.dt * 8.0, 0.0, 1.0)
-            );
-        }
-    }
-}
-```
-
-### 8.5 Patrol Between Two Points
-
-Use persistent `ctx.state.*` fields for script-owned state. Do not create hidden
-global variables.
-
-```fuckscript
-script PatrolLine {
-    on_start(ctx) {
-        ctx.state.origin = ctx.transform.position;
-        ctx.state.target_index = 0;
-    }
-
-    on_update(ctx) {
-        let a = ctx.state.origin + vec3(-3.0, 0.0, 0.0);
-        let b = ctx.state.origin + vec3( 3.0, 0.0, 0.0);
-        let target = if ctx.state.target_index == 1 { b } else { a };
-
-        let pos = ctx.transform.position;
-        let to_target = target - pos;
-
-        if length(to_target) < 0.1 {
-            ctx.state.target_index = 1 - ctx.state.target_index;
-            return;
-        }
-
-        ctx.transform.position = pos + normalize(to_target) * 2.0 * ctx.dt;
-    }
-}
-```
-
-### 8.6 Physics Push
-
-Physics behavior belongs in `on_fixed_update`. Prefer forces/velocities through
-the physics helpers instead of teleporting dynamic bodies.
-
-```fuckscript
-script ConstantForwardForce {
-    on_fixed_update(ctx) {
-        if ctx.has_component("RigidBodyHandle") {
-            let forward = ctx.transform.rotation * vec3(0.0, 0.0, -1.0);
-            ctx.physics.add_force(ctx.entity, forward * 25.0);
-        }
-    }
-}
-```
-
-If generated bindings do not expose `ctx.physics.add_force` yet, implement this
-as a native Rust preset using `RigidBodyHandle` and `PhysicsWorld`.
-
-### 8.7 Collision / Trigger Scripts
-
-Collision hooks receive `other`, the other entity involved in the collision.
+### Destroy Self On Collision
 
 ```fuckscript
 script DestroyOnTouch {
     on_collision_start(ctx, other) {
-        ctx.log("DestroyOnTouch hit something");
+        ctx.log("hit");
         ctx.despawn_self();
     }
 }
 ```
 
-```fuckscript
-script OpenDoorTrigger {
-    on_trigger_start(ctx, other) {
-        ctx.state.open = true;
-    }
+### Pulse Right Controller
 
+```fuckscript
+script PulseRightTrigger {
     on_update(ctx) {
-        if ctx.state.open == true {
-            let target = quat_from_rotation_y(1.5708);
-            ctx.transform.rotation = slerp(ctx.transform.rotation, target, ctx.dt * 4.0);
+        if ctx.action_just_pressed("fire") {
+            ctx.request_haptic("right", 0.7, 0.08);
         }
     }
 }
 ```
 
-### 8.8 XR Hand, Head, And Haptics
+### Follow Right Hand
 
-Use `on_late_update` for tracked-pose following so the pose wins after normal
-gameplay updates.
+Use `on_late_update` for hand/head following.
 
 ```fuckscript
-script RightHandFollower {
+script FollowRightHand {
     on_late_update(ctx) {
         ctx.track_transform_to_xr_pose(
             "right_grip",
@@ -373,144 +350,154 @@ script RightHandFollower {
 }
 ```
 
-Use `on_xr_input` or edge helpers for haptics.
+### Open A Door Slowly
 
 ```fuckscript
-script TriggerPulse {
+script OpenDoorOnTouch {
+    on_start(ctx) {
+        ctx.state.open = false;
+        ctx.state.angle = 0.0;
+    }
+
+    on_trigger_start(ctx, other) {
+        ctx.state.open = true;
+    }
+
     on_update(ctx) {
-        if ctx.action_just_pressed("trigger_right") {
-            ctx.request_haptic("right", 0.7, 0.08);
-        }
-
-        if ctx.action_pressed("trigger_left") {
-            ctx.request_haptic("left", 0.25, 0.02);
+        if ctx.state.open == true {
+            ctx.state.angle = ctx.state.angle + 1.5 * ctx.dt;
+            ctx.state.angle = clamp(ctx.state.angle, 0.0, 1.5708);
+            ctx.transform.rotation = quat_from_rotation_y(ctx.state.angle);
         }
     }
 }
 ```
 
-### 8.9 UI Event Script
+## 10. UI Rules
 
-Use exact button/action ids from the UI layout.
+UI layout callbacks are handled by the engine. The built-in callback strings are:
+
+```text
+menu_load("alias")
+menu_back()
+menu_back
+```
+
+Do not write `ctx.menu_back()` in a script unless a native helper is added.
+
+Scripts can still receive `on_ui_event(ctx, event)`, but the current native
+`ScriptContext` does not expose a simple menu helper. For menus, prefer UI
+layout callbacks.
+
+Simple UI source example:
 
 ```fuckscript
-script PauseMenuButtons {
+script LogUiClick {
     on_ui_event(ctx, event) {
-        if event.kind == "button_clicked" && event.id == "resume" {
-            ctx.menu_back();
-        }
+        ctx.log("ui event");
+    }
+}
+```
 
-        if event.kind == "button_clicked" && event.id == "quit" {
-            ctx.emit_engine_event("quit_requested");
+## 11. Physics Rules
+
+Use `on_fixed_update` for physics.
+
+Simple movement of non-physics objects may change `ctx.transform`.
+
+Dynamic physics objects should use native Rust today. Editable source may show
+intent, but the real force call must map to `ctx.physics` and
+`RigidBodyHandle` in Rust.
+
+Bad for physics objects:
+
+```fuckscript
+ctx.transform.position = ctx.transform.position + vec3(0.0, 10.0, 0.0);
+```
+
+Better idea:
+
+```text
+Make a native Rust preset that gets RigidBodyHandle and calls body.add_force().
+```
+
+## 12. XR Rules
+
+Built-in action names are populated from controls:
+
+```text
+fire
+interact
+aim
+grab
+grab_left
+pause
+```
+
+Use these first.
+
+Native XR enums:
+
+```rust
+XrHand::Left
+XrHand::Right
+XrPoseSpace::Head
+XrPoseSpace::Grip(XrHand::Left)
+XrPoseSpace::Grip(XrHand::Right)
+XrPoseSpace::Aim(XrHand::Left)
+XrPoseSpace::Aim(XrHand::Right)
+```
+
+Native haptic example:
+
+```rust
+ctx.request_haptic(XrHand::Right, 0.7, 0.08);
+```
+
+## 13. Native Rust Examples
+
+### Native No-Op Script
+
+```rust
+pub struct MyScript;
+
+impl FuckScript for MyScript {}
+```
+
+### Native Move Up
+
+```rust
+pub struct MoveUpScript;
+
+impl FuckScript for MoveUpScript {
+    fn on_update(&mut self, ctx: &mut ScriptContext) {
+        let dt = ctx.dt;
+
+        if let Some(mut transform) = ctx.transform_mut() {
+            transform.position.y += 1.0 * dt;
         }
     }
 }
 ```
 
-If a UI helper is missing in native bindings, route through `on_ui_event` in a
-native Rust preset and keep the source text as the exported cache version.
+### Native Face Player
 
-### 8.10 Source Syntax Rules For Small Agents
+This is the safe Rust pattern:
 
-- Start with `script CustomFuckScript { ... }` unless the user names a script.
-- Use only known hooks: `on_start`, `on_update`, `on_fixed_update`,
-  `on_late_update`, `on_enable`, `on_disable`, `on_collision_start`,
-  `on_collision_end`, `on_trigger_start`, `on_trigger_end`,
-  `on_player_respawn`, `on_ui_event`, `on_animation_event`, `on_xr_frame`,
-  `on_xr_input`.
-- Use `ctx.state.name` for persistent script state.
-- Use `ctx.transform` for simple movement/rotation/scale.
-- Use `on_fixed_update` for physics and `on_late_update` for XR pose following.
-- Do not invent new hook names like `Update`, `tick`, `awake`, or `process`.
-- Do not write Python, Lua, JavaScript, or C# in `ScriptComponent.source`.
-- If unsure, write a small script with one hook and one behavior.
-
-## 9. Compile Cache / IL2CPP-Like Export Path
-
-The engine is moving toward an IL2CPP-like model: resolve script stacks at build
-time into native Rust-backed bindings for fast re-execution.
-
-During export, `ProjectExporter::prepare_script_compile_cache()` writes:
-
-- `script_cache/script_manifest.json`
-- `script_cache/generated_script_bindings.rs`
-
-The manifest includes scene path, entity id, slot index, script name, enabled
-state, compile mode, source hash, cache key, and native symbol.
-
-Future agents adding source-to-Rust generation should build on this manifest
-instead of inventing a second cache format.
-
-## 10. Deployment Rules
-
-The editor sends runtime script stacks with:
+1. Read player position first.
+2. Drop the query borrow.
+3. Mutate this entity.
 
 ```rust
-SceneUpdate::SetScripts { id, names }
-```
-
-`names` must be enabled runtime names only, max 32. Unknown names are logged and
-ignored by the runtime registry.
-
-`SceneUpdate::AttachScript { id, name }` still exists, but for editor workflows
-prefer `SetScripts` because it replaces the whole stack and preserves ordering.
-
-## 11. Writing Good Runtime Scripts
-
-- Scripts must be `Send + Sync`.
-- Avoid allocations inside `on_update`; cache state inside the script struct.
-- Prefer `on_start` for one-time component insertion/setup.
-- Prefer `on_fixed_update` for physics-step logic and force application.
-- Prefer `on_late_update` for camera/hand/pose followers.
-- For simple movement, mutate `Transform`.
-- For physics entities, apply forces through `RigidBodyHandle` and `PhysicsWorld`.
-- Avoid nested ECS mutable borrows. Gather read data first, release borrows, then mutate.
-- Keep user-facing behavior deterministic when possible.
-
-## 12. Player Tracking
-
-The runtime spawns a `Player` marker component and syncs its transform from the
-desktop camera or XR head pose.
-
-Find the player like this:
-
-```rust
-for (_entity, (transform, _player)) in ctx.world.query::<(&Transform, &Player)>().iter() {
-    let player_pos = transform.position;
-    // Use player_pos here.
-}
-```
-
-## 13. Collision And Trigger Events
-
-Collision callbacks are dispatched through Rapier events. Rigid bodies must have
-their `user_data` set to `entity.to_bits().get() as u128` for collision events
-to map back to ECS entities.
-
-Use:
-
-- `on_collision_start`
-- `on_collision_end`
-- `on_trigger_start`
-- `on_trigger_end`
-
-## 14. Example Native Script
-
-```rust
-pub struct FacePlayerScript {
-    turn_speed: f32,
-}
-
-impl Default for FacePlayerScript {
-    fn default() -> Self {
-        Self { turn_speed: 8.0 }
-    }
-}
+pub struct FacePlayerScript;
 
 impl FuckScript for FacePlayerScript {
     fn on_update(&mut self, ctx: &mut ScriptContext) {
         let mut player_pos = None;
-        for (_entity, (transform, _player)) in ctx.world.query::<(&Transform, &Player)>().iter() {
+
+        for (_entity, (transform, _player)) in
+            ctx.world.query::<(&Transform, &Player)>().iter()
+        {
             player_pos = Some(transform.position);
             break;
         }
@@ -519,43 +506,200 @@ impl FuckScript for FacePlayerScript {
             return;
         };
 
+        let dt = ctx.dt;
+
         if let Some(mut transform) = ctx.transform_mut() {
             let to_player = player_pos - transform.position;
+
             if to_player.length_squared() > 0.001 {
-                let target_yaw = to_player.x.atan2(to_player.z);
-                let target = glam::Quat::from_rotation_y(target_yaw);
-                transform.rotation = transform
-                    .rotation
-                    .slerp(target, (ctx.dt * self.turn_speed).clamp(0.0, 1.0));
+                let yaw = to_player.x.atan2(to_player.z);
+                let target = glam::Quat::from_rotation_y(yaw);
+                let amount = (dt * 8.0).clamp(0.0, 1.0);
+
+                transform.rotation = transform.rotation.slerp(target, amount);
             }
         }
     }
 }
 ```
 
-Register it:
+### Native Trigger Haptic
 
 ```rust
-reg.register("FacePlayer", || FacePlayerScript::default());
+pub struct SimpleHapticScript;
+
+impl FuckScript for SimpleHapticScript {
+    fn on_xr_input(&mut self, ctx: &mut ScriptContext, event: &XrInputEvent) {
+        if event.phase != XrInputPhase::Pressed {
+            return;
+        }
+
+        if event.control != Some(XrInputControl::Trigger) {
+            return;
+        }
+
+        let Some(hand) = event.hand else {
+            return;
+        };
+
+        ctx.request_haptic(hand, 0.5, 0.05);
+    }
+}
 ```
 
-Then add `"FacePlayer"` to `BUILTIN_SCRIPT_NAMES` if it should appear as an
-editor preset.
+## 14. Registering A New Native Preset
 
-## 15. Agent Checklist
+If a script must run now, make it native.
 
-When an AI agent writes or edits scripts:
+Steps:
 
-1. Decide whether this is a built-in native preset or a custom editable script.
-2. Keep script stacks under 32 components.
-3. Preserve existing preset scripts unless the user explicitly asks to remove them.
-4. Keep `script_components`, `script`, and `scripts` synchronized.
-5. Register new native presets in both the registry and `BUILTIN_SCRIPT_NAMES`.
-6. Update export/cache behavior only through the existing `script_cache` manifest path.
-7. Run at least `cargo check --bins` and preferably `cargo test`.
+1. Add the script struct in `src/world/scripting.rs`.
+2. Implement `FuckScript`.
+3. Register it in `GameWorld::new()` in `src/world/mod.rs`.
+4. Add the name to `BUILTIN_SCRIPT_NAMES` in `src/world/scripting.rs`.
+5. Add tests if the behavior matters.
 
----
+Example registry line:
 
-Always remember: runtime Rust scripts are native and fast; editable/custom source
-is currently preserved and exported for native cache generation, with live
-preview backed by the registered runtime script name.
+```rust
+reg.register("MoveUp", || MoveUpScript);
+```
+
+## 15. Scene Metadata Rules
+
+`SceneEntity` has these script fields:
+
+```text
+script: Option<String>
+scripts: Vec<String>
+script_components: Vec<ScriptComponent>
+```
+
+Use `script_components` as the real editable stack.
+
+`ScriptComponent` has:
+
+```text
+name
+enabled
+source
+compile_mode
+cache_key
+```
+
+Compile modes:
+
+```text
+BuiltinNative
+EditableNativeCache
+CustomNativeCache
+```
+
+Rules:
+
+- Built-in script slots usually use `BuiltinNative`.
+- Custom editable slots use `CustomNativeCache`.
+- Disabled slots stay in the editor but are not sent in `SetScripts`.
+- Call `sync_legacy_script_fields()` after changing scene script components.
+- Clamp to 32 scripts.
+
+## 16. Export Cache Rules
+
+Export writes script cache data here:
+
+```text
+script_cache/script_manifest.json
+script_cache/generated_script_bindings.rs
+```
+
+Agents must extend this path. Do not invent a second script cache system.
+
+The cache stores:
+
+```text
+scene path
+entity id
+slot index
+script name
+enabled state
+compile mode
+source hash
+cache key
+native symbol
+```
+
+## 17. Common Mistakes To Avoid
+
+Do not write this:
+
+```fuckscript
+function update() {
+}
+```
+
+Do not write this:
+
+```javascript
+class Enemy extends Script {
+}
+```
+
+Do not write this:
+
+```lua
+function on_update(ctx)
+end
+```
+
+Do not write this:
+
+```csharp
+void Update() {
+}
+```
+
+Do write this:
+
+```fuckscript
+script CustomFuckScript {
+    on_update(ctx) {
+    }
+}
+```
+
+## 18. Small Agent Checklist
+
+Before writing:
+
+1. Can a built-in script do it?
+2. Does it need to run now? If yes, use native Rust.
+3. Is it just saved/exported custom logic? If yes, use editable source.
+4. Is the script under 32 slots?
+5. Is the hook name allowed?
+6. Did you avoid invented helpers?
+
+Before finishing:
+
+1. Keep script order.
+2. Keep existing scripts unless asked.
+3. Sync legacy fields.
+4. For Rust changes, run `cargo check --bins`.
+5. Prefer `cargo test --lib` if scripting behavior changed.
+
+## 19. Default Answer For Unsure Agents
+
+When uncertain, produce this and stop:
+
+```fuckscript
+script CustomFuckScript {
+    on_start(ctx) {
+        ctx.log("CustomFuckScript started");
+    }
+
+    on_update(ctx) {
+    }
+}
+```
+
+Then tell the user: live preview runs the native `CustomFuckScript` placeholder
+until the export/native binding step is connected.
