@@ -15,7 +15,7 @@ use stfsc_engine::graphics::{
 };
 use stfsc_engine::lighting::{self, GpuLightData, LightUBO};
 use stfsc_engine::physics::PhysicsWorld;
-use stfsc_engine::resource_loader::{ResourceLoadResult, ResourceLoader};
+use stfsc_engine::resource_loader::{ResourceLoadPriority, ResourceLoadResult, ResourceLoader};
 use stfsc_engine::ui::font::FontAtlas;
 use stfsc_engine::ui::renderer::UiRenderer;
 use stfsc_engine::ui::{
@@ -716,11 +716,13 @@ fn main() {
     // Game Logic Thread
     let game_state_logic = game_state.clone();
     std::thread::spawn(move || {
+        let timing = stfsc_engine::runtime::EngineTimingConfig::desktop_60hz();
+        let fixed_dt = timing.fixed_dt_secs();
         loop {
             let start = std::time::Instant::now();
             {
                 if let Ok(mut state) = game_state_logic.write() {
-                    state.physics.step_with_dt(0.016);
+                    state.physics.step_with_dt(fixed_dt);
 
                     // Sync player position FROM physics
                     let player_rb_handle = state.player_rb.0;
@@ -780,7 +782,7 @@ fn main() {
                     world.update_streaming(pos, physics);
 
                     let ui_events = std::mem::take(&mut world.pending_ui_events);
-                    world.update_logic(physics, 0.016, ui_events);
+                    world.update_logic(physics, fixed_dt, ui_events);
 
                     // Sync physics to ECS - Keep world transforms and update local transforms if no parent
                     use rayon::prelude::*;
@@ -844,10 +846,7 @@ fn main() {
                     }
                 }
             }
-            let elapsed = start.elapsed();
-            if elapsed < std::time::Duration::from_millis(16) {
-                std::thread::sleep(std::time::Duration::from_millis(16) - elapsed);
-            }
+            stfsc_engine::runtime::sleep_remaining(start, timing.target_frame_time);
         }
     });
 
@@ -1502,8 +1501,18 @@ fn main() {
                     for (texture_id, data) in pending {
                         if !texture_cache.contains_key(&texture_id) {
                             if queued_textures < max_texture_uploads {
-                                resource_loader.queue_texture(texture_id, data);
-                                queued_textures += 1;
+                                match resource_loader.try_queue_texture_with_priority(
+                                    texture_id,
+                                    data,
+                                    ResourceLoadPriority::High,
+                                ) {
+                                    Ok(()) => queued_textures += 1,
+                                    Err(error) => {
+                                        let (texture_id, data) = error.into_inner();
+                                        state.world.pending_texture_uploads.insert(texture_id, data);
+                                        break;
+                                    }
+                                }
                             } else {
                                 state.world.pending_texture_uploads.insert(texture_id, data);
                             }
@@ -1546,9 +1555,12 @@ fn main() {
                         if state.world.ecs.get::<&GpuMesh>(id).is_ok() { continue; }
                         if pending_uploads.contains(&id) { continue; }
                         if queued_meshes >= max_mesh_uploads { break; }
-                        resource_loader.queue_mesh(id, mesh.clone());
-                        pending_uploads.insert(id);
-                        queued_meshes += 1;
+                        if resource_loader.try_queue_mesh(id, mesh.clone()).is_ok() {
+                            pending_uploads.insert(id);
+                            queued_meshes += 1;
+                        } else {
+                            break;
+                        }
                     }
                 }
                 for result in resource_loader

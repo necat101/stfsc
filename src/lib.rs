@@ -32,7 +32,7 @@ use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 #[cfg(target_os = "android")]
 use openxr as oxr;
 #[cfg(target_os = "android")]
-use resource_loader::{ResourceLoadResult, ResourceLoader};
+use resource_loader::{ResourceLoadPriority, ResourceLoadResult, ResourceLoader};
 #[cfg(target_os = "android")]
 mod xr;
 #[cfg(target_os = "android")]
@@ -726,7 +726,11 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                                         }
                                                     }
 
-                                                    resource_loader.queue_mesh(entity, mesh);
+                                                    resource_loader.queue_mesh_with_priority(
+                                                        entity,
+                                                        mesh,
+                                                        ResourceLoadPriority::High,
+                                                    );
                                                     info!("Queued mesh upload for entity {:?} (sub-mesh {})", entity, i);
                                                 }
                                             }
@@ -1088,6 +1092,8 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
 
     std::thread::spawn(move || {
         info!("Game Loop Thread Started");
+        let timing = crate::runtime::EngineTimingConfig::mobile_vr_36hz();
+        let fixed_dt = timing.fixed_dt_secs();
         let mut frame_count: u64 = 0;
         while !game_quit {
             let start = std::time::Instant::now();
@@ -1095,7 +1101,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             // ===== PHASE 1: Physics Step (short lock) =====
             {
                 if let Ok(mut state) = game_state_thread.try_write() {
-                    state.physics.step_with_dt(0.016);
+                    state.physics.step_with_dt(fixed_dt);
                 }
             }
             // Yield to render thread
@@ -1120,7 +1126,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                     world.update_streaming(player_pos, physics);
 
                     let ui_events = std::mem::take(&mut world.pending_ui_events);
-                    world.update_logic(physics, 0.016, ui_events);
+                    world.update_logic(physics, fixed_dt, ui_events);
                 }
             }
             // Yield to render thread
@@ -1251,13 +1257,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
             if frame_count % 100 == 0 {
                 info!("Game loop frame: {}", frame_count);
             }
-            let elapsed = start.elapsed();
-            // Target 36Hz (approx 27.77ms) for AppSW
-            // We run physics/logic at 36fps and let AppSW synthesize the rest to 72Hz
-            let target_frame_time = std::time::Duration::from_micros(27777);
-            if elapsed < target_frame_time {
-                std::thread::sleep(target_frame_time - elapsed);
-            }
+            crate::runtime::sleep_remaining(start, timing.target_frame_time);
         }
     });
 
@@ -1518,8 +1518,18 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                 texture_id,
                                 data.len()
                             );
-                            resource_loader.queue_texture(texture_id, data);
-                            queued_textures += 1;
+                            match resource_loader.try_queue_texture_with_priority(
+                                texture_id,
+                                data,
+                                ResourceLoadPriority::High,
+                            ) {
+                                Ok(()) => queued_textures += 1,
+                                Err(error) => {
+                                    let (texture_id, data) = error.into_inner();
+                                    state.world.pending_texture_uploads.insert(texture_id, data);
+                                    break;
+                                }
+                            }
                         } else {
                             state.world.pending_texture_uploads.insert(texture_id, data);
                         }
@@ -1551,9 +1561,12 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                     }
 
                     // Queue for upload
-                    resource_loader.queue_mesh(id, mesh.clone());
-                    pending_uploads.insert(id);
-                    queued_meshes += 1;
+                    if resource_loader.try_queue_mesh(id, mesh.clone()).is_ok() {
+                        pending_uploads.insert(id);
+                        queued_meshes += 1;
+                    } else {
+                        break;
+                    }
                 }
             }
 
