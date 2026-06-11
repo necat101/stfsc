@@ -1,3 +1,11 @@
+pub mod tasks;
+
+pub use tasks::{
+    FrameBudget, FramePressure, TaskBudget, TaskDomain, TaskGraph, TaskGraphError,
+    TaskGraphReport, TaskId, TaskPriority, TaskRunMetrics,
+};
+
+use std::io;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -117,6 +125,16 @@ pub fn background_worker_count() -> usize {
 
 pub fn resource_queue_capacity() -> usize {
     parallelism_config().resource_queue_capacity
+}
+
+pub fn build_async_runtime(thread_name: &str) -> io::Result<tokio::runtime::Runtime> {
+    let config = parallelism_config();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.background_workers.max(1))
+        .max_blocking_threads(config.blocking_threads.max(1))
+        .thread_name(thread_name)
+        .enable_all()
+        .build()
 }
 
 fn duration_from_hz(hz: u32) -> Duration {

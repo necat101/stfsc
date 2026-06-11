@@ -75,6 +75,9 @@ The engine still keeps its 556-class goals: dense city streaming, vehicles, crow
 
 ### Engine Architecture
 - **Entity Component System (ECS)** via `hecs`
+- **Runtime Task Graph** for dependency-aware parallel frame work across simulation, physics, render prep, streaming, networking, and maintenance systems
+- **Frame Budget Pressure Controls** for deferring non-critical jobs when a platform is close to missing frame time
+- **Platform-tuned async runtime** so desktop and standalone VR builds size networking/blocking worker pools from the same concurrency profile
 - **LOD system** with distance-based mesh switching
 - **Async Resource Loading** for background mesh uploads (No ANRs)
 

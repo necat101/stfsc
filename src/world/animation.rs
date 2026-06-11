@@ -2845,7 +2845,6 @@ mod tests {
 
     #[test]
     fn test_animation_layer_weight_blending() {
-        let skeleton = Arc::new(Skeleton::new());
         let clip = Arc::new(AnimationClip::new("test", 1.0));
         let mut layer = AnimationLayer::new(clip);
 

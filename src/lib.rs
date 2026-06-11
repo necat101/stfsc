@@ -1262,7 +1262,7 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
     });
 
     std::thread::spawn(move || {
-        let rt = match tokio::runtime::Runtime::new() {
+        let rt = match crate::runtime::build_async_runtime("stfsc-net") {
             Ok(rt) => rt,
             Err(e) => {
                 error!("Failed to create Tokio runtime: {:?}", e);

@@ -261,11 +261,6 @@ use stfsc_engine::project::scene::{
     MAX_SCRIPTS_PER_ENTITY,
 };
 
-// Helper for default layer (if needed by editor logic, otherwise handled by serde in scene.rs)
-fn default_layer_editor() -> u32 {
-    0
-}
-
 // ============================================================================
 // SCENE DATA
 // ============================================================================

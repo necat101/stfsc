@@ -651,7 +651,8 @@ fn main() {
     let _game_state_net = game_state.clone();
     let cmd_tx_net = cmd_tx.clone();
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = stfsc_engine::runtime::build_async_runtime("stfsc-net")
+            .expect("Failed to create networking runtime");
         rt.block_on(async move {
             let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
             println!("CONNECTED: Editor interface listening on 0.0.0.0:8080");
