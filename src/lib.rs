@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 #[cfg(target_os = "android")]
 use std::sync::{Arc, RwLock};
 #[cfg(target_os = "android")]
-use world::animation::{AnimationState, Animator};
+use world::animation::{AnimationEventQueue, AnimationState, Animator};
 #[cfg(target_os = "android")]
 use world::{DecodedImage, GameWorld};
 
@@ -719,7 +719,11 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                                                     );
                                                                 let _ = state.world.ecs.insert(
                                                                     entity,
-                                                                    (animator, anim_state),
+                                                                    (
+                                                                        animator,
+                                                                        anim_state,
+                                                                        AnimationEventQueue::new(),
+                                                                    ),
                                                                 );
                                                                 info!("Attached Animator to entity {:?}", entity);
                                                             }

@@ -12,7 +12,7 @@ pub mod fbx_loader;
 pub mod gltf_loader;
 pub mod sandbox;
 pub mod scripting;
-use animation::{AnimationEventQueue, AnimationState, Animator, AnimatorController};
+use animation::{AnimParam, AnimationEventQueue, AnimationState, Animator, AnimatorController};
 use scripting::{
     FuckScript, ScriptContext, ScriptRegistry, XrHapticRequest, XrInputEvent, XrInputSnapshot,
 };
@@ -1533,12 +1533,44 @@ impl GameWorld {
 
                         // Add states
                         for state_cfg in &config.states {
-                            state_machine.add_state(&state_cfg.name, state_cfg.clip_index);
+                            if state_cfg.is_blend_tree {
+                                let root = match state_cfg.blend_tree_type {
+                                    1 => BlendNode::Blend2D {
+                                        param_x: state_cfg.blend_param.clone(),
+                                        param_y: state_cfg
+                                            .blend_param_y
+                                            .clone()
+                                            .unwrap_or_else(|| "VelocityY".to_string()),
+                                        children: vec![(
+                                            0.0,
+                                            0.0,
+                                            BlendNode::Clip(state_cfg.clip_index),
+                                        )],
+                                    },
+                                    _ => BlendNode::Blend1D {
+                                        param: state_cfg.blend_param.clone(),
+                                        children: vec![(
+                                            0.0,
+                                            BlendNode::Clip(state_cfg.clip_index),
+                                        )],
+                                    },
+                                };
+                                state_machine.add_blend_tree(
+                                    &state_cfg.name,
+                                    BlendTree::new(&state_cfg.name, root),
+                                );
+                            } else {
+                                state_machine.add_state(&state_cfg.name, state_cfg.clip_index);
+                            }
+
+                            if let Some(state) = state_machine.states.get_mut(&state_cfg.name) {
+                                state.speed_multiplier = state_cfg.speed_multiplier;
+                            }
 
                             // Automatically add a transition from ANY to this state if a trigger is provided
                             if let Some(ref trigger) = state_cfg.trigger_param {
                                 state_machine.transitions.push(StateTransition::new(
-                                    "ANY",
+                                    ANY_STATE,
                                     &state_cfg.name,
                                     TransitionCondition::Trigger(trigger.clone()),
                                     0.2, // Default transition duration
@@ -1566,7 +1598,11 @@ impl GameWorld {
                                 AnimParamConfig::Float(v) => state_machine.set_float(name, *v),
                                 AnimParamConfig::Bool(v) => state_machine.set_bool(name, *v),
                                 AnimParamConfig::Int(v) => state_machine.set_int(name, *v),
-                                AnimParamConfig::Trigger => state_machine.set_trigger(name),
+                                AnimParamConfig::Trigger => {
+                                    state_machine
+                                        .parameters
+                                        .insert(name.clone(), AnimParam::Trigger(false));
+                                }
                             }
                         }
 
@@ -1582,6 +1618,90 @@ impl GameWorld {
 
                         // Attach to entity
                         let _ = self.ecs.insert_one(entity, controller);
+
+                        if let Ok(mut animator) = self.ecs.get::<&mut Animator>(entity) {
+                            animator.speed = config.speed;
+                            animator.layers.clear();
+
+                            let bone_count = animator.skeleton.bones.len();
+                            let spine_start = animator
+                                .skeleton
+                                .bones
+                                .iter()
+                                .position(|bone| {
+                                    let name = bone.name.to_ascii_lowercase();
+                                    name.contains("spine")
+                                        || name.contains("chest")
+                                        || name.contains("neck")
+                                        || name.contains("head")
+                                })
+                                .unwrap_or(bone_count / 2);
+
+                            for layer_cfg in &config.layers {
+                                if let Some(clip) =
+                                    animator.clips.get(layer_cfg.clip_index).cloned()
+                                {
+                                    let mut layer = AnimationLayer::named(&layer_cfg.name, clip);
+                                    layer.weight = layer_cfg.weight.clamp(0.0, 1.0);
+                                    layer.target_weight = layer.weight;
+                                    layer.additive = layer_cfg.additive;
+                                    layer.sync_to_base = layer_cfg.sync_to_base;
+                                    layer.avatar_mask = match layer_cfg.mask_type {
+                                        1 => Some(AvatarMask::upper_body_humanoid(
+                                            bone_count,
+                                            spine_start,
+                                        )),
+                                        2 => Some(AvatarMask::lower_body_humanoid(
+                                            bone_count,
+                                            spine_start,
+                                        )),
+                                        3 => Some(AvatarMask::from_bones(
+                                            &layer_cfg.name,
+                                            bone_count,
+                                            &layer_cfg.mask_bones,
+                                        )),
+                                        _ => None,
+                                    };
+                                    animator.add_layer(layer);
+                                }
+                            }
+
+                            animator.look_at_ik =
+                                if config.look_at_ik_enabled && !config.look_at_bones.is_empty() {
+                                    Some(if config.look_at_bones.len() >= 4 {
+                                        LookAtIK::humanoid(
+                                            config.look_at_bones[0],
+                                            config.look_at_bones[1],
+                                            config.look_at_bones[2],
+                                            config.look_at_bones[3],
+                                        )
+                                    } else {
+                                        LookAtIK::new(config.look_at_bones[0])
+                                    })
+                                } else {
+                                    None
+                                };
+
+                            animator.foot_ik =
+                                if config.foot_ik_enabled && config.foot_ik_bones.len() >= 7 {
+                                    Some(FootIK::new(
+                                        config.foot_ik_bones[0],
+                                        config.foot_ik_bones[1],
+                                        config.foot_ik_bones[2],
+                                        config.foot_ik_bones[3],
+                                        config.foot_ik_bones[4],
+                                        config.foot_ik_bones[5],
+                                        config.foot_ik_bones[6],
+                                    ))
+                                } else {
+                                    None
+                                };
+                        }
+
+                        if self.ecs.get::<&AnimationEventQueue>(entity).is_err() {
+                            let _ = self.ecs.insert_one(entity, AnimationEventQueue::new());
+                        }
+
                         info!("Attached AnimatorController to entity {} with {} states, {} transitions", 
                               id, config.states.len(), config.transitions.len());
                     } else {
@@ -1830,14 +1950,27 @@ impl GameWorld {
                                     },
                                 ));
 
-                                // Store skeleton and animations if present for the Animator to find later
-                                if let Some(skeleton) = model_scene.skeleton {
-                                    self.ecs.insert_one(entity, skeleton).unwrap();
+                                // Attach skeletal animation runtime if present.
+                                if let Some(skeleton) = model_scene.skeleton.clone() {
+                                    self.ecs.insert_one(entity, skeleton.clone()).unwrap();
+
+                                    if !model_scene.animations.is_empty() {
+                                        let clips = model_scene
+                                            .animations
+                                            .iter()
+                                            .map(|clip| Arc::new(clip.clone()))
+                                            .collect();
+                                        let animator =
+                                            Animator::new(Arc::new(skeleton.clone()), clips);
+                                        let anim_state = AnimationState::new(skeleton.bones.len());
+                                        let _ = self.ecs.insert(
+                                            entity,
+                                            (animator, anim_state, AnimationEventQueue::new()),
+                                        );
+                                    }
                                 }
 
                                 if !model_scene.animations.is_empty() {
-                                    // Normally we would store these in a global registry or on the entity
-                                    // For now, let's just log it
                                     info!(
                                         "glTF model {} loaded with {} animations",
                                         id,
@@ -2054,7 +2187,12 @@ impl GameWorld {
     /// Update all animated entities - ticks Animator components and uploads bone matrices
     /// Call this each frame to advance skeletal animations
     pub fn update_animations(&mut self, physics: &mut PhysicsWorld, dt: f32) {
-        // Collect entities with Animator
+        // Clear previous frame events before generating this frame's events.
+        for (_, queue) in self.ecs.query::<&mut AnimationEventQueue>().iter() {
+            queue.clear();
+        }
+
+        // Collect entities with Animator.
         let entities: Vec<hecs::Entity> = self
             .ecs
             .query::<&Animator>()
@@ -2062,50 +2200,122 @@ impl GameWorld {
             .map(|(e, _)| e)
             .collect();
 
+        struct AnimationJob {
+            entity: hecs::Entity,
+            animator: Animator,
+            params: std::collections::HashMap<String, AnimParam>,
+            dt: f32,
+            speed_multiplier: f32,
+        }
+
+        struct AnimationResult {
+            entity: hecs::Entity,
+            animator: Animator,
+            matrices: Vec<glam::Mat4>,
+            events: Vec<crate::world::fbx_loader::AnimationEvent>,
+        }
+
+        let mut jobs = Vec::with_capacity(entities.len());
+
         for entity in entities {
             let mut params = std::collections::HashMap::new();
+            let mut speed_mult = 1.0f32;
+
+            let (current_time, current_duration) = self
+                .ecs
+                .get::<&Animator>(entity)
+                .map(|animator| (animator.time, animator.current_duration()))
+                .unwrap_or((0.0, 0.0));
 
             // 1. Process AnimatorController (if present) to drive state machine
+            let mut transition = None;
             if let Ok(mut controller) = self.ecs.get::<&mut AnimatorController>(entity) {
                 if controller.enabled {
+                    controller
+                        .state_machine
+                        .apply_parameter_curves(current_time);
+
                     // Evaluate state machine for transitions
-                    if let Some((resource, blend_duration)) = controller.state_machine.evaluate() {
-                        // If entity also has an Animator, crossfade to new resource
-                        if let Ok(mut animator) = self.ecs.get::<&mut Animator>(entity) {
-                            animator.crossfade_to(resource, blend_duration);
-                        }
-                    }
+                    transition = controller
+                        .state_machine
+                        .evaluate_with_time(current_time, current_duration);
+
                     // Copy parameters for blend tree evaluation
                     params = controller.state_machine.parameters.clone();
+                    speed_mult =
+                        controller.speed * controller.state_machine.current_speed_multiplier();
                 }
             }
 
-            // 2. Update Animator (low-level playback and blending)
-            let matrices = if let Ok(mut animator) = self.ecs.get::<&mut Animator>(entity) {
-                let speed_mult = if let Ok(controller) = self.ecs.get::<&AnimatorController>(entity)
-                {
-                    controller.speed
-                } else {
-                    1.0
-                };
+            if let Some((resource, blend_duration)) = transition {
+                if let Ok(mut animator) = self.ecs.get::<&mut Animator>(entity) {
+                    animator.crossfade_to(resource, blend_duration);
+                }
+            }
 
-                // Fetch event queue if present
-                let mut queue = self.ecs.get::<&mut AnimationEventQueue>(entity).ok();
+            if let Ok(animator) = self.ecs.get::<&Animator>(entity) {
+                jobs.push(AnimationJob {
+                    entity,
+                    animator: (*animator).clone(),
+                    params,
+                    dt,
+                    speed_multiplier: speed_mult,
+                });
+            }
+        }
 
-                // Use controller-global speed multiplier if present
-                let old_speed = animator.speed;
-                animator.speed *= speed_mult;
-                let m = animator.update_with_params(dt, &params, &mut queue);
-                animator.speed = old_speed;
-                Some(m)
-            } else {
-                None
-            };
+        let results: Vec<AnimationResult> = {
+            use rayon::prelude::*;
+            jobs.into_par_iter()
+                .map(|mut job| {
+                    let old_speed = job.animator.speed;
+                    job.animator.speed *= job.speed_multiplier;
+                    let (matrices, events) =
+                        job.animator.update_collect_events(job.dt, &job.params);
+                    job.animator.speed = old_speed;
+
+                    AnimationResult {
+                        entity: job.entity,
+                        animator: job.animator,
+                        matrices,
+                        events,
+                    }
+                })
+                .collect()
+        };
+
+        for result in results {
+            let entity = result.entity;
+            let root_motion = result.animator.root_motion;
+            let matrices = result.matrices;
+            let events = result.events;
+
+            if let Ok(mut animator) = self.ecs.get::<&mut Animator>(entity) {
+                *animator = result.animator;
+            }
 
             // 3. Update AnimationState (GPU matrix buffer)
-            if let Some(matrices) = matrices {
-                if let Ok(mut anim_state) = self.ecs.get::<&mut AnimationState>(entity) {
-                    anim_state.update_from(matrices);
+            if let Ok(mut anim_state) = self.ecs.get::<&mut AnimationState>(entity) {
+                anim_state.update_from(matrices);
+            }
+
+            if !events.is_empty() {
+                let mut pending_events = Some(events);
+                let had_queue = {
+                    if let Ok(mut queue) = self.ecs.get::<&mut AnimationEventQueue>(entity) {
+                        if let Some(events) = pending_events.take() {
+                            queue.events.extend(events);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                if !had_queue {
+                    if let Some(events) = pending_events.take() {
+                        let _ = self.ecs.insert_one(entity, AnimationEventQueue { events });
+                    }
                 }
             }
 
@@ -2116,45 +2326,31 @@ impl GameWorld {
                 false
             };
 
-            if apply_rm {
-                if let Ok(animator) = self.ecs.get::<&mut Animator>(entity) {
-                    if animator.root_motion.has_motion {
-                        let delta_pos = animator.root_motion.delta_position;
-                        let delta_rot = animator.root_motion.delta_rotation;
+            if apply_rm && root_motion.has_motion {
+                let delta_pos = root_motion.delta_position;
+                let delta_rot = root_motion.delta_rotation;
 
-                        // Apply to Transform
-                        if let Ok(mut transform) = self.ecs.get::<&mut Transform>(entity) {
-                            // Rotate position delta by current character rotation
-                            let rotated_delta = transform.rotation * delta_pos;
-                            transform.position += rotated_delta;
-                            transform.rotation = transform.rotation * delta_rot;
+                if let Ok(mut transform) = self.ecs.get::<&mut Transform>(entity) {
+                    let rotated_delta = transform.rotation * delta_pos;
+                    transform.position += rotated_delta;
+                    transform.rotation = transform.rotation * delta_rot;
 
-                            // Apply to RigidBody (if present)
-                            if let Ok(rb_handle) = self.ecs.get::<&RigidBodyHandle>(entity) {
-                                if let Some(body) = physics.rigid_body_set.get_mut(rb_handle.0) {
-                                    // Teleport physics body to match transform (for kinematic-like RM)
-                                    // Alternatively, apply as velocity if preferred
-                                    let p = transform.position;
-                                    let r = transform.rotation;
-                                    body.set_next_kinematic_translation(
-                                        rapier3d::na::Vector3::new(p.x, p.y, p.z),
-                                    );
-                                    body.set_next_kinematic_rotation(
-                                        rapier3d::na::UnitQuaternion::from_quaternion(
-                                            rapier3d::na::Quaternion::new(r.w, r.x, r.y, r.z),
-                                        ),
-                                    );
-                                }
-                            }
+                    if let Ok(rb_handle) = self.ecs.get::<&RigidBodyHandle>(entity) {
+                        if let Some(body) = physics.rigid_body_set.get_mut(rb_handle.0) {
+                            let p = transform.position;
+                            let r = transform.rotation;
+                            body.set_next_kinematic_translation(rapier3d::na::Vector3::new(
+                                p.x, p.y, p.z,
+                            ));
+                            body.set_next_kinematic_rotation(
+                                rapier3d::na::UnitQuaternion::from_quaternion(
+                                    rapier3d::na::Quaternion::new(r.w, r.x, r.y, r.z),
+                                ),
+                            );
                         }
                     }
                 }
             }
-        }
-
-        // Clear animation event queues at end of frame
-        for (_, queue) in self.ecs.query::<&mut AnimationEventQueue>().iter() {
-            queue.clear();
         }
     }
 

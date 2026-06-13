@@ -116,11 +116,13 @@ cargo build --target aarch64-linux-android --release
 cargo apk build --release
 ```
 
-### Deploy to Quest
+### Install Standalone Quest APK
 ```bash
 adb install -r target/release/apk/stfsc_engine.apk
 adb shell am start -n com.stfsc.engine/android.app.NativeActivity
 ```
+
+Quest builds bundle the project scene/assets into the APK. A live editor connection is only needed when you want a real-time debug push to a connected headset.
 
 ---
 
@@ -138,16 +140,13 @@ That's it! The Linux client provides a windowed preview with WASD + mouse contro
 
 ## 🎛️ Editor Usage
 
-1. Start the engine on Quest (or Linux desktop)
-2. Run the editor on your development machine:
+1. Run the editor on your development machine:
    ```bash
    cargo run --bin editor
    ```
-3. Connect via ADB port forwarding (Quest) or localhost (Linux):
-   ```bash
-   adb forward tcp:8080 tcp:8080
-   ```
-4. Deploy scenes in real-time!
+2. Use the embedded Scene viewport as the default local player.
+3. For Quest real-time debugging, connect the headset over ADB, refresh the Player / Push panel, then connect Quest Push.
+4. For desktop runtime debugging, start the runtime separately and use Connect Debug Push.
 
 ---
 

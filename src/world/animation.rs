@@ -8,7 +8,7 @@
 //! Optimized for Quest 3's 2.4 TFLOPS to render 100+ animated NPCs in 556 Downtown.
 
 use crate::world::fbx_loader::{AnimationClip, AnimationEvent, Skeleton};
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Quat, Vec3, Vec4};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -189,7 +189,7 @@ impl Animator {
 
     /// Update animation time and compute bone matrices
     pub fn update(&mut self, dt: f32) -> Vec<Mat4> {
-        self.update_with_params(dt, &HashMap::new(), &mut None)
+        self.update_collect_events(dt, &HashMap::new()).0
     }
 
     /// Update animation with parameters for blend trees and event queue
@@ -199,55 +199,48 @@ impl Animator {
         params: &HashMap<String, AnimParam>,
         queue: &mut Option<hecs::RefMut<AnimationEventQueue>>,
     ) -> Vec<Mat4> {
+        let (matrices, events) = self.update_collect_events(dt, params);
+        if let Some(q) = queue {
+            for event in events {
+                q.push(event);
+            }
+        }
+        matrices
+    }
+
+    /// Update animation and return fired events without borrowing ECS state.
+    ///
+    /// This is the preferred path for parallel animation evaluation: each worker
+    /// mutates a cloned Animator, returns its new state, then the main thread
+    /// writes results back into ECS.
+    pub fn update_collect_events(
+        &mut self,
+        dt: f32,
+        params: &HashMap<String, AnimParam>,
+    ) -> (Vec<Mat4>, Vec<AnimationEvent>) {
+        let mut fired_events = Vec::new();
+
         // Reset root motion for this frame
         self.root_motion = RootMotion::default();
 
         if !self.playing || self.clips.is_empty() {
-            return self.bind_pose_matrices();
+            return (self.bind_pose_matrices(), fired_events);
         }
 
         let old_time = self.time;
         // Update playback time
         self.time += dt * self.speed;
         let new_time = self.time;
+        let current_resource = self.current_resource.clone();
 
-        // Handle looping for clips (blend trees manage their own duration/time?)
-        // For now, treat blend tree as infinite or use its root clip duration if possible
-        if let AnimResource::Clip(idx) = &self.current_resource {
-            let current_clip = &self.clips[*idx];
-
-            // Extract root motion
-            let duration = current_clip.duration;
-            if duration > 0.0 {
-                let t_start = old_time % duration;
-                let t_end = new_time % duration;
-
-                let (pos_start, rot_start, _) =
-                    current_clip.sample_bone(self.root_bone_index, t_start);
-                let (pos_end, rot_end, _) = current_clip.sample_bone(self.root_bone_index, t_end);
-
-                if t_end >= t_start {
-                    self.root_motion.delta_position = pos_end - pos_start;
-                    self.root_motion.delta_rotation = rot_end * rot_start.inverse();
-                } else {
-                    // Wrapped (looping)
-                    let (pos_max, rot_max, _) =
-                        current_clip.sample_bone(self.root_bone_index, duration);
-                    let (pos_min, rot_min, _) = current_clip.sample_bone(self.root_bone_index, 0.0);
-
-                    let d1 = pos_max - pos_start;
-                    let d2 = pos_end - pos_min;
-                    self.root_motion.delta_position = d1 + d2;
-
-                    let r1 = rot_max * rot_start.inverse();
-                    let r2 = rot_end * rot_min.inverse();
-                    self.root_motion.delta_rotation = r2 * r1;
-                }
-                self.root_motion.has_motion = true;
-            }
+        let duration = self.resource_duration(&current_resource);
+        if duration > 0.0 {
+            self.extract_root_motion(&current_resource, old_time, new_time, duration, params);
 
             // Fire events
-            self.check_events(old_time, new_time, *idx, queue);
+            if let AnimResource::Clip(idx) = &current_resource {
+                self.check_events(old_time, new_time, *idx, &mut fired_events);
+            }
 
             if self.time >= duration {
                 if self.looping {
@@ -259,8 +252,10 @@ impl Animator {
             }
         }
 
-        // Sample current animation (base layer)
-        let mut base_pose = self.sample_resource(&self.current_resource, self.time, params);
+        // Sample current animation as local bone transforms. Layers, crossfades,
+        // and IK must be composed in local pose space; only the final pose is
+        // converted to skinning matrices for the GPU.
+        let mut base_pose = self.sample_resource_local(&self.current_resource, self.time, params);
 
         // Handle crossfade blending
         if let Some(target_resource) = self.blend_target.clone() {
@@ -271,9 +266,9 @@ impl Animator {
                 self.current_resource = target_resource;
                 self.blend_target = None;
                 self.blend_factor = 0.0;
-                base_pose = self.sample_resource(&self.current_resource, self.time, params);
+                base_pose = self.sample_resource_local(&self.current_resource, self.time, params);
             } else {
-                let target_pose = self.sample_resource(&target_resource, self.time, params);
+                let target_pose = self.sample_resource_local(&target_resource, self.time, params);
                 base_pose = blend_poses(&base_pose, &target_pose, self.blend_factor);
             }
         }
@@ -298,7 +293,10 @@ impl Animator {
             }
         }
 
-        base_pose
+        self.apply_ik(&mut base_pose);
+
+        let matrices = self.compute_skinning_matrices(&base_pose);
+        (matrices, fired_events)
     }
 
     /// Check and fire events for a clip
@@ -307,43 +305,105 @@ impl Animator {
         old_time: f32,
         new_time: f32,
         clip_idx: usize,
-        queue: &mut Option<hecs::RefMut<AnimationEventQueue>>,
+        fired_events: &mut Vec<AnimationEvent>,
     ) {
-        if let Some(q) = queue {
-            let clip = &self.clips[clip_idx];
-            let duration = clip.duration;
-            if duration <= 0.0 {
-                return;
-            }
+        let clip = &self.clips[clip_idx];
+        let duration = clip.duration;
+        if duration <= 0.0 {
+            return;
+        }
 
-            // Normalize times to [0, duration]
-            let t_start = old_time % duration;
-            let t_end = new_time % duration;
+        // Normalize times to [0, duration]
+        let t_start = old_time % duration;
+        let t_end = new_time % duration;
 
-            for event in &clip.events {
-                let fired = if t_start < t_end {
-                    event.time > t_start && event.time <= t_end
-                } else {
-                    // Wrapped around (looping)
-                    (event.time > t_start && event.time <= duration)
-                        || (event.time >= 0.0 && event.time <= t_end)
-                };
+        for event in &clip.events {
+            let fired = if t_start < t_end {
+                event.time > t_start && event.time <= t_end
+            } else {
+                // Wrapped around (looping)
+                (event.time > t_start && event.time <= duration)
+                    || (event.time >= 0.0 && event.time <= t_end)
+            };
 
-                if fired {
-                    q.push(event.clone());
-                }
+            if fired {
+                fired_events.push(event.clone());
             }
         }
     }
 
-    /// Sample an animation resource (clip or blend tree)
-    fn sample_resource(
+    /// Duration for the current animation resource, in seconds.
+    pub fn current_duration(&self) -> f32 {
+        self.resource_duration(&self.current_resource)
+    }
+
+    /// Normalized playback time for the current resource.
+    pub fn current_normalized_time(&self) -> f32 {
+        let duration = self.current_duration();
+        if duration > 0.0 {
+            self.time / duration
+        } else {
+            0.0
+        }
+    }
+
+    fn resource_duration(&self, res: &AnimResource) -> f32 {
+        match res {
+            AnimResource::Clip(idx) => self.clips.get(*idx).map(|c| c.duration).unwrap_or(0.0),
+            AnimResource::BlendTree(tree) => tree.duration(&self.clips),
+        }
+    }
+
+    fn extract_root_motion(
+        &mut self,
+        res: &AnimResource,
+        old_time: f32,
+        new_time: f32,
+        duration: f32,
+        params: &HashMap<String, AnimParam>,
+    ) {
+        if self.root_bone_index >= self.skeleton.bones.len() {
+            return;
+        }
+
+        let t_start = old_time % duration;
+        let t_end = new_time % duration;
+        let sample_root = |time: f32| -> (Vec3, Quat) {
+            let pose = self.sample_resource_local(res, time, params);
+            pose.get(self.root_bone_index)
+                .map(|m| {
+                    let (_, rot, pos) = m.to_scale_rotation_translation();
+                    (pos, rot)
+                })
+                .unwrap_or((Vec3::ZERO, Quat::IDENTITY))
+        };
+
+        let (pos_start, rot_start) = sample_root(t_start);
+        let (pos_end, rot_end) = sample_root(t_end);
+
+        if t_end >= t_start {
+            self.root_motion.delta_position = pos_end - pos_start;
+            self.root_motion.delta_rotation = rot_end * rot_start.inverse();
+        } else {
+            // Wrapped around a looping clip/resource.
+            let (pos_max, rot_max) = sample_root(duration);
+            let (pos_min, rot_min) = sample_root(0.0);
+
+            self.root_motion.delta_position = (pos_max - pos_start) + (pos_end - pos_min);
+            self.root_motion.delta_rotation =
+                (rot_end * rot_min.inverse()) * (rot_max * rot_start.inverse());
+        }
+        self.root_motion.has_motion = true;
+    }
+
+    /// Sample an animation resource as local bone transforms.
+    fn sample_resource_local(
         &self,
         res: &AnimResource,
         time: f32,
         params: &HashMap<String, AnimParam>,
     ) -> Vec<Mat4> {
-        let local_transforms = match res {
+        match res {
             AnimResource::Clip(idx) => {
                 if *idx < self.clips.len() {
                     self.clips[*idx].sample(time, &self.skeleton)
@@ -354,9 +414,7 @@ impl Animator {
             AnimResource::BlendTree(tree) => {
                 tree.evaluate(params, &self.clips, &self.skeleton, time)
             }
-        };
-
-        self.compute_skinning_matrices(&local_transforms)
+        }
     }
 
     /// Sample a clip at a specific time, returning local bone transforms
@@ -378,10 +436,22 @@ impl Animator {
     /// Formula: skinning_matrix[i] = global_transform[i] * inverse_bind_matrix[i]
     fn compute_skinning_matrices(&self, local_transforms: &[Mat4]) -> Vec<Mat4> {
         let bone_count = self.skeleton.bones.len().min(MAX_BONES);
-        let mut global_transforms = vec![Mat4::IDENTITY; bone_count];
+        let global_transforms = self.compute_global_transforms(local_transforms);
         let mut skinning_matrices = vec![Mat4::IDENTITY; bone_count];
 
-        // Compute global transforms (parent-to-child order)
+        for i in 0..bone_count {
+            skinning_matrices[i] =
+                global_transforms[i] * self.skeleton.bones[i].inverse_bind_matrix;
+        }
+
+        skinning_matrices
+    }
+
+    fn compute_global_transforms(&self, local_transforms: &[Mat4]) -> Vec<Mat4> {
+        let bone_count = self.skeleton.bones.len().min(MAX_BONES);
+        let mut global_transforms = vec![Mat4::IDENTITY; bone_count];
+
+        // Compute global transforms (parent-to-child order).
         for i in 0..bone_count {
             let bone = &self.skeleton.bones[i];
             let local = if i < local_transforms.len() {
@@ -399,12 +469,98 @@ impl Animator {
             } else {
                 local
             };
-
-            // Skinning matrix = global * inverse_bind
-            skinning_matrices[i] = global_transforms[i] * bone.inverse_bind_matrix;
         }
 
-        skinning_matrices
+        global_transforms
+    }
+
+    fn apply_ik(&self, local_pose: &mut [Mat4]) {
+        if local_pose.is_empty() {
+            return;
+        }
+
+        let globals = self.compute_global_transforms(local_pose);
+        let positions: Vec<Vec3> = globals
+            .iter()
+            .map(|m| m.to_scale_rotation_translation().2)
+            .collect();
+        let rotations: Vec<Quat> = globals
+            .iter()
+            .map(|m| m.to_scale_rotation_translation().1)
+            .collect();
+
+        if let Some(look_at) = &self.look_at_ik {
+            let adjustments = solve_look_at_ik(look_at, &positions, &rotations, Vec3::Z);
+            for (chain_idx, bone_idx) in look_at.bone_chain.iter().enumerate() {
+                if let (Some(local), Some(adjustment)) =
+                    (local_pose.get_mut(*bone_idx), adjustments.get(chain_idx))
+                {
+                    let (scale, rot, trans) = local.to_scale_rotation_translation();
+                    *local = Mat4::from_scale_rotation_translation(scale, rot * *adjustment, trans);
+                }
+            }
+        }
+
+        if let Some(foot_ik) = &self.foot_ik {
+            let result = solve_foot_ik(foot_ik, &positions);
+            if let Some(hips) = local_pose.get_mut(foot_ik.hips_bone) {
+                let (scale, rot, mut trans) = hips.to_scale_rotation_translation();
+                trans.y += result.hip_offset;
+                *hips = Mat4::from_scale_rotation_translation(scale, rot, trans);
+            }
+            if let Some(left_foot) = local_pose.get_mut(foot_ik.left_leg.2) {
+                let (scale, rot, trans) = left_foot.to_scale_rotation_translation();
+                *left_foot = Mat4::from_scale_rotation_translation(
+                    scale,
+                    rot * result.left_foot_rotation,
+                    trans,
+                );
+            }
+            if let Some(right_foot) = local_pose.get_mut(foot_ik.right_leg.2) {
+                let (scale, rot, trans) = right_foot.to_scale_rotation_translation();
+                *right_foot = Mat4::from_scale_rotation_translation(
+                    scale,
+                    rot * result.right_foot_rotation,
+                    trans,
+                );
+            }
+        }
+
+        for chain in &self.ik_chains {
+            if !chain.enabled || chain.weight <= 0.0 {
+                continue;
+            }
+            if chain.root_bone >= local_pose.len()
+                || chain.mid_bone >= local_pose.len()
+                || chain.tip_bone >= local_pose.len()
+                || chain.root_bone >= positions.len()
+                || chain.root_bone >= rotations.len()
+            {
+                continue;
+            }
+
+            let mid_local_pos = local_pose[chain.mid_bone].to_scale_rotation_translation().2;
+            let tip_local_pos = local_pose[chain.tip_bone].to_scale_rotation_translation().2;
+            let (root_adjust, mid_adjust) = solve_two_bone_ik(
+                positions[chain.root_bone],
+                mid_local_pos,
+                tip_local_pos,
+                chain.target,
+                chain.pole_target,
+                rotations[chain.root_bone],
+            );
+
+            if let Some(root) = local_pose.get_mut(chain.root_bone) {
+                let (scale, rot, trans) = root.to_scale_rotation_translation();
+                let adjusted = rot.slerp(rot * root_adjust, chain.weight);
+                *root = Mat4::from_scale_rotation_translation(scale, adjusted, trans);
+            }
+            if let Some(mid) = local_pose.get_mut(chain.mid_bone) {
+                let (scale, rot, trans) = mid.to_scale_rotation_translation();
+                let adjusted = rot.slerp(rot * mid_adjust, chain.weight);
+                *mid = Mat4::from_scale_rotation_translation(scale, adjusted, trans);
+            }
+        }
     }
 
     /// Get bind pose matrices (identity skinning)
@@ -463,14 +619,21 @@ impl AnimationState {
 /// - Rotation: slerp
 /// - Scale: lerp
 pub fn blend_poses(a: &[Mat4], b: &[Mat4], factor: f32) -> Vec<Mat4> {
-    let len = a.len().min(b.len());
+    let len = a.len().max(b.len());
     let factor = factor.clamp(0.0, 1.0);
 
     (0..len)
         .map(|i| {
+            let Some(a_mat) = a.get(i) else {
+                return b[i];
+            };
+            let Some(b_mat) = b.get(i) else {
+                return *a_mat;
+            };
+
             // Decompose matrices
-            let (scale_a, rot_a, trans_a) = a[i].to_scale_rotation_translation();
-            let (scale_b, rot_b, trans_b) = b[i].to_scale_rotation_translation();
+            let (scale_a, rot_a, trans_a) = a_mat.to_scale_rotation_translation();
+            let (scale_b, rot_b, trans_b) = b_mat.to_scale_rotation_translation();
 
             // Blend components
             let scale = scale_a.lerp(scale_b, factor);
@@ -479,6 +642,59 @@ pub fn blend_poses(a: &[Mat4], b: &[Mat4], factor: f32) -> Vec<Mat4> {
 
             // Recompose
             Mat4::from_scale_rotation_translation(scale, rot, trans)
+        })
+        .collect()
+}
+
+/// Blend multiple poses by normalized weights.
+///
+/// Rotations are accumulated in quaternion space with hemisphere correction,
+/// which avoids the order-dependent artifacts of repeated pairwise slerps.
+pub fn blend_weighted_poses(weighted_poses: &[(Vec<Mat4>, f32)], bone_count: usize) -> Vec<Mat4> {
+    let total_weight: f32 = weighted_poses
+        .iter()
+        .map(|(_, weight)| weight.max(0.0))
+        .sum();
+
+    if weighted_poses.is_empty() || total_weight <= f32::EPSILON {
+        return vec![Mat4::IDENTITY; bone_count];
+    }
+
+    (0..bone_count)
+        .map(|bone_idx| {
+            let mut scale = Vec3::ZERO;
+            let mut translation = Vec3::ZERO;
+            let mut rotation = Vec4::ZERO;
+            let mut reference_rot: Option<Quat> = None;
+
+            for (pose, raw_weight) in weighted_poses {
+                let weight = raw_weight.max(0.0) / total_weight;
+                if weight <= 0.0 {
+                    continue;
+                }
+
+                let mat = pose.get(bone_idx).copied().unwrap_or(Mat4::IDENTITY);
+                let (s, mut r, t) = mat.to_scale_rotation_translation();
+                if let Some(reference) = reference_rot {
+                    if reference.dot(r) < 0.0 {
+                        r = Quat::from_xyzw(-r.x, -r.y, -r.z, -r.w);
+                    }
+                } else {
+                    reference_rot = Some(r);
+                }
+
+                scale += s * weight;
+                translation += t * weight;
+                rotation += Vec4::new(r.x, r.y, r.z, r.w) * weight;
+            }
+
+            let rot = if rotation.length_squared() > 0.000001 {
+                Quat::from_xyzw(rotation.x, rotation.y, rotation.z, rotation.w).normalize()
+            } else {
+                Quat::IDENTITY
+            };
+
+            Mat4::from_scale_rotation_translation(scale, rot, translation)
         })
         .collect()
 }
@@ -507,6 +723,11 @@ pub enum BlendNode {
     },
     /// Direct blend with explicit weight (for additive layers)
     Direct { weight: f32, child: Box<BlendNode> },
+    /// Unity-style direct blend where each child is weighted by a float parameter.
+    DirectBlend {
+        /// Children with parameter names controlling their weights.
+        children: Vec<(String, BlendNode)>,
+    },
 }
 
 impl BlendNode {
@@ -548,6 +769,42 @@ impl BlendNode {
                     })
                     .collect()
             }
+            BlendNode::DirectBlend { children } => {
+                let mut weighted_poses = Vec::with_capacity(children.len());
+                for (param, node) in children {
+                    let weight = match params.get(param) {
+                        Some(AnimParam::Float(v)) => *v,
+                        Some(AnimParam::Bool(true)) | Some(AnimParam::Trigger(true)) => 1.0,
+                        Some(AnimParam::Int(v)) => *v as f32,
+                        _ => 0.0,
+                    }
+                    .max(0.0);
+
+                    if weight > 0.0 {
+                        weighted_poses.push((node.evaluate(params, clips, skeleton, time), weight));
+                    }
+                }
+                blend_weighted_poses(&weighted_poses, skeleton.bones.len())
+            }
+        }
+    }
+
+    pub fn duration(&self, clips: &[Arc<AnimationClip>]) -> f32 {
+        match self {
+            BlendNode::Clip(idx) => clips.get(*idx).map(|c| c.duration).unwrap_or(0.0),
+            BlendNode::Blend1D { children, .. } => children
+                .iter()
+                .map(|(_, child)| child.duration(clips))
+                .fold(0.0, f32::max),
+            BlendNode::Blend2D { children, .. } => children
+                .iter()
+                .map(|(_, _, child)| child.duration(clips))
+                .fold(0.0, f32::max),
+            BlendNode::Direct { child, .. } => child.duration(clips),
+            BlendNode::DirectBlend { children } => children
+                .iter()
+                .map(|(_, child)| child.duration(clips))
+                .fold(0.0, f32::max),
         }
     }
 
@@ -634,14 +891,22 @@ impl BlendNode {
             _ => 0.0,
         };
 
-        // Calculate weights using inverse distance weighting
+        // Calculate weights using inverse distance weighting.
+        // Exact points snap to the matching child, matching Blend Tree authoring expectations.
         let point = glam::Vec2::new(x, y);
         let mut weights: Vec<f32> = Vec::with_capacity(children.len());
         let mut total_weight = 0.0f32;
 
         for (cx, cy, _) in children {
             let child_point = glam::Vec2::new(*cx, *cy);
-            let dist = point.distance(child_point).max(0.001); // Avoid division by zero
+            let dist = point.distance(child_point);
+            if dist <= 0.0001 {
+                return children
+                    .iter()
+                    .find(|(px, py, _)| (*px - x).abs() <= 0.0001 && (*py - y).abs() <= 0.0001)
+                    .map(|(_, _, node)| node.evaluate(params, clips, skeleton, time))
+                    .unwrap_or_else(|| vec![Mat4::IDENTITY; skeleton.bones.len()]);
+            }
             let weight = 1.0 / (dist * dist); // Inverse square distance
             weights.push(weight);
             total_weight += weight;
@@ -654,28 +919,18 @@ impl BlendNode {
             }
         }
 
-        // Blend all poses
-        let mut result = vec![Mat4::IDENTITY; skeleton.bones.len()];
-        for (i, (_, _, node)) in children.iter().enumerate() {
-            let pose = node.evaluate(params, clips, skeleton, time);
-            let weight = weights[i];
+        let weighted_poses: Vec<(Vec<Mat4>, f32)> = children
+            .iter()
+            .enumerate()
+            .map(|(i, (_, _, node))| {
+                (
+                    node.evaluate(params, clips, skeleton, time),
+                    weights.get(i).copied().unwrap_or(0.0),
+                )
+            })
+            .collect();
 
-            for (j, mat) in pose.iter().enumerate() {
-                if j >= result.len() {
-                    break;
-                }
-                let (s, r, t) = mat.to_scale_rotation_translation();
-                let (rs, rr, rt) = result[j].to_scale_rotation_translation();
-
-                result[j] = Mat4::from_scale_rotation_translation(
-                    rs.lerp(s, weight),
-                    rr.slerp(r, weight),
-                    rt + t * weight,
-                );
-            }
-        }
-
-        result
+        blend_weighted_poses(&weighted_poses, skeleton.bones.len())
     }
 }
 
@@ -745,6 +1000,11 @@ impl BlendTree {
         time: f32,
     ) -> Vec<Mat4> {
         self.root.evaluate(params, clips, skeleton, time)
+    }
+
+    /// Longest child clip duration in this tree.
+    pub fn duration(&self, clips: &[Arc<AnimationClip>]) -> f32 {
+        self.root.duration(clips)
     }
 }
 
@@ -955,34 +1215,9 @@ impl AnimationLayer {
         }
     }
 
-    /// Sample this layer's clip and apply mask weights
+    /// Sample this layer's clip as local bone transforms.
     pub fn sample(&self, skeleton: &Skeleton) -> Vec<Mat4> {
-        let pose = self.clip.sample(self.time, skeleton);
-
-        // Apply mask if present
-        if let Some(mask) = &self.avatar_mask {
-            pose.into_iter()
-                .enumerate()
-                .map(|(i, mat)| {
-                    let mask_weight = mask.get_weight(i) * self.weight;
-                    if mask_weight <= 0.0 {
-                        Mat4::IDENTITY // No contribution
-                    } else if mask_weight >= 1.0 {
-                        mat
-                    } else {
-                        // Partial blend with identity
-                        let (s, r, t) = mat.to_scale_rotation_translation();
-                        Mat4::from_scale_rotation_translation(
-                            Vec3::ONE.lerp(s, mask_weight),
-                            Quat::IDENTITY.slerp(r, mask_weight),
-                            t * mask_weight,
-                        )
-                    }
-                })
-                .collect()
-        } else {
-            pose
-        }
+        self.clip.sample(self.time, skeleton)
     }
 }
 
@@ -992,11 +1227,13 @@ pub fn blend_layer_onto_base(
     layer: &AnimationLayer,
     layer_pose: &[Mat4],
 ) -> Vec<Mat4> {
-    let len = base.len().min(layer_pose.len());
+    let len = base.len().max(layer_pose.len());
     let layer_weight = layer.weight;
 
     (0..len)
         .map(|i| {
+            let base_mat = base.get(i).copied().unwrap_or(Mat4::IDENTITY);
+            let layer_mat = layer_pose.get(i).copied().unwrap_or(Mat4::IDENTITY);
             let mask_weight = layer
                 .avatar_mask
                 .as_ref()
@@ -1005,11 +1242,11 @@ pub fn blend_layer_onto_base(
                 * layer_weight;
 
             if mask_weight <= 0.0 {
-                base[i]
+                base_mat
             } else if layer.additive {
                 // Additive: add layer's delta to base
-                let (bs, br, bt) = base[i].to_scale_rotation_translation();
-                let (ls, lr, lt) = layer_pose[i].to_scale_rotation_translation();
+                let (bs, br, bt) = base_mat.to_scale_rotation_translation();
+                let (ls, lr, lt) = layer_mat.to_scale_rotation_translation();
 
                 // Additive blending: base + (layer - identity) * weight
                 let scale = bs + (ls - Vec3::ONE) * mask_weight;
@@ -1019,8 +1256,8 @@ pub fn blend_layer_onto_base(
                 Mat4::from_scale_rotation_translation(scale, rot, trans)
             } else {
                 // Override: lerp between base and layer
-                let (bs, br, bt) = base[i].to_scale_rotation_translation();
-                let (ls, lr, lt) = layer_pose[i].to_scale_rotation_translation();
+                let (bs, br, bt) = base_mat.to_scale_rotation_translation();
+                let (ls, lr, lt) = layer_mat.to_scale_rotation_translation();
 
                 Mat4::from_scale_rotation_translation(
                     bs.lerp(ls, mask_weight),
@@ -1404,6 +1641,10 @@ pub struct AnimationStateMachine {
     pub sub_machines: HashMap<String, SubStateMachine>,
     /// Currently active sub-machine (if any)
     pub active_sub_machine: Option<String>,
+    /// Playback time of the current state/resource in seconds.
+    pub state_time: f32,
+    /// Duration of the current state/resource in seconds.
+    pub state_duration: f32,
 }
 
 impl AnimationStateMachine {
@@ -1418,6 +1659,22 @@ impl AnimationStateMachine {
             }
         }
         self.states.get(&self.current_state).map(|s| &s.resource)
+    }
+
+    /// Speed multiplier for the active state.
+    pub fn current_speed_multiplier(&self) -> f32 {
+        if let Some(sub_name) = &self.active_sub_machine {
+            if let Some(sub) = self.sub_machines.get(sub_name) {
+                if sub.is_active {
+                    return sub.state_machine.current_speed_multiplier();
+                }
+            }
+        }
+
+        self.states
+            .get(&self.current_state)
+            .map(|s| s.speed_multiplier)
+            .unwrap_or(1.0)
     }
 }
 
@@ -1488,6 +1745,8 @@ pub enum TransitionCondition {
     BoolFalse(String),
     /// Animation finished playing
     AnimationComplete,
+    /// Current state's normalized playback time has reached or passed this value.
+    NormalizedTimeGreater(f32),
     /// Integer comparison (for combo counts, etc.)
     IntEquals(String, i32),
     IntGreater(String, i32),
@@ -1549,6 +1808,8 @@ impl AnimationStateMachine {
             parameters: HashMap::new(),
             sub_machines: HashMap::new(),
             active_sub_machine: None,
+            state_time: 0.0,
+            state_duration: 0.0,
         }
     }
 
@@ -1663,6 +1924,41 @@ impl AnimationStateMachine {
         self.check_transitions_from(&self.current_state.clone())
     }
 
+    /// Evaluate transitions with current state playback context.
+    pub fn evaluate_with_time(
+        &mut self,
+        current_time: f32,
+        current_duration: f32,
+    ) -> Option<(AnimResource, f32)> {
+        self.state_time = current_time;
+        self.state_duration = current_duration.max(0.0);
+        self.evaluate()
+    }
+
+    /// Apply animation curves authored on the current state to controller parameters.
+    pub fn apply_parameter_curves(&mut self, time: f32) {
+        let curves = if let Some(sub_name) = &self.active_sub_machine {
+            self.sub_machines
+                .get(sub_name)
+                .and_then(|sub| {
+                    sub.state_machine
+                        .states
+                        .get(&sub.state_machine.current_state)
+                })
+                .map(|state| state.parameter_curves.clone())
+        } else {
+            self.states
+                .get(&self.current_state)
+                .map(|state| state.parameter_curves.clone())
+        };
+
+        if let Some(curves) = curves {
+            for (param, curve) in curves {
+                self.set_float(&param, curve.evaluate(time));
+            }
+        }
+    }
+
     /// Check all transitions from a given source state and return the first triggered one
     fn check_transitions_from(&mut self, from_state: &str) -> Option<(AnimResource, f32)> {
         // Collect transition indices sorted by priority (descending)
@@ -1713,6 +2009,7 @@ impl AnimationStateMachine {
                 if let Some(state) = self.states.get(&to_state) {
                     let resource = state.resource.clone();
                     self.current_state = to_state;
+                    self.state_time = 0.0;
                     return Some((resource, duration));
                 }
             }
@@ -1766,7 +2063,12 @@ impl AnimationStateMachine {
             TransitionCondition::BoolFalse(name) => {
                 matches!(self.parameters.get(name), Some(AnimParam::Bool(false)))
             }
-            TransitionCondition::AnimationComplete => false, // Handled externally
+            TransitionCondition::AnimationComplete => {
+                self.state_duration > 0.0 && self.state_time >= self.state_duration
+            }
+            TransitionCondition::NormalizedTimeGreater(threshold) => {
+                self.state_duration > 0.0 && self.state_time / self.state_duration >= *threshold
+            }
             TransitionCondition::IntEquals(name, value) => {
                 matches!(self.parameters.get(name), Some(AnimParam::Int(v)) if *v == *value)
             }
@@ -2308,6 +2610,7 @@ pub enum TransitionConditionConfig {
     BoolTrue(String),
     BoolFalse(String),
     AnimationComplete,
+    NormalizedTimeGreater(f32),
     IntEquals(String, i32),
     IntGreater(String, i32),
     IntLess(String, i32),
@@ -2336,6 +2639,9 @@ impl From<TransitionConditionConfig> for TransitionCondition {
             TransitionConditionConfig::BoolTrue(s) => TransitionCondition::BoolTrue(s),
             TransitionConditionConfig::BoolFalse(s) => TransitionCondition::BoolFalse(s),
             TransitionConditionConfig::AnimationComplete => TransitionCondition::AnimationComplete,
+            TransitionConditionConfig::NormalizedTimeGreater(t) => {
+                TransitionCondition::NormalizedTimeGreater(t)
+            }
             TransitionConditionConfig::IntEquals(s, v) => TransitionCondition::IntEquals(s, v),
             TransitionConditionConfig::IntGreater(s, v) => TransitionCondition::IntGreater(s, v),
             TransitionConditionConfig::IntLess(s, v) => TransitionCondition::IntLess(s, v),
@@ -2579,6 +2885,24 @@ pub struct EditorClipInfo {
 mod tests {
 
     use super::*;
+    use crate::world::fbx_loader::BoneKeyframes;
+
+    fn one_bone_skeleton() -> Arc<Skeleton> {
+        let mut skeleton = Skeleton::new();
+        skeleton.add_bone("root".to_string(), None, Mat4::IDENTITY, Mat4::IDENTITY);
+        Arc::new(skeleton)
+    }
+
+    fn translated_clip(name: &str, x: f32) -> Arc<AnimationClip> {
+        let mut clip = AnimationClip::new(name, 1.0);
+        clip.channels.push(BoneKeyframes {
+            bone_index: 0,
+            position_keys: vec![(0.0, Vec3::new(x, 0.0, 0.0))],
+            rotation_keys: vec![(0.0, Quat::IDENTITY)],
+            scale_keys: vec![(0.0, Vec3::ONE)],
+        });
+        Arc::new(clip)
+    }
 
     #[test]
     fn test_blend_poses_identity() {
@@ -2640,6 +2964,62 @@ mod tests {
             }
             _ => panic!("Expected Blend2D node"),
         }
+    }
+
+    #[test]
+    fn test_direct_blend_uses_weighted_pose_math() {
+        let skeleton = one_bone_skeleton();
+        let clips = vec![translated_clip("left", 0.0), translated_clip("right", 10.0)];
+        let tree = BlendTree::new(
+            "Direct",
+            BlendNode::DirectBlend {
+                children: vec![
+                    ("Left".to_string(), BlendNode::Clip(0)),
+                    ("Right".to_string(), BlendNode::Clip(1)),
+                ],
+            },
+        );
+        let mut params = HashMap::new();
+        params.insert("Left".to_string(), AnimParam::Float(1.0));
+        params.insert("Right".to_string(), AnimParam::Float(1.0));
+
+        let pose = tree.evaluate(&params, &clips, &skeleton, 0.0);
+        let (_, _, translation) = pose[0].to_scale_rotation_translation();
+        assert!((translation.x - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_animation_complete_transition_uses_state_time() {
+        let mut sm = AnimationStateMachine::new();
+        sm.add_state("attack", 0);
+        sm.add_state("idle", 1);
+        sm.transitions.push(StateTransition::new(
+            "attack",
+            "idle",
+            TransitionCondition::AnimationComplete,
+            0.1,
+        ));
+
+        assert!(sm.evaluate_with_time(0.99, 1.0).is_none());
+        let result = sm.evaluate_with_time(1.0, 1.0);
+        assert!(result.is_some());
+        assert_eq!(sm.current_state, "idle");
+    }
+
+    #[test]
+    fn test_layer_blends_before_skinning() {
+        let skeleton = one_bone_skeleton();
+        let base = translated_clip("base", 0.0);
+        let layer_clip = translated_clip("layer", 10.0);
+        let mut animator = Animator::new(skeleton, vec![base]);
+        let mut layer = AnimationLayer::new(layer_clip);
+        layer.weight = 0.5;
+        layer.target_weight = 0.5;
+        animator.add_layer(layer);
+
+        let (matrices, _) = animator.update_collect_events(0.0, &HashMap::new());
+        let (_, _, translation) = matrices[0].to_scale_rotation_translation();
+        assert!((translation.x - 5.0).abs() < 0.001);
     }
 
     #[test]

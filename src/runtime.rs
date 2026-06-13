@@ -1,8 +1,8 @@
 pub mod tasks;
 
 pub use tasks::{
-    FrameBudget, FramePressure, TaskBudget, TaskDomain, TaskGraph, TaskGraphError,
-    TaskGraphReport, TaskId, TaskPriority, TaskRunMetrics,
+    FrameBudget, FramePressure, TaskBudget, TaskDomain, TaskGraph, TaskGraphError, TaskGraphReport,
+    TaskId, TaskPriority, TaskRunMetrics,
 };
 
 use std::io;

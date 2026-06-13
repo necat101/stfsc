@@ -980,6 +980,8 @@ impl ProjectExporter {
             "=== Exporting {} for Quest ===",
             project.metadata.name
         ));
+        let _ = progress_tx
+            .send("Bundled Quest build: live editor push is optional for debugging only.".into());
 
         // Create bundle directory
         let engine_assets = self.engine_root.join("assets");
@@ -1183,6 +1185,7 @@ impl ProjectExporter {
             "=== Exporting {} for Quest ===\n",
             project.metadata.name
         ));
+        log.push_str("Bundled Quest build: live editor push is optional for debugging only.\n");
 
         // Step 1: Create bundle directory structure in engine's assets folder
         let engine_assets = self.engine_root.join("assets");
