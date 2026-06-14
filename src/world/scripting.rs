@@ -1,5 +1,5 @@
 use crate::physics::PhysicsWorld;
-use crate::world::Transform;
+use crate::world::{SceneUpdate, Transform};
 use hecs::{Entity, World};
 use std::collections::HashMap;
 
@@ -494,6 +494,7 @@ pub struct ScriptContext<'a> {
     pub dt: f32,
     pub xr: XrInputSnapshot,
     haptic_requests: Option<&'a mut Vec<XrHapticRequest>>,
+    scene_commands: Option<&'a mut Vec<SceneUpdate>>,
 }
 
 impl<'a> ScriptContext<'a> {
@@ -510,6 +511,7 @@ impl<'a> ScriptContext<'a> {
             dt,
             xr: XrInputSnapshot::default(),
             haptic_requests: None,
+            scene_commands: None,
         }
     }
 
@@ -528,6 +530,27 @@ impl<'a> ScriptContext<'a> {
             dt,
             xr,
             haptic_requests,
+            scene_commands: None,
+        }
+    }
+
+    pub fn new_with_xr_and_scene_commands(
+        entity: Entity,
+        world: &'a mut World,
+        physics: &'a mut PhysicsWorld,
+        dt: f32,
+        xr: XrInputSnapshot,
+        haptic_requests: Option<&'a mut Vec<XrHapticRequest>>,
+        scene_commands: Option<&'a mut Vec<SceneUpdate>>,
+    ) -> Self {
+        Self {
+            entity,
+            world,
+            physics,
+            dt,
+            xr,
+            haptic_requests,
+            scene_commands,
         }
     }
 
@@ -592,6 +615,46 @@ impl<'a> ScriptContext<'a> {
         if let Some(queue) = self.haptic_requests.as_deref_mut() {
             queue.push(XrHapticRequest::new(hand, amplitude, duration_seconds));
         }
+    }
+
+    pub fn queue_scene_update(&mut self, update: SceneUpdate) {
+        if let Some(queue) = self.scene_commands.as_deref_mut() {
+            queue.push(update);
+        } else {
+            log::warn!("Script requested a scene update, but no scene command queue is attached");
+        }
+    }
+
+    pub fn load_world_scene(
+        &mut self,
+        scene_path: impl Into<String>,
+        mode: crate::project::scene::SceneTransitionMode,
+    ) {
+        self.queue_scene_update(SceneUpdate::CallWorldScene {
+            scene_path: scene_path.into(),
+            mode,
+        });
+    }
+
+    pub fn load_ui_scene(
+        &mut self,
+        scene_path: impl Into<String>,
+        layer: crate::ui::UiLayer,
+        mode: crate::project::scene::SceneTransitionMode,
+    ) {
+        self.queue_scene_update(SceneUpdate::CallUiScene {
+            scene_path: scene_path.into(),
+            layer,
+            mode,
+        });
+    }
+
+    pub fn transition_scene(
+        &mut self,
+        target: crate::project::scene::SceneRef,
+        mode: crate::project::scene::SceneTransitionMode,
+    ) {
+        self.queue_scene_update(SceneUpdate::TransitionScene { target, mode });
     }
 
     pub fn track_transform_to_xr_pose(
@@ -769,6 +832,91 @@ impl FuckScript for CrowdAgentScript {
     }
 }
 
+pub(crate) fn apply_vehicle_suspension(
+    physics: &mut PhysicsWorld,
+    rb_handle: rapier3d::prelude::RigidBodyHandle,
+    dt: f32,
+    chassis_half_height: f32,
+    suspension_travel: f32,
+    rest_compression: f32,
+    damping_per_weight: f32,
+    max_force_weight_multiplier: f32,
+) -> Option<rapier3d::na::UnitQuaternion<f32>> {
+    use rapier3d::prelude::*;
+
+    let dt = dt.clamp(0.0, 1.0 / 15.0);
+
+    let (position, velocity, mass, rotation) = {
+        let body = physics.rigid_body_set.get(rb_handle)?;
+        (
+            *body.translation(),
+            *body.linvel(),
+            body.mass().max(0.1),
+            *body.rotation(),
+        )
+    };
+
+    let ray_length = chassis_half_height + suspension_travel;
+    let ray_hit = physics
+        .query_pipeline
+        .cast_ray(
+            &physics.rigid_body_set,
+            &physics.collider_set,
+            &Ray::new(
+                point![position.x, position.y, position.z],
+                vector![0.0, -1.0, 0.0],
+            ),
+            ray_length,
+            true,
+            QueryFilter::default().exclude_rigid_body(rb_handle),
+        )
+        .map(|(_, toi)| toi);
+
+    let toi = ray_hit?;
+
+    let ground_clearance = (toi - chassis_half_height).max(0.0);
+    if ground_clearance >= suspension_travel {
+        return None;
+    }
+
+    let compression = ((suspension_travel - ground_clearance) / suspension_travel).clamp(0.0, 1.0);
+    let weight = (mass * physics.gravity.y.abs()).max(1.0);
+    let spring_force = (weight / rest_compression.clamp(0.1, 0.95)) * compression;
+    let damping_force = -velocity.y * weight * damping_per_weight;
+
+    // If the chassis itself is contacting the ground, let Rapier's contact solver resolve it.
+    // Otherwise the fake suspension adds energy exactly at impact and launches the body upward.
+    let contact_blend = (ground_clearance / 0.08).clamp(0.0, 1.0);
+    let force_y = ((spring_force + damping_force) * contact_blend)
+        .clamp(0.0, weight * max_force_weight_multiplier);
+
+    if force_y > 0.0 {
+        if let Some(body) = physics.rigid_body_set.get_mut(rb_handle) {
+            body.apply_impulse(vector![0.0, force_y * dt, 0.0], true);
+        }
+    }
+
+    Some(rotation)
+}
+
+pub(crate) fn apply_vehicle_lateral_damping(
+    physics: &mut PhysicsWorld,
+    rb_handle: rapier3d::prelude::RigidBodyHandle,
+    dt: f32,
+    damping: f32,
+) {
+    use rapier3d::prelude::*;
+
+    let dt = dt.clamp(0.0, 1.0 / 15.0);
+    if let Some(body) = physics.rigid_body_set.get_mut(rb_handle) {
+        let vel = *body.linvel();
+        body.apply_impulse(
+            vector![-vel.x * damping * dt, 0.0, -vel.z * damping * dt],
+            true,
+        );
+    }
+}
+
 /// Script that implements Vehicle behavior using physics.
 pub struct VehicleScript;
 
@@ -823,43 +971,21 @@ impl FuckScript for VehicleScript {
 
         if let Ok(_vehicle) = ctx.world.get::<&Vehicle>(ctx.entity) {
             if let Ok(rb_handle) = ctx.world.get::<&RigidBodyHandle>(ctx.entity) {
-                let ray_hit = {
-                    if let Some(body) = ctx.physics.rigid_body_set.get(rb_handle.0) {
-                        let position = body.translation();
-                        let ray_origin = point![position.x, position.y, position.z];
-                        let ray_dir = vector![0.0, -1.0, 0.0];
-                        let max_dist = 1.5;
-
-                        ctx.physics
-                            .query_pipeline
-                            .cast_ray(
-                                &ctx.physics.rigid_body_set,
-                                &ctx.physics.collider_set,
-                                &Ray::new(ray_origin, ray_dir),
-                                max_dist,
-                                true,
-                                QueryFilter::default().exclude_rigid_body(rb_handle.0),
-                            )
-                            .map(|(_, toi)| (toi, max_dist))
-                    } else {
-                        None
-                    }
-                };
-
-                if let Some((toi, max_dist)) = ray_hit {
+                let dt = ctx.dt.clamp(0.0, 1.0 / 15.0);
+                if let Some(rot) = apply_vehicle_suspension(
+                    ctx.physics,
+                    rb_handle.0,
+                    dt,
+                    0.5,
+                    0.75,
+                    0.75,
+                    0.18,
+                    1.35,
+                ) {
+                    apply_vehicle_lateral_damping(ctx.physics, rb_handle.0, dt, 8.0);
                     if let Some(body) = ctx.physics.rigid_body_set.get_mut(rb_handle.0) {
-                        let stiffness = 300.0;
-                        let damping = 15.0;
-                        let compression = 1.0 - (toi / max_dist);
-                        let up_force = vector![0.0, stiffness * compression, 0.0];
-                        body.add_force(up_force, true);
-
-                        let vel = *body.linvel();
-                        body.add_force(-vel * damping, true);
-
-                        let rot = *body.rotation();
                         let forward_dir = rot.transform_vector(&vector![0.0, 0.0, -1.0]);
-                        body.add_force(forward_dir * 30.0, true);
+                        body.apply_impulse(forward_dir * 30.0 * dt, true);
                     }
                 }
             }
@@ -1001,48 +1127,22 @@ impl FuckScript for TrafficAIScript {
             }
 
             // 2. Suspension & Drive logic
-            let ground_hit = {
-                if let Some(body) = ctx.physics.rigid_body_set.get(rb_handle.0) {
-                    let position = body.translation();
-                    let ray_origin = point![position.x, position.y, position.z];
-                    let ray_dir = vector![0.0, -1.0, 0.0];
-                    let max_dist = 1.5;
-
-                    ctx.physics
-                        .query_pipeline
-                        .cast_ray(
-                            &ctx.physics.rigid_body_set,
-                            &ctx.physics.collider_set,
-                            &Ray::new(ray_origin, ray_dir),
-                            max_dist,
-                            true,
-                            QueryFilter::default().exclude_rigid_body(rb_handle.0),
-                        )
-                        .map(|(_, toi)| (toi, max_dist))
-                } else {
-                    None
-                }
-            };
-
-            if let Some((toi, max_dist)) = ground_hit {
+            let dt = ctx.dt.clamp(0.0, 1.0 / 15.0);
+            if let Some(rot) =
+                apply_vehicle_suspension(ctx.physics, rb_handle.0, dt, 0.5, 0.75, 0.75, 0.18, 1.35)
+            {
+                apply_vehicle_lateral_damping(ctx.physics, rb_handle.0, dt, 10.0);
                 if let Some(body) = ctx.physics.rigid_body_set.get_mut(rb_handle.0) {
-                    let stiffness = 400.0;
-                    let damping = 20.0;
-                    let compression = 1.0 - (toi / max_dist);
-                    let up_force = vector![0.0, stiffness * compression, 0.0];
-                    body.add_force(up_force, true);
-
-                    let vel = *body.linvel();
-                    body.add_force(-vel * damping, true);
-
                     if !obstacle_in_front {
-                        let rot = *body.rotation();
                         let forward_dir = rot.transform_vector(&vector![0.0, 0.0, -1.0]);
-                        body.add_force(forward_dir * 40.0, true);
+                        body.apply_impulse(forward_dir * 40.0 * dt, true);
                     } else {
                         // Brake
                         let vel = *body.linvel();
-                        body.add_force(-vel * 10.0, true);
+                        body.apply_impulse(
+                            vector![-vel.x * 10.0 * dt, 0.0, -vel.z * 10.0 * dt],
+                            true,
+                        );
                     }
                 }
             }
@@ -1225,6 +1325,13 @@ impl ScriptRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rapier3d::prelude::vector;
+
+    fn update_queries(physics: &mut PhysicsWorld) {
+        physics
+            .query_pipeline
+            .update(&physics.rigid_body_set, &physics.collider_set);
+    }
 
     #[test]
     fn xr_action_edges_are_computed_from_previous_snapshot() {
@@ -1258,5 +1365,87 @@ mod tests {
         assert!(events.iter().any(|event| {
             event.action.as_deref() == Some("fire") && event.phase == XrInputPhase::Pressed
         }));
+    }
+
+    #[test]
+    fn vehicle_suspension_does_not_launch_chassis_contact() {
+        let mut physics = PhysicsWorld::new();
+        physics.add_box_rigid_body(
+            0,
+            [0.0, -0.1, 0.0],
+            [10.0, 0.1, 10.0],
+            false,
+            crate::world::LAYER_ENVIRONMENT,
+            u32::MAX,
+        );
+        let vehicle = physics.add_box_rigid_body(
+            1,
+            [0.0, 0.45, 0.0],
+            [1.0, 0.5, 2.0],
+            true,
+            crate::world::LAYER_VEHICLE,
+            u32::MAX,
+        );
+        update_queries(&mut physics);
+
+        {
+            let body = physics.rigid_body_set.get_mut(vehicle).unwrap();
+            body.set_linvel(vector![0.0, -12.0, 0.0], true);
+        }
+
+        let before_y = physics.rigid_body_set.get(vehicle).unwrap().linvel().y;
+        assert!(apply_vehicle_suspension(
+            &mut physics,
+            vehicle,
+            1.0 / 60.0,
+            0.5,
+            0.75,
+            0.75,
+            0.18,
+            1.35,
+        )
+        .is_some());
+
+        let body = physics.rigid_body_set.get(vehicle).unwrap();
+        assert!(body.linvel().y <= before_y + 0.001);
+        assert_eq!(body.user_force(), vector![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn vehicle_suspension_uses_impulse_not_persistent_force() {
+        let mut physics = PhysicsWorld::new();
+        physics.add_box_rigid_body(
+            0,
+            [0.0, -0.1, 0.0],
+            [10.0, 0.1, 10.0],
+            false,
+            crate::world::LAYER_ENVIRONMENT,
+            u32::MAX,
+        );
+        let vehicle = physics.add_box_rigid_body(
+            1,
+            [0.0, 0.9, 0.0],
+            [1.0, 0.5, 2.0],
+            true,
+            crate::world::LAYER_VEHICLE,
+            u32::MAX,
+        );
+        update_queries(&mut physics);
+
+        assert!(apply_vehicle_suspension(
+            &mut physics,
+            vehicle,
+            1.0 / 60.0,
+            0.5,
+            0.75,
+            0.75,
+            0.18,
+            1.35,
+        )
+        .is_some());
+
+        let body = physics.rigid_body_set.get(vehicle).unwrap();
+        assert_eq!(body.user_force(), vector![0.0, 0.0, 0.0]);
+        assert!(body.linvel().y > 0.0);
     }
 }

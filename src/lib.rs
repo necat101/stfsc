@@ -47,7 +47,7 @@ use graphics::occlusion::OcclusionCuller;
 #[cfg(target_os = "android")]
 use physics::PhysicsWorld;
 #[cfg(target_os = "android")]
-use rapier3d::prelude::{point, vector, QueryFilter, Ray};
+use rapier3d::prelude::vector;
 
 // GpuMesh and InstanceData moved to graphics/mod.rs
 
@@ -1209,45 +1209,25 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                 // Process each vehicle with short lock
                 for (speed, body_handle) in vehicle_data {
                     if let Ok(mut state) = game_state_thread.try_write() {
-                        let ray_result = {
-                            if let Some(body) = state.physics.rigid_body_set.get(body_handle) {
-                                let position = body.translation();
-                                let ray_origin = point![position.x, position.y, position.z];
-                                let ray_dir = vector![0.0, -1.0, 0.0];
-                                let max_dist = 1.5;
-
-                                state
-                                    .physics
-                                    .query_pipeline
-                                    .cast_ray(
-                                        &state.physics.rigid_body_set,
-                                        &state.physics.collider_set,
-                                        &Ray::new(ray_origin, ray_dir),
-                                        max_dist,
-                                        true,
-                                        QueryFilter::default().exclude_rigid_body(body_handle),
-                                    )
-                                    .map(|(_, toi)| (toi, max_dist))
-                            } else {
-                                None
-                            }
-                        };
-
-                        if let Some((toi, max_dist)) = ray_result {
+                        if let Some(rot) = crate::world::scripting::apply_vehicle_suspension(
+                            &mut state.physics,
+                            body_handle,
+                            fixed_dt,
+                            0.5,
+                            0.75,
+                            0.75,
+                            0.18,
+                            1.35,
+                        ) {
+                            crate::world::scripting::apply_vehicle_lateral_damping(
+                                &mut state.physics,
+                                body_handle,
+                                fixed_dt,
+                                10.0,
+                            );
                             if let Some(body) = state.physics.rigid_body_set.get_mut(body_handle) {
-                                let stiffness = 200.0;
-                                let damping = 10.0;
-                                let compression = 1.0 - (toi / max_dist);
-                                let up_force = vector![0.0, stiffness * compression, 0.0];
-
-                                body.add_force(up_force, true);
-
-                                let vel = *body.linvel();
-                                body.add_force(-vel * damping, true);
-
-                                let rot = *body.rotation();
                                 let forward_dir = rot.transform_vector(&vector![0.0, 0.0, -1.0]);
-                                body.add_force(forward_dir * speed, true);
+                                body.apply_impulse(forward_dir * speed * fixed_dt, true);
                             }
                         }
                     }

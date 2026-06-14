@@ -4,7 +4,11 @@ use glam;
 use hecs::{Entity, World};
 use log::{info, warn};
 use rapier3d;
-use std::sync::Arc;
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::sync::mpsc;
 
 pub mod animation;
@@ -38,6 +42,16 @@ pub struct GameWorld {
     pub respawn_enabled: bool,
     pub respawn_y: f32,
     pub pending_ui_events: Vec<crate::ui::UiEvent>,
+    /// Scene graph known to the runtime. World and UI scenes are tracked separately.
+    pub scene_hierarchy: crate::project::scene::SceneHierarchy,
+    /// Scene commands requested by UI callbacks or scripts during logic update.
+    pub pending_scene_commands: Vec<SceneUpdate>,
+    /// Currently active 3D scene path/name, if one was loaded through the scene manager.
+    pub active_world_scene: Option<String>,
+    /// Stack of previous 3D scenes for push/pop transitions.
+    pub world_scene_stack: Vec<String>,
+    /// Stack of active UI scene aliases for push/pop UI navigation.
+    pub ui_scene_stack: Vec<String>,
     /// Multi-layer UI system
     pub ui_layers: crate::ui::UiLayerSet,
     /// Menu navigation stack for intermediate menus
@@ -511,6 +525,35 @@ pub enum SceneUpdate {
         id: u32,
     },
     ClearScene,
+    /// Register or replace the scene hierarchy known to the runtime.
+    SetSceneHierarchy {
+        hierarchy: crate::project::scene::SceneHierarchy,
+    },
+    /// Generic transition target for both 3D and UI scenes.
+    TransitionScene {
+        target: crate::project::scene::SceneRef,
+        #[serde(default)]
+        mode: crate::project::scene::SceneTransitionMode,
+    },
+    /// Load a 3D world scene from a JSON scene file.
+    LoadWorldScene {
+        scene_path: String,
+        #[serde(default)]
+        mode: crate::project::scene::SceneTransitionMode,
+    },
+    /// Request a UI scene from gameplay or scripts.
+    CallUiScene {
+        scene_path: String,
+        layer: crate::ui::UiLayer,
+        #[serde(default)]
+        mode: crate::project::scene::SceneTransitionMode,
+    },
+    /// Request a 3D scene from UI callbacks.
+    CallWorldScene {
+        scene_path: String,
+        #[serde(default)]
+        mode: crate::project::scene::SceneTransitionMode,
+    },
     /// Toggle procedural generation on/off (off by default)
     SetProceduralGeneration {
         enabled: bool,
@@ -803,6 +846,11 @@ impl GameWorld {
             respawn_enabled: false,
             respawn_y: -50.0,
             pending_ui_events: Vec::new(),
+            scene_hierarchy: crate::project::scene::SceneHierarchy::default(),
+            pending_scene_commands: Vec::new(),
+            active_world_scene: None,
+            world_scene_stack: Vec::new(),
+            ui_scene_stack: Vec::new(),
             ui_layers: crate::ui::UiLayerSet::new(),
             menu_stack: crate::ui::MenuStack::new(),
             cursor_should_release: false,
@@ -875,6 +923,617 @@ impl GameWorld {
         std::mem::take(&mut self.pending_xr_haptics)
     }
 
+    pub fn queue_scene_command(&mut self, command: SceneUpdate) {
+        self.pending_scene_commands.push(command);
+    }
+
+    fn flush_pending_scene_commands(&mut self) {
+        let pending = std::mem::take(&mut self.pending_scene_commands);
+        for command in pending {
+            match self.command_sender.try_send(command) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(command)) => {
+                    self.pending_scene_commands.push(command);
+                    warn!("Scene command queue is full; deferring remaining scene commands");
+                    break;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    warn!("Scene command queue is closed; dropping pending scene commands");
+                    break;
+                }
+            }
+        }
+    }
+
+    fn expand_scene_transition(
+        &mut self,
+        target: crate::project::scene::SceneRef,
+        mode: crate::project::scene::SceneTransitionMode,
+        commands: &mut VecDeque<SceneUpdate>,
+    ) {
+        match target.domain {
+            crate::project::scene::SceneDomain::World3d => {
+                self.expand_world_scene_load(&target.path, mode, commands);
+            }
+            crate::project::scene::SceneDomain::Ui => {
+                let alias = target.alias.clone().unwrap_or_else(|| {
+                    Self::scene_stem(&target.path).unwrap_or_else(|| target.name.clone())
+                });
+                let layer = target
+                    .layer
+                    .clone()
+                    .unwrap_or_else(|| crate::ui::UiLayer::Custom(alias));
+                self.expand_ui_scene_load(&target.path, Some(layer), mode, commands);
+            }
+        }
+    }
+
+    fn expand_world_scene_load(
+        &mut self,
+        scene_path: &str,
+        mode: crate::project::scene::SceneTransitionMode,
+        commands: &mut VecDeque<SceneUpdate>,
+    ) {
+        use crate::project::scene::SceneTransitionMode;
+
+        if mode == SceneTransitionMode::Pop {
+            if let Some(previous) = self.world_scene_stack.pop() {
+                self.expand_world_scene_load(&previous, SceneTransitionMode::Replace, commands);
+            } else {
+                warn!("World scene pop requested but the world scene stack is empty");
+            }
+            return;
+        }
+
+        let Some(resolved_path) =
+            Self::resolve_scene_file(scene_path, crate::project::scene::SceneDomain::World3d)
+        else {
+            warn!("World scene '{}' could not be resolved", scene_path);
+            return;
+        };
+
+        let scene_json = match std::fs::read_to_string(&resolved_path) {
+            Ok(data) => data,
+            Err(err) => {
+                warn!(
+                    "Failed to read world scene '{}': {}",
+                    resolved_path.display(),
+                    err
+                );
+                return;
+            }
+        };
+
+        let scene = match serde_json::from_str::<crate::project::scene::Scene>(&scene_json) {
+            Ok(scene) => scene,
+            Err(scene_err) => {
+                match serde_json::from_str::<crate::project::scene::WorldScene>(&scene_json) {
+                    Ok(world_scene) => crate::project::scene::Scene::from_world_scene(world_scene),
+                    Err(world_err) => {
+                        warn!(
+                        "Failed to parse world scene '{}': {}; world-only parse also failed: {}",
+                        resolved_path.display(),
+                        scene_err,
+                        world_err
+                    );
+                        return;
+                    }
+                }
+            }
+        };
+
+        match mode {
+            SceneTransitionMode::Replace => {
+                self.world_scene_stack.clear();
+                commands.push_back(SceneUpdate::ClearScene);
+            }
+            SceneTransitionMode::Push => {
+                if let Some(current) = self.active_world_scene.clone() {
+                    self.world_scene_stack.push(current);
+                }
+                commands.push_back(SceneUpdate::ClearScene);
+            }
+            SceneTransitionMode::Additive | SceneTransitionMode::Overlay => {}
+            SceneTransitionMode::Pop => {}
+        }
+
+        let scene_id = resolved_path.to_string_lossy().to_string();
+        if mode != SceneTransitionMode::Additive || self.active_world_scene.is_none() {
+            self.active_world_scene = Some(scene_id);
+        }
+
+        let scene_dir = resolved_path.parent();
+        for update in Self::runtime_updates_for_scene(&scene, scene_dir) {
+            commands.push_back(update);
+        }
+
+        info!(
+            "Expanded world scene '{}' with {} entities via {:?}",
+            scene.name,
+            scene.entities.len(),
+            mode
+        );
+    }
+
+    fn expand_ui_scene_load(
+        &mut self,
+        scene_path: &str,
+        requested_layer: Option<crate::ui::UiLayer>,
+        mode: crate::project::scene::SceneTransitionMode,
+        _commands: &mut VecDeque<SceneUpdate>,
+    ) {
+        use crate::project::scene::SceneTransitionMode;
+
+        if mode == SceneTransitionMode::Pop {
+            self.pop_ui_scene();
+            return;
+        }
+
+        if let Some(layer) = requested_layer.clone() {
+            if self.ui_layers.get_layer(&layer).is_some() {
+                let alias = match &layer {
+                    crate::ui::UiLayer::Custom(alias) => alias.clone(),
+                    crate::ui::UiLayer::Hud => "hud".to_string(),
+                    crate::ui::UiLayer::PauseMenu => "pause".to_string(),
+                    crate::ui::UiLayer::MainMenu => "main".to_string(),
+                };
+                self.show_existing_ui_layer(layer, alias, mode);
+                return;
+            }
+        }
+
+        let Some(resolved_path) =
+            Self::resolve_scene_file(scene_path, crate::project::scene::SceneDomain::Ui)
+        else {
+            warn!("UI scene '{}' could not be resolved", scene_path);
+            return;
+        };
+
+        let scene_json = match std::fs::read_to_string(&resolved_path) {
+            Ok(data) => data,
+            Err(err) => {
+                warn!(
+                    "Failed to read UI scene '{}': {}",
+                    resolved_path.display(),
+                    err
+                );
+                return;
+            }
+        };
+
+        let (name, alias, layer_type, mut layout) = if let Ok(ui_scene) =
+            serde_json::from_str::<crate::project::scene::UiScene>(&scene_json)
+        {
+            (
+                ui_scene.name,
+                ui_scene.alias,
+                ui_scene.layer_type,
+                ui_scene.layout,
+            )
+        } else if let Ok(layout) = serde_json::from_str::<crate::ui::UiLayout>(&scene_json) {
+            let alias = Self::scene_stem(scene_path).unwrap_or_else(|| "ui".to_string());
+            (alias.clone(), alias, layout.layer_type, layout)
+        } else if let Ok(scene) = serde_json::from_str::<crate::project::scene::Scene>(&scene_json)
+        {
+            let Some(ui_scene) = scene.ui_scenes().into_iter().next() else {
+                warn!(
+                    "Scene '{}' did not contain any legacy UI layouts",
+                    resolved_path.display()
+                );
+                return;
+            };
+            (
+                ui_scene.name,
+                ui_scene.alias,
+                ui_scene.layer_type,
+                ui_scene.layout,
+            )
+        } else {
+            warn!("Failed to parse UI scene '{}'", resolved_path.display());
+            return;
+        };
+
+        layout.layer_type = layer_type;
+        let layer =
+            requested_layer.unwrap_or_else(|| Self::ui_layer_for_type(layer_type, alias.as_str()));
+
+        self.apply_ui_scene_layer(layer, alias, layout, mode);
+        info!("Loaded UI scene '{}' via {:?}", name, mode);
+    }
+
+    fn show_existing_ui_layer(
+        &mut self,
+        layer: crate::ui::UiLayer,
+        alias: String,
+        mode: crate::project::scene::SceneTransitionMode,
+    ) {
+        if mode == crate::project::scene::SceneTransitionMode::Replace {
+            self.ui_layers.visible.clear();
+            self.menu_stack.clear();
+            self.ui_scene_stack.clear();
+        }
+
+        self.ui_layers.show(layer.clone());
+        self.track_ui_scene_layer(layer, alias, mode);
+    }
+
+    fn apply_ui_scene_layer(
+        &mut self,
+        layer: crate::ui::UiLayer,
+        alias: String,
+        layout: crate::ui::UiLayout,
+        mode: crate::project::scene::SceneTransitionMode,
+    ) {
+        if mode == crate::project::scene::SceneTransitionMode::Replace {
+            self.ui_layers.visible.clear();
+            self.menu_stack.clear();
+            self.ui_scene_stack.clear();
+        }
+
+        self.ui_layers.set_layer(layer.clone(), layout);
+        self.ui_layers.show(layer.clone());
+        self.track_ui_scene_layer(layer, alias, mode);
+    }
+
+    fn track_ui_scene_layer(
+        &mut self,
+        layer: crate::ui::UiLayer,
+        alias: String,
+        mode: crate::project::scene::SceneTransitionMode,
+    ) {
+        if matches!(
+            mode,
+            crate::project::scene::SceneTransitionMode::Push
+                | crate::project::scene::SceneTransitionMode::Overlay
+                | crate::project::scene::SceneTransitionMode::Additive
+                | crate::project::scene::SceneTransitionMode::Replace
+        ) && !self
+            .ui_scene_stack
+            .iter()
+            .any(|existing| existing == &alias)
+        {
+            self.ui_scene_stack.push(alias.clone());
+        }
+
+        if let crate::ui::UiLayer::Custom(custom_alias) = layer {
+            if !self
+                .menu_stack
+                .iter()
+                .any(|existing| existing == &custom_alias)
+            {
+                self.menu_stack.push(&custom_alias);
+            }
+        }
+    }
+
+    fn pop_ui_scene(&mut self) {
+        if let Some(alias) = self.ui_scene_stack.pop() {
+            self.ui_layers
+                .hide(&crate::ui::UiLayer::Custom(alias.clone()));
+            if self.menu_stack.current() == Some(alias.as_str()) {
+                let _ = self.menu_stack.pop();
+            }
+            info!("Popped UI scene '{}'", alias);
+        } else if let Some(alias) = self.menu_stack.pop() {
+            self.ui_layers
+                .hide(&crate::ui::UiLayer::Custom(alias.clone()));
+            info!("Popped menu scene '{}'", alias);
+        } else {
+            warn!("UI scene pop requested but the UI scene stack is empty");
+        }
+    }
+
+    fn ui_layer_for_type(layer_type: crate::ui::UiLayerType, alias: &str) -> crate::ui::UiLayer {
+        match layer_type {
+            crate::ui::UiLayerType::PauseOverlay => crate::ui::UiLayer::PauseMenu,
+            crate::ui::UiLayerType::MainMenu => crate::ui::UiLayer::MainMenu,
+            crate::ui::UiLayerType::InGameOverlay => crate::ui::UiLayer::Hud,
+            crate::ui::UiLayerType::IntermediateMenu | crate::ui::UiLayerType::Popup => {
+                crate::ui::UiLayer::Custom(alias.to_string())
+            }
+        }
+    }
+
+    fn runtime_updates_for_scene(
+        scene: &crate::project::scene::Scene,
+        scene_dir: Option<&Path>,
+    ) -> Vec<SceneUpdate> {
+        let mut updates = vec![
+            SceneUpdate::SetSandboxSettings {
+                settings: scene.sandbox.clone(),
+            },
+            SceneUpdate::SetProceduralGeneration {
+                enabled: scene.sandbox.enabled,
+            },
+            SceneUpdate::SetRespawnSettings {
+                enabled: scene.respawn_enabled,
+                y_threshold: scene.respawn_y,
+            },
+            SceneUpdate::SetSceneHierarchy {
+                hierarchy: scene.hierarchy.clone(),
+            },
+        ];
+
+        for entity in &scene.entities {
+            updates.extend(Self::runtime_updates_for_scene_entity(entity, scene_dir));
+        }
+
+        for ui_scene in scene.ui_scenes() {
+            let layer = Self::ui_layer_for_type(ui_scene.layer_type, ui_scene.alias.as_str());
+            updates.push(SceneUpdate::SetUiLayer {
+                layer,
+                layout: ui_scene.layout,
+            });
+        }
+
+        updates
+    }
+
+    fn runtime_updates_for_scene_entity(
+        entity: &crate::project::scene::SceneEntity,
+        scene_dir: Option<&Path>,
+    ) -> Vec<SceneUpdate> {
+        let mut updates = Vec::new();
+
+        if let (Some(texture_id), Some(texture_data)) = (
+            &entity.material.albedo_texture,
+            &entity.material.albedo_texture_data,
+        ) {
+            updates.push(SceneUpdate::UploadTexture {
+                id: texture_id.clone(),
+                data: texture_data.clone(),
+            });
+        }
+
+        match &entity.entity_type {
+            crate::project::scene::EntityType::Camera => {
+                updates.push(SceneUpdate::SetPlayerStart {
+                    position: entity.position,
+                    rotation: entity.rotation,
+                });
+                updates.push(SceneUpdate::SetActiveCamera {
+                    id: entity.id,
+                    fov: entity.fov,
+                });
+            }
+            crate::project::scene::EntityType::Light {
+                light_type,
+                intensity,
+                range,
+                color,
+            } => {
+                let engine_light_type = match light_type {
+                    crate::project::scene::LightType::Point => LightType::Point,
+                    crate::project::scene::LightType::Spot => LightType::Spot,
+                    crate::project::scene::LightType::Directional => LightType::Directional,
+                };
+                updates.push(SceneUpdate::SpawnLight {
+                    id: entity.id,
+                    light_type: engine_light_type,
+                    position: entity.position,
+                    direction: [0.0, -1.0, 0.0],
+                    color: *color,
+                    intensity: *intensity,
+                    range: *range,
+                    inner_cone: 0.4,
+                    outer_cone: 0.6,
+                });
+            }
+            crate::project::scene::EntityType::AudioSource {
+                sound_id,
+                volume,
+                looping,
+                max_distance,
+                audio_data,
+            } => {
+                if let Some(data) = audio_data {
+                    updates.push(SceneUpdate::UploadSound {
+                        id: sound_id.clone(),
+                        data: data.clone(),
+                    });
+                }
+                updates.push(SceneUpdate::SpawnSound {
+                    id: entity.id,
+                    sound_id: sound_id.clone(),
+                    position: entity.position,
+                    volume: *volume,
+                    looping: *looping,
+                    max_distance: *max_distance,
+                });
+            }
+            crate::project::scene::EntityType::Ground => {
+                updates.push(SceneUpdate::SpawnGroundPlane {
+                    id: entity.id,
+                    primitive: 0,
+                    position: entity.position,
+                    scale: entity.scale,
+                    color: entity.material.albedo_color,
+                    half_extents: [entity.scale[0] / 2.0, entity.scale[2] / 2.0],
+                    albedo_texture: entity.material.albedo_texture.clone(),
+                    collision_enabled: entity.collision_enabled,
+                    layer: entity.layer,
+                });
+            }
+            crate::project::scene::EntityType::Mesh { path } => {
+                let Some(mesh_path) = Self::resolve_asset_file(path, scene_dir) else {
+                    warn!("Mesh asset '{}' could not be resolved", path);
+                    return updates;
+                };
+                match std::fs::read(&mesh_path) {
+                    Ok(mesh_data) => {
+                        let path_lower = mesh_path.to_string_lossy().to_lowercase();
+                        if path_lower.ends_with(".glb") || path_lower.ends_with(".gltf") {
+                            updates.push(SceneUpdate::SpawnGltfMesh {
+                                id: entity.id,
+                                mesh_data,
+                                position: entity.position,
+                                rotation: entity.rotation,
+                                scale: entity.scale,
+                                collision_enabled: entity.collision_enabled,
+                                layer: entity.layer,
+                                is_static: entity.is_static,
+                            });
+                        } else {
+                            updates.push(SceneUpdate::SpawnFbxMesh {
+                                id: entity.id,
+                                mesh_data,
+                                position: entity.position,
+                                rotation: entity.rotation,
+                                scale: entity.scale,
+                                albedo_texture: entity.material.albedo_texture.clone(),
+                                collision_enabled: entity.collision_enabled,
+                                layer: entity.layer,
+                                is_static: entity.is_static,
+                            });
+                        }
+                    }
+                    Err(err) => warn!(
+                        "Failed to read mesh asset '{}': {}",
+                        mesh_path.display(),
+                        err
+                    ),
+                }
+            }
+            _ => {
+                let primitive = match &entity.entity_type {
+                    crate::project::scene::EntityType::Primitive(p) => match p {
+                        crate::project::scene::PrimitiveType::Cube => 0,
+                        crate::project::scene::PrimitiveType::Sphere => 1,
+                        crate::project::scene::PrimitiveType::Cylinder => 2,
+                        crate::project::scene::PrimitiveType::Plane => 3,
+                        crate::project::scene::PrimitiveType::Capsule => 4,
+                        crate::project::scene::PrimitiveType::Cone => 5,
+                    },
+                    crate::project::scene::EntityType::Vehicle => 0,
+                    crate::project::scene::EntityType::Building { .. } => 0,
+                    crate::project::scene::EntityType::CrowdAgent { .. } => 4,
+                    _ => 0,
+                };
+                updates.push(SceneUpdate::Spawn {
+                    id: entity.id,
+                    primitive,
+                    position: entity.position,
+                    rotation: entity.rotation,
+                    scale: entity.scale,
+                    color: entity.material.albedo_color,
+                    albedo_texture: entity.material.albedo_texture.clone(),
+                    collision_enabled: entity.collision_enabled,
+                    layer: entity.layer,
+                    is_static: entity.is_static,
+                });
+            }
+        }
+
+        if let Some(config) = &entity.animator_config {
+            updates.push(SceneUpdate::AttachAnimator {
+                id: entity.id,
+                config: config.clone(),
+            });
+        }
+
+        let script_names = entity.runtime_script_names();
+        if !script_names.is_empty() {
+            updates.push(SceneUpdate::SetScripts {
+                id: entity.id,
+                names: script_names,
+            });
+        }
+
+        if entity.parent_id.is_some() {
+            updates.push(SceneUpdate::AttachEntity {
+                id: entity.id,
+                parent_id: entity.parent_id,
+            });
+        }
+
+        updates
+    }
+
+    fn resolve_scene_file(
+        scene_path: &str,
+        domain: crate::project::scene::SceneDomain,
+    ) -> Option<PathBuf> {
+        let raw = Path::new(scene_path);
+        let mut candidates = Vec::new();
+
+        if raw.is_absolute() {
+            Self::push_json_candidate(&mut candidates, raw.to_path_buf());
+        } else {
+            Self::push_json_candidate(&mut candidates, raw.to_path_buf());
+            let dirs: &[&str] = match domain {
+                crate::project::scene::SceneDomain::World3d => {
+                    &["scenes", "assets/scenes", "assets/bundle/scenes"]
+                }
+                crate::project::scene::SceneDomain::Ui => &[
+                    "ui",
+                    "assets/ui",
+                    "assets/bundle/ui",
+                    "assets/bundle/scenes",
+                    "scenes",
+                ],
+            };
+
+            for dir in dirs {
+                Self::push_json_candidate(&mut candidates, Path::new(dir).join(raw));
+            }
+        }
+
+        candidates.into_iter().find(|path| path.exists())
+    }
+
+    fn resolve_asset_file(asset_path: &str, scene_dir: Option<&Path>) -> Option<PathBuf> {
+        let raw = Path::new(asset_path);
+        let mut candidates = Vec::new();
+
+        if raw.is_absolute() {
+            candidates.push(raw.to_path_buf());
+        } else {
+            candidates.push(raw.to_path_buf());
+            if let Some(dir) = scene_dir {
+                candidates.push(dir.join(raw));
+            }
+            for dir in ["assets/models", "assets", "models"] {
+                candidates.push(Path::new(dir).join(raw));
+            }
+        }
+
+        candidates.into_iter().find(|path| path.exists())
+    }
+
+    fn push_json_candidate(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+        candidates.push(path.clone());
+        if path.extension().is_none() {
+            let mut with_json = path;
+            with_json.set_extension("json");
+            candidates.push(with_json);
+        }
+    }
+
+    fn scene_stem(path: &str) -> Option<String> {
+        Path::new(path)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+    }
+
+    fn callback_arg(callback: &str, names: &[&str]) -> Option<String> {
+        for name in names {
+            let prefix = format!("{}(", name);
+            if callback.starts_with(&prefix) && callback.ends_with(')') {
+                let inner = &callback[prefix.len()..callback.len() - 1];
+                let arg = inner
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'');
+                if !arg.is_empty() {
+                    return Some(arg.to_string());
+                }
+            }
+        }
+        None
+    }
+
     /// Helper to find an entity by its EditorEntityId
     pub fn find_by_editor_id(&self, id: u32) -> Option<Entity> {
         for (entity, editor_id) in self.ecs.query::<&EditorEntityId>().iter() {
@@ -906,13 +1565,14 @@ impl GameWorld {
 
             if let Some(mut script) = slot.script.take() {
                 let xr = self.xr_input.clone();
-                let mut ctx = ScriptContext::new_with_xr(
+                let mut ctx = ScriptContext::new_with_xr_and_scene_commands(
                     entity,
                     &mut self.ecs,
                     physics,
                     0.0,
                     xr,
                     Some(&mut self.pending_xr_haptics),
+                    Some(&mut self.pending_scene_commands),
                 );
                 script.on_disable(&mut ctx);
             }
@@ -953,13 +1613,14 @@ impl GameWorld {
             if slot.enabled {
                 if let Some(mut script) = slot.script.take() {
                     let xr = self.xr_input.clone();
-                    let mut ctx = ScriptContext::new_with_xr(
+                    let mut ctx = ScriptContext::new_with_xr_and_scene_commands(
                         entity,
                         &mut self.ecs,
                         physics,
                         dt,
                         xr,
                         Some(&mut self.pending_xr_haptics),
+                        Some(&mut self.pending_scene_commands),
                     );
                     call(script.as_mut(), &mut ctx);
                     slot.script = Some(script);
@@ -1069,8 +1730,13 @@ impl GameWorld {
         // Unloading can be added here (check if chunk is far)
         // ...
 
-        // Process Scene Updates (Networking)
+        // Process Scene Updates (Networking + scene-manager expansions)
+        let mut scene_commands = VecDeque::new();
         while let Ok(cmd) = self.command_receiver.try_recv() {
+            scene_commands.push_back(cmd);
+        }
+
+        while let Some(cmd) = scene_commands.pop_front() {
             // info!("Processing command: {:?}", cmd); // Commented out to prevent massive binary dumps // Removed to prevent logging raw binary data from UploadSound
             match cmd {
                 SceneUpdate::Spawn {
@@ -1246,6 +1912,31 @@ impl GameWorld {
                     }
                     self.loaded_chunks.clear(); // Clear chunk history too
                     info!("ClearScene: Deleted {} entities", count);
+                }
+                SceneUpdate::SetSceneHierarchy { hierarchy } => {
+                    let root_count = hierarchy.roots.len();
+                    let transition_count = hierarchy.transitions.len();
+                    self.scene_hierarchy = hierarchy;
+                    info!(
+                        "Scene hierarchy registered: {} roots, {} transitions",
+                        root_count, transition_count
+                    );
+                }
+                SceneUpdate::TransitionScene { target, mode } => {
+                    self.expand_scene_transition(target, mode, &mut scene_commands);
+                }
+                SceneUpdate::LoadWorldScene { scene_path, mode } => {
+                    self.expand_world_scene_load(&scene_path, mode, &mut scene_commands);
+                }
+                SceneUpdate::CallUiScene {
+                    scene_path,
+                    layer,
+                    mode,
+                } => {
+                    self.expand_ui_scene_load(&scene_path, Some(layer), mode, &mut scene_commands);
+                }
+                SceneUpdate::CallWorldScene { scene_path, mode } => {
+                    self.expand_world_scene_load(&scene_path, mode, &mut scene_commands);
                 }
                 SceneUpdate::SetProceduralGeneration { enabled } => {
                     self.procedural_generation_enabled = enabled;
@@ -2119,19 +2810,12 @@ impl GameWorld {
                     self.ui_layers.hide(&layer);
                 }
                 SceneUpdate::LoadUiScene { layer, scene_path } => {
-                    // Load UI scene from assets/ui/{scene_path}.json
-                    let path = format!("assets/ui/{}.json", scene_path);
-                    match std::fs::read_to_string(&path) {
-                        Ok(data) => match serde_json::from_str::<crate::ui::UiLayout>(&data) {
-                            Ok(layout) => {
-                                self.ui_layers.set_layer(layer.clone(), layout);
-                                self.ui_layers.show(layer);
-                                info!("Loaded UI scene from {}", path);
-                            }
-                            Err(e) => warn!("Failed to parse UI scene {}: {}", path, e),
-                        },
-                        Err(e) => warn!("Failed to load UI scene {}: {}", path, e),
-                    }
+                    self.expand_ui_scene_load(
+                        &scene_path,
+                        Some(layer),
+                        crate::project::scene::SceneTransitionMode::Additive,
+                        &mut scene_commands,
+                    );
                 }
                 SceneUpdate::MenuLoad { alias } => {
                     // Push the current menu (if any) and show the new one
@@ -2438,13 +3122,14 @@ impl GameWorld {
                             };
 
                         let xr = self.xr_input.clone();
-                        let mut ctx = ScriptContext::new_with_xr(
+                        let mut ctx = ScriptContext::new_with_xr_and_scene_commands(
                             entity,
                             &mut self.ecs,
                             physics,
                             dt,
                             xr,
                             Some(&mut self.pending_xr_haptics),
+                            Some(&mut self.pending_scene_commands),
                         );
 
                         if !slot.started {
@@ -2477,6 +3162,8 @@ impl GameWorld {
                 }
             }
         }
+
+        self.flush_pending_scene_commands();
     }
 
     fn update_agents_parallel(&mut self, dt: f32) {
@@ -2716,6 +3403,53 @@ impl GameWorld {
         if callback == "quit()" || callback == "quit" {
             info!("Built-in quit: Player wants to quit game");
             // Quit is handled in main.rs via the callback check - just return here
+            return;
+        }
+
+        if let Some(scene_path) = Self::callback_arg(
+            callback,
+            &[
+                "load_world_scene",
+                "call_world_scene",
+                "load_scene",
+                "scene_load",
+            ],
+        ) {
+            info!("Built-in world scene callback: loading '{}'", scene_path);
+            self.queue_scene_command(SceneUpdate::CallWorldScene {
+                scene_path,
+                mode: crate::project::scene::SceneTransitionMode::Replace,
+            });
+            return;
+        }
+
+        if let Some(scene_path) =
+            Self::callback_arg(callback, &["load_ui_scene", "call_ui_scene", "ui_scene"])
+        {
+            let alias = Self::scene_stem(&scene_path).unwrap_or_else(|| "ui".to_string());
+            info!("Built-in UI scene callback: loading '{}'", scene_path);
+            self.queue_scene_command(SceneUpdate::CallUiScene {
+                scene_path,
+                layer: crate::ui::UiLayer::Custom(alias),
+                mode: crate::project::scene::SceneTransitionMode::Push,
+            });
+            return;
+        }
+
+        if callback == "ui_scene_back()" || callback == "ui_scene_back" {
+            self.queue_scene_command(SceneUpdate::CallUiScene {
+                scene_path: String::new(),
+                layer: crate::ui::UiLayer::Custom(String::new()),
+                mode: crate::project::scene::SceneTransitionMode::Pop,
+            });
+            return;
+        }
+
+        if callback == "world_scene_back()" || callback == "world_scene_back" {
+            self.queue_scene_command(SceneUpdate::CallWorldScene {
+                scene_path: String::new(),
+                mode: crate::project::scene::SceneTransitionMode::Pop,
+            });
             return;
         }
 

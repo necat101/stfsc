@@ -1,4 +1,4 @@
-use crate::ui::{UiLayerType, UiLayout};
+use crate::ui::{UiLayer, UiLayerType, UiLayout};
 use crate::world::animation::AnimatorConfig;
 use crate::world::sandbox::SandboxWorldSettings;
 use crate::world::{LAYER_CHARACTER, LAYER_DEFAULT, LAYER_ENVIRONMENT, LAYER_PROP, LAYER_VEHICLE};
@@ -90,6 +90,137 @@ fn default_layer() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+// ============================================================================
+// SCENE HIERARCHY
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SceneDomain {
+    /// A real-time 3D scene made of ECS entities, physics, scripts, lights, etc.
+    World3d,
+    /// A 2D UI scene made of UI layout data and input callbacks.
+    Ui,
+}
+
+impl Default for SceneDomain {
+    fn default() -> Self {
+        Self::World3d
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SceneTransitionMode {
+    /// Replace the currently active scene in the same domain.
+    Replace,
+    /// Add the target scene without clearing the current domain.
+    Additive,
+    /// Push the target on that domain's stack.
+    Push,
+    /// Show the target as an overlay. UI scenes treat this like a visible layer.
+    Overlay,
+    /// Pop the current scene stack and return to the previous scene where supported.
+    Pop,
+}
+
+impl Default for SceneTransitionMode {
+    fn default() -> Self {
+        Self::Replace
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SceneRef {
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub domain: SceneDomain,
+    #[serde(default)]
+    pub alias: Option<String>,
+    #[serde(default)]
+    pub layer: Option<UiLayer>,
+    #[serde(default)]
+    pub children: Vec<SceneRef>,
+}
+
+impl SceneRef {
+    pub fn world(name: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            path: path.into(),
+            domain: SceneDomain::World3d,
+            alias: None,
+            layer: None,
+            children: Vec::new(),
+        }
+    }
+
+    pub fn ui(
+        name: impl Into<String>,
+        path: impl Into<String>,
+        alias: impl Into<String>,
+        layer: UiLayer,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            path: path.into(),
+            domain: SceneDomain::Ui,
+            alias: Some(alias.into()),
+            layer: Some(layer),
+            children: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SceneTransition {
+    pub name: String,
+    #[serde(default)]
+    pub from: Option<SceneRef>,
+    pub to: SceneRef,
+    #[serde(default)]
+    pub mode: SceneTransitionMode,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SceneHierarchy {
+    #[serde(default)]
+    pub roots: Vec<SceneRef>,
+    #[serde(default)]
+    pub transitions: Vec<SceneTransition>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorldScene {
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub entities: Vec<SceneEntity>,
+    #[serde(default)]
+    pub respawn_enabled: bool,
+    #[serde(default)]
+    pub respawn_y: f32,
+    #[serde(default)]
+    pub sandbox: SandboxWorldSettings,
+    #[serde(default)]
+    pub hierarchy: SceneHierarchy,
+    #[serde(default)]
+    pub transitions: Vec<SceneTransition>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UiScene {
+    pub name: String,
+    pub version: String,
+    pub alias: String,
+    #[serde(default)]
+    pub layer_type: UiLayerType,
+    pub layout: UiLayout,
+    #[serde(default)]
+    pub hierarchy: SceneHierarchy,
+    #[serde(default)]
+    pub transitions: Vec<SceneTransition>,
 }
 
 pub const MAX_SCRIPTS_PER_ENTITY: usize = 32;
@@ -227,6 +358,15 @@ impl SceneEntity {
             .collect()
     }
 
+    pub fn runtime_script_names(&self) -> Vec<String> {
+        let names = self.script_names();
+        if names.is_empty() && matches!(self.entity_type, EntityType::Vehicle) {
+            vec!["Vehicle".to_string()]
+        } else {
+            names
+        }
+    }
+
     pub fn set_script_names(&mut self, names: Vec<String>) {
         let names = Self::normalize_script_names(names);
         let old_components = std::mem::take(&mut self.script_components);
@@ -360,12 +500,21 @@ impl Default for NamedUiLayout {
 pub struct Scene {
     pub name: String,
     pub version: String,
+    #[serde(default)]
+    pub domain: SceneDomain,
     pub entities: Vec<SceneEntity>,
     pub respawn_enabled: bool,
     pub respawn_y: f32,
     /// Per-scene sandbox settings. Disabled by default so existing scenes keep current behavior.
     #[serde(default)]
     pub sandbox: SandboxWorldSettings,
+    /// Hierarchical child scene graph. New projects should reference UI scenes here instead of
+    /// embedding them directly in `ui_layouts`.
+    #[serde(default)]
+    pub hierarchy: SceneHierarchy,
+    /// Named scene transitions authored at this scene level.
+    #[serde(default)]
+    pub transitions: Vec<SceneTransition>,
     /// Multiple named UI layouts with tabs
     #[serde(default)]
     pub ui_layouts: Vec<NamedUiLayout>,
@@ -380,11 +529,62 @@ impl Scene {
         Self {
             name: name.into(),
             version: "1.0".into(),
+            domain: SceneDomain::World3d,
             entities: Vec::new(),
             respawn_enabled: false,
             respawn_y: -20.0,
             sandbox: SandboxWorldSettings::default(),
+            hierarchy: SceneHierarchy::default(),
+            transitions: Vec::new(),
             ui_layouts: vec![NamedUiLayout::default()],
+            ui_layout: UiLayout::default(),
+        }
+    }
+
+    pub fn world_scene(&self) -> WorldScene {
+        WorldScene {
+            name: self.name.clone(),
+            version: self.version.clone(),
+            entities: self.entities.clone(),
+            respawn_enabled: self.respawn_enabled,
+            respawn_y: self.respawn_y,
+            sandbox: self.sandbox.clone(),
+            hierarchy: self.hierarchy.clone(),
+            transitions: self.transitions.clone(),
+        }
+    }
+
+    pub fn ui_scenes(&self) -> Vec<UiScene> {
+        self.ui_layouts
+            .iter()
+            .map(|named| {
+                let mut layout = named.layout.clone();
+                layout.layer_type = named.layer_type;
+                UiScene {
+                    name: named.name.clone(),
+                    version: self.version.clone(),
+                    alias: named.alias.clone(),
+                    layer_type: named.layer_type,
+                    layout,
+                    hierarchy: SceneHierarchy::default(),
+                    transitions: Vec::new(),
+                }
+            })
+            .collect()
+    }
+
+    pub fn from_world_scene(world: WorldScene) -> Self {
+        Self {
+            name: world.name,
+            version: world.version,
+            domain: SceneDomain::World3d,
+            entities: world.entities,
+            respawn_enabled: world.respawn_enabled,
+            respawn_y: world.respawn_y,
+            sandbox: world.sandbox,
+            hierarchy: world.hierarchy,
+            transitions: world.transitions,
+            ui_layouts: Vec::new(),
             ui_layout: UiLayout::default(),
         }
     }

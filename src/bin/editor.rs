@@ -937,7 +937,7 @@ impl EditorApp {
             });
         }
 
-        let script_names = entity.script_names();
+        let script_names = entity.runtime_script_names();
         if !script_names.is_empty() {
             updates.push(SceneUpdate::SetScripts {
                 id: entity.id,
@@ -966,6 +966,9 @@ impl EditorApp {
             SceneUpdate::SetRespawnSettings {
                 enabled: scene.respawn_enabled,
                 y_threshold: scene.respawn_y,
+            },
+            SceneUpdate::SetSceneHierarchy {
+                hierarchy: scene.hierarchy.clone(),
             },
         ];
 
@@ -1029,7 +1032,12 @@ impl EditorApp {
 
         if let Some(scene) = &self.current_scene {
             for update in self.scene_runtime_updates(scene) {
-                Self::queue_embedded_runtime_update(&mut world, &mut physics, player_position, update);
+                Self::queue_embedded_runtime_update(
+                    &mut world,
+                    &mut physics,
+                    player_position,
+                    update,
+                );
             }
             world.update_streaming(player_position, &mut physics);
         }
@@ -1116,7 +1124,9 @@ impl EditorApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(
                 egui::viewport::CursorGrab::Confined,
             ));
-            ctx.send_viewport_cmd(egui::ViewportCommand::CursorPosition(response.rect.center()));
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorPosition(
+                response.rect.center(),
+            ));
         }
 
         if look_delta.x != 0.0 || look_delta.y != 0.0 {
@@ -1132,12 +1142,9 @@ impl EditorApp {
         let mut runtime_player_position = None;
         if let Some(runtime) = &mut self.play_runtime {
             if can_drive {
-                let forward_basis = GVec3::new(
-                    self.play_player_yaw.sin(),
-                    0.0,
-                    -self.play_player_yaw.cos(),
-                )
-                .normalize();
+                let forward_basis =
+                    GVec3::new(self.play_player_yaw.sin(), 0.0, -self.play_player_yaw.cos())
+                        .normalize();
                 let right_basis = forward_basis.cross(GVec3::Y).normalize();
                 let mut move_dir = GVec3::ZERO;
                 if move_forward {
@@ -1181,7 +1188,10 @@ impl EditorApp {
 
             if let Some(player_pos) = runtime_player_position {
                 let player_rot = GQuat::from_rotation_y(self.play_player_yaw);
-                if let Ok(mut transform) = runtime.world.ecs.get::<&mut Transform>(runtime.player_entity)
+                if let Ok(mut transform) = runtime
+                    .world
+                    .ecs
+                    .get::<&mut Transform>(runtime.player_entity)
                 {
                     transform.position = player_pos;
                     transform.rotation = player_rot;
@@ -1195,8 +1205,8 @@ impl EditorApp {
                     local.rotation = player_rot;
                 }
 
-                let head_rot =
-                    GQuat::from_rotation_y(self.play_player_yaw) * GQuat::from_rotation_x(self.play_player_pitch);
+                let head_rot = GQuat::from_rotation_y(self.play_player_yaw)
+                    * GQuat::from_rotation_x(self.play_player_pitch);
                 let mut xr_snapshot = stfsc_engine::world::scripting::XrInputSnapshot::default();
                 xr_snapshot.head =
                     stfsc_engine::world::scripting::XrPose::new(player_pos, head_rot, true);
@@ -1243,9 +1253,13 @@ impl EditorApp {
                 runtime.world.set_xr_input_snapshot(xr_snapshot);
 
                 let ui_events = std::mem::take(&mut runtime.world.pending_ui_events);
-                runtime.world.update_streaming(player_pos, &mut runtime.physics);
+                runtime
+                    .world
+                    .update_streaming(player_pos, &mut runtime.physics);
                 if can_drive {
-                    runtime.world.update_logic(&mut runtime.physics, dt, ui_events);
+                    runtime
+                        .world
+                        .update_logic(&mut runtime.physics, dt, ui_events);
                 }
 
                 let physics_updates: Vec<_> = runtime
@@ -1744,7 +1758,7 @@ impl EditorApp {
             }
         }
 
-        let script_names = entity.script_names();
+        let script_names = entity.runtime_script_names();
         if !script_names.is_empty() {
             let _ = self
                 .command_tx
@@ -1763,6 +1777,11 @@ impl EditorApp {
                 .send(AppCommand::Send(SceneUpdate::SetRespawnSettings {
                     enabled: scene.respawn_enabled,
                     y_threshold: scene.respawn_y,
+                }));
+            let _ = self
+                .command_tx
+                .send(AppCommand::Send(SceneUpdate::SetSceneHierarchy {
+                    hierarchy: scene.hierarchy.clone(),
                 }));
 
             // Deploy all entities
@@ -5822,9 +5841,9 @@ impl eframe::App for EditorApp {
                                     albedo_color: [1.0, 1.0, 0.0],
                                     ..Default::default()
                                 },
-                                script: None,
-                                scripts: vec![],
-                                script_components: vec![],
+                                script: Some("Vehicle".into()),
+                                scripts: vec!["Vehicle".into()],
+                                script_components: vec![ScriptComponent::builtin("Vehicle")],
                                 collision_enabled: true,
                                 layer: LAYER_VEHICLE,
                                 is_static: false,
@@ -6149,9 +6168,9 @@ impl eframe::App for EditorApp {
                         egui::Button::new(
                             egui::RichText::new(play_label).strong().color(play_color),
                         ),
-                )
-                .on_hover_text("Run the current scene in the embedded player")
-                .clicked()
+                    )
+                    .on_hover_text("Run the current scene in the embedded player")
+                    .clicked()
                 {
                     self.toggle_play_mode(ctx);
                 }
@@ -7296,7 +7315,7 @@ impl eframe::App for EditorApp {
                                 }));
                             }
 
-                            let script_names = e.script_names();
+                            let script_names = e.runtime_script_names();
                             if !script_names.is_empty() {
                                 let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetScripts {
                                     id: e.id,
