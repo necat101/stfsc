@@ -3,7 +3,7 @@
 **Steal This Fucking Source Code** — *Because gaming deserves better.*
 
 <p align="center">
-  <strong>v0.3.5 Alpha —</strong>
+  <strong>v0.4 Alpha —</strong>
 </p>
 
 ---
