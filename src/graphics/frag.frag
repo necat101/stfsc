@@ -13,6 +13,7 @@ layout(location = 9) in vec3 inCameraPos;
 layout(location = 10) in vec4 inNormalOffsetShadowPos;
 layout(location = 11) in float inMetallic;
 layout(location = 12) in float inRoughness;
+layout(location = 13) in float inShaderPreset;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec4 outMotionVector;
@@ -361,6 +362,29 @@ void main() {
     }
     
     vec3 color = ambient + Lo;
+    float shaderPreset = round(inShaderPreset);
+
+    // Editor viewport shader previews. The production renderer currently uses
+    // one PBR pipeline, so these branches make material shader selections
+    // visible in the editor without requiring separate viewport pipelines.
+    if (shaderPreset == 1.0) {
+        // Unlit
+        color = albedo * 1.35;
+    } else if (shaderPreset == 2.0) {
+        // Transparent preview: no blending in this pass, so use a glassy tint.
+        color = mix(color, vec3(0.18, 0.68, 1.0), 0.45) + albedo * 0.18;
+    } else if (shaderPreset == 3.0) {
+        // Toon
+        float lightBand = max(dot(N, normalize(globalData.lightDir.xyz)), 0.0);
+        lightBand = lightBand > 0.70 ? 1.0 : (lightBand > 0.32 ? 0.62 : 0.26);
+        color = albedo * (0.18 + lightBand);
+    } else if (shaderPreset == 4.0) {
+        // Vertex Color
+        color = max(inColor, vec3(0.02)) * 1.25;
+    } else if (shaderPreset == 5.0) {
+        // Skinned PBR
+        color = mix(color, vec3(0.25, 0.55, 1.0), 0.25);
+    }
     
     // Tone mapping (Reinhard)
     color = color / (color + vec3(1.0));

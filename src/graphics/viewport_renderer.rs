@@ -42,7 +42,8 @@ struct GpuInstanceData {
     color: Vec4,
     metallic: f32,
     roughness: f32,
-    _padding: [f32; 2],
+    shader_preset: f32,
+    _padding: f32,
 }
 
 /// Instance data for rendering a mesh at a specific transform
@@ -51,6 +52,9 @@ pub struct ViewportMeshInstance {
     pub handle: ViewportMeshHandle,
     pub model_matrix: Mat4,
     pub color: Vec3,
+    pub metallic: f32,
+    pub roughness: f32,
+    pub shader_preset: f32,
     pub material_descriptor_set: Option<vk::DescriptorSet>,
     pub joints: Option<Vec<Mat4>>, // Added for skeletal animation
 }
@@ -1097,9 +1101,10 @@ impl ViewportRenderer {
                     model: instance.model_matrix,
                     prev_model: instance.model_matrix,
                     color: Vec4::new(instance.color.x, instance.color.y, instance.color.z, 1.0),
-                    metallic: 0.0, // Default for viewport
-                    roughness: 0.5,
-                    _padding: [0.0; 2],
+                    metallic: instance.metallic,
+                    roughness: instance.roughness,
+                    shader_preset: instance.shader_preset,
+                    _padding: 0.0,
                 });
             }
             unsafe {

@@ -52,7 +52,7 @@ impl PrimitiveType {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Material {
     pub name: String,
     pub albedo_color: [f32; 3],
@@ -73,6 +73,79 @@ impl Default for Material {
             albedo_texture: None,
             albedo_texture_data: None,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ShaderPreset {
+    StandardPbr,
+    Unlit,
+    Transparent,
+    Toon,
+    VertexColor,
+    SkinnedPbr,
+}
+
+impl ShaderPreset {
+    pub fn all() -> Vec<Self> {
+        vec![
+            Self::StandardPbr,
+            Self::Unlit,
+            Self::Transparent,
+            Self::Toon,
+            Self::VertexColor,
+            Self::SkinnedPbr,
+        ]
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::StandardPbr => "Standard PBR",
+            Self::Unlit => "Unlit",
+            Self::Transparent => "Transparent",
+            Self::Toon => "Toon",
+            Self::VertexColor => "Vertex Color",
+            Self::SkinnedPbr => "Skinned PBR",
+        }
+    }
+}
+
+impl Default for ShaderPreset {
+    fn default() -> Self {
+        Self::StandardPbr
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct MaterialSlot {
+    pub name: String,
+    pub material: Material,
+    #[serde(default)]
+    pub shader: ShaderPreset,
+    #[serde(default)]
+    pub script: Option<String>,
+    #[serde(default)]
+    pub bone_name: Option<String>,
+    #[serde(default)]
+    pub bone_index: Option<usize>,
+}
+
+impl MaterialSlot {
+    pub fn from_material(name: impl Into<String>, material: Material) -> Self {
+        Self {
+            name: name.into(),
+            material,
+            shader: ShaderPreset::default(),
+            script: None,
+            bone_name: None,
+            bone_index: None,
+        }
+    }
+}
+
+impl Default for MaterialSlot {
+    fn default() -> Self {
+        Self::from_material("Element 0", Material::default())
     }
 }
 
@@ -310,6 +383,10 @@ pub struct SceneEntity {
     pub scale: [f32; 3],
     pub entity_type: EntityType,
     pub material: Material,
+    #[serde(default)]
+    pub material_slots: Vec<MaterialSlot>,
+    #[serde(default)]
+    pub active_material_slot: usize,
     /// Legacy primary script field kept so old scene files still load cleanly.
     pub script: Option<String>,
     #[serde(default)]
@@ -334,6 +411,35 @@ pub struct SceneEntity {
 }
 
 impl SceneEntity {
+    pub fn ensure_material_slots(&mut self) -> &mut Vec<MaterialSlot> {
+        if self.material_slots.is_empty() {
+            self.material_slots.push(MaterialSlot::from_material(
+                "Element 0",
+                self.material.clone(),
+            ));
+        }
+
+        if self.active_material_slot >= self.material_slots.len() {
+            self.active_material_slot = 0;
+        }
+
+        &mut self.material_slots
+    }
+
+    pub fn sync_primary_material_from_active_slot(&mut self) {
+        if self.material_slots.is_empty() {
+            return;
+        }
+
+        if self.active_material_slot >= self.material_slots.len() {
+            self.active_material_slot = 0;
+        }
+
+        if let Some(slot) = self.material_slots.get(self.active_material_slot) {
+            self.material = slot.material.clone();
+        }
+    }
+
     pub fn script_names(&self) -> Vec<String> {
         if !self.script_components.is_empty() {
             return self
@@ -613,6 +719,8 @@ impl Scene {
             scale: [200.0, 2.0, 200.0],
             entity_type: EntityType::Ground,
             material: m.clone(),
+            material_slots: vec![],
+            active_material_slot: 0,
             script: None,
             scripts: vec![],
             script_components: vec![],
@@ -636,6 +744,8 @@ impl Scene {
                 albedo_color: [1.0, 0.5, 0.2],
                 ..m.clone()
             },
+            material_slots: vec![],
+            active_material_slot: 0,
             script: None,
             scripts: vec![],
             script_components: vec![],
@@ -656,6 +766,8 @@ impl Scene {
             scale: [2.0, 1.0, 4.0],
             entity_type: EntityType::Vehicle,
             material: m.clone(),
+            material_slots: vec![],
+            active_material_slot: 0,
             script: Some("Vehicle".into()),
             scripts: vec!["Vehicle".into()],
             script_components: vec![ScriptComponent::builtin("Vehicle")],
@@ -690,6 +802,8 @@ impl Scene {
                     albedo_color: color,
                     ..m.clone()
                 },
+                material_slots: vec![],
+                active_material_slot: 0,
                 script: Some("CrowdAgent".into()),
                 scripts: vec!["CrowdAgent".into()],
                 script_components: vec![ScriptComponent::builtin("CrowdAgent")],
@@ -716,6 +830,8 @@ impl Scene {
                     albedo_color: [1.0, 0.5, 0.2],
                     ..m.clone()
                 },
+                material_slots: vec![],
+                active_material_slot: 0,
                 script: None,
                 scripts: vec![],
                 script_components: vec![],
@@ -740,6 +856,8 @@ impl Scene {
                 albedo_color: [0.3, 0.3, 1.0],
                 ..m
             },
+            material_slots: vec![],
+            active_material_slot: 0,
             script: None,
             scripts: vec![],
             script_components: vec![],
@@ -766,6 +884,8 @@ impl Scene {
                 color: [1.0, 1.0, 0.9],
             },
             material: Material::default(),
+            material_slots: vec![],
+            active_material_slot: 0,
             script: None,
             scripts: vec![],
             script_components: vec![],

@@ -23,6 +23,9 @@ layout(location = 7) out vec4 outClipPos;
 layout(location = 8) out vec4 outPrevClipPos;
 layout(location = 9) out vec3 outCameraPos;
 layout(location = 10) out vec4 outNormalOffsetShadowPos;
+layout(location = 11) out float outMetallic;
+layout(location = 12) out float outRoughness;
+layout(location = 13) out float outShaderPreset;
 
 struct InstanceData {
     mat4 model;
@@ -30,7 +33,8 @@ struct InstanceData {
     vec4 color;
     float metallic;
     float roughness;
-    vec2 _padding;
+    float shaderPreset;
+    float _padding;
 };
 
 // Set 0 Binding 1: Instance Buffer
@@ -80,6 +84,9 @@ void main() {
     mat4 model = instanceData.instances[gl_InstanceIndex].model;
     mat4 prevModel = instanceData.instances[gl_InstanceIndex].prevModel;
     vec4 instanceColor = instanceData.instances[gl_InstanceIndex].color;
+    outMetallic = instanceData.instances[gl_InstanceIndex].metallic;
+    outRoughness = instanceData.instances[gl_InstanceIndex].roughness;
+    outShaderPreset = instanceData.instances[gl_InstanceIndex].shaderPreset;
 
     // Compute skin matrix from bone influences
     mat4 skinMatrix = computeSkinMatrix();

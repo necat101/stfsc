@@ -13,7 +13,8 @@ struct InstanceData {
     vec4 color;
     float metallic;
     float roughness;
-    vec2 _padding;
+    float shaderPreset;
+    float _padding;
 };
 
 // Set 0 Binding 1: Instance Buffer
@@ -42,6 +43,7 @@ layout(location = 9) out vec3 outCameraPos;
 layout(location = 10) out vec4 outNormalOffsetShadowPos;
 layout(location = 11) out float outMetallic;
 layout(location = 12) out float outRoughness;
+layout(location = 13) out float outShaderPreset;
 
 void main() {
     // mat4 model = instanceData.instances[gl_InstanceIndex].model;
@@ -51,6 +53,7 @@ void main() {
     vec4 instanceColor = instanceData.instances[gl_InstanceIndex].color;
     outMetallic = instanceData.instances[gl_InstanceIndex].metallic;
     outRoughness = instanceData.instances[gl_InstanceIndex].roughness;
+    outShaderPreset = instanceData.instances[gl_InstanceIndex].shaderPreset;
 
     vec4 worldPos = model * vec4(position, 1.0);
     gl_Position = globalData.viewProj * worldPos;

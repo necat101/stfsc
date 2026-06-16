@@ -103,6 +103,12 @@ struct Camera3D {
     pitch: f32,
     fov: f32,
 }
+
+const SCENE_CAMERA_MIN_DISTANCE: f32 = 0.001;
+const SCENE_CAMERA_MAX_DISTANCE: f32 = 1000.0;
+const SCENE_CAMERA_PAN_DISTANCE_FLOOR: f32 = 8.0;
+const SCENE_VIEW_GIZMO_SIZE: f32 = 104.0;
+
 impl Camera3D {
     fn new() -> Self {
         Self {
@@ -141,6 +147,65 @@ impl Camera3D {
         self.get_forward()
             .cross(&Vec3::new(0.0, 1.0, 0.0))
             .normalize()
+    }
+    fn get_up(&self) -> Vec3 {
+        self.get_right().cross(&self.get_forward()).normalize()
+    }
+    fn pan(&mut self, delta: egui::Vec2, focus_radius: Option<f32>) {
+        let right = self.get_right();
+        let up = self.get_up();
+        let focus_floor = focus_radius.unwrap_or(0.0) * 0.75;
+        let pan_basis = self
+            .distance
+            .max(SCENE_CAMERA_PAN_DISTANCE_FLOOR)
+            .max(focus_floor);
+        let pan_speed = pan_basis * 0.0025;
+        let world_delta = right
+            .mul(-delta.x * pan_speed)
+            .add(&up.mul(delta.y * pan_speed));
+        self.target = self.target.add(&world_delta);
+    }
+    fn zoom_towards(&mut self, scroll_delta: f32, cursor_pos: Option<egui::Pos2>, size: egui::Vec2) {
+        if scroll_delta.abs() <= f32::EPSILON || size.x <= 1.0 || size.y <= 1.0 {
+            return;
+        }
+
+        let old_distance = self.distance.max(SCENE_CAMERA_MIN_DISTANCE);
+        let zoom_amount = (scroll_delta.abs() * 0.012).clamp(0.02, 1.25);
+        let zoom_factor = if scroll_delta > 0.0 {
+            1.0 / (1.0 + zoom_amount)
+        } else {
+            1.0 + zoom_amount
+        };
+        let new_distance =
+            (old_distance * zoom_factor).clamp(SCENE_CAMERA_MIN_DISTANCE, SCENE_CAMERA_MAX_DISTANCE);
+        let distance_delta = old_distance - new_distance;
+        let ray_dir = cursor_pos
+            .map(|pos| self.get_ray(pos, size).1)
+            .unwrap_or_else(|| self.get_forward());
+
+        if distance_delta.abs() > 0.0001 {
+            let forward = self.get_forward();
+            let side_pull = ray_dir.sub(&forward.mul(ray_dir.dot(&forward)));
+            self.target = self.target.add(&side_pull.mul(distance_delta * 0.45));
+        }
+
+        self.distance = new_distance;
+
+        if scroll_delta > 0.0 && new_distance < SCENE_CAMERA_PAN_DISTANCE_FLOOR {
+            let dolly = (scroll_delta * 0.006).clamp(0.01, 2.5)
+                * (1.0 - new_distance / SCENE_CAMERA_PAN_DISTANCE_FLOOR);
+            self.target = self.target.add(&ray_dir.mul(dolly));
+        }
+    }
+    fn set_orbit_axis(&mut self, camera_offset_dir: Vec3) {
+        let dir = camera_offset_dir.normalize();
+        self.pitch = dir.y.asin().clamp(-1.5, 1.5);
+        self.yaw = dir.x.atan2(dir.z);
+    }
+    fn set_isometric_view(&mut self) {
+        self.yaw = 0.75;
+        self.pitch = 0.58;
     }
     fn project(&self, world: Vec3, size: egui::Vec2) -> Option<egui::Pos2> {
         let cam = self.get_position();
@@ -262,8 +327,8 @@ impl Camera3D {
 // PRIMITIVES LIBRARY (Unity-style)
 // ============================================================================
 use stfsc_engine::project::scene::{
-    EntityType, LightType as LightTypeEditor, Material, NamedUiLayout, PrimitiveType, Scene,
-    SceneEntity, ScriptCompileMode, ScriptComponent, CUSTOM_FUCKSCRIPT_NAME,
+    EntityType, LightType as LightTypeEditor, Material, MaterialSlot, NamedUiLayout, PrimitiveType,
+    Scene, SceneEntity, ScriptCompileMode, ScriptComponent, ShaderPreset, CUSTOM_FUCKSCRIPT_NAME,
     MAX_SCRIPTS_PER_ENTITY,
 };
 
@@ -567,6 +632,15 @@ struct EmbeddedPlayRuntime {
     player_rb: RigidBodyHandle,
 }
 
+#[derive(Clone)]
+struct HierarchyRow {
+    id: u32,
+    parent_id: Option<u32>,
+    name: String,
+    kind: &'static str,
+    deployed: bool,
+}
+
 struct EditorApp {
     push_addr: String,
     status: String,
@@ -605,6 +679,7 @@ struct EditorApp {
     inspector_start_entity: Option<SceneEntity>, // Entity state at inspector edit start for undo
     last_selected_id: Option<u32>,          // Track selection changes
     selected_script_slot_by_entity: HashMap<u32, usize>,
+    selected_material_slot_by_entity: HashMap<u32, usize>,
 
     // Scene file management
     current_scene_path: Option<String>, // Path to currently loaded scene file
@@ -697,6 +772,80 @@ struct EditorApp {
 }
 
 impl EditorApp {
+    fn selected_camera_focus(&self) -> Option<(Vec3, f32)> {
+        let selected_id = self.selected_entity_id?;
+        let scene = self.current_scene.as_ref()?;
+        let entity = scene.entities.iter().find(|entity| entity.id == selected_id)?;
+        let target = Vec3::new(entity.position[0], entity.position[1], entity.position[2]);
+        let radius = entity
+            .scale
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.5_f32, f32::max)
+            * 0.65;
+        Some((target, radius.max(0.5)))
+    }
+
+    fn center_camera_on_selected(&mut self) {
+        if let Some((target, _)) = self.selected_camera_focus() {
+            self.camera.target = target;
+        }
+    }
+
+    fn ray_intersects_aabb(origin: Vec3, dir: Vec3, center: Vec3, half: Vec3) -> Option<f32> {
+        let origin = [origin.x, origin.y, origin.z];
+        let dir = [dir.x, dir.y, dir.z];
+        let min = [center.x - half.x, center.y - half.y, center.z - half.z];
+        let max = [center.x + half.x, center.y + half.y, center.z + half.z];
+        let mut t_min = 0.0_f32;
+        let mut t_max = f32::INFINITY;
+
+        for axis in 0..3 {
+            if dir[axis].abs() < 0.00001 {
+                if origin[axis] < min[axis] || origin[axis] > max[axis] {
+                    return None;
+                }
+                continue;
+            }
+
+            let inv_dir = 1.0 / dir[axis];
+            let mut near = (min[axis] - origin[axis]) * inv_dir;
+            let mut far = (max[axis] - origin[axis]) * inv_dir;
+            if near > far {
+                std::mem::swap(&mut near, &mut far);
+            }
+
+            t_min = t_min.max(near);
+            t_max = t_max.min(far);
+            if t_min > t_max {
+                return None;
+            }
+        }
+
+        Some(t_min.max(0.0))
+    }
+
+    fn pick_scene_entity_at(&self, local_pos: egui::Pos2, viewport_size: egui::Vec2) -> Option<u32> {
+        let scene = self.current_scene.as_ref()?;
+        let (ray_origin, ray_dir) = self.camera.get_ray(local_pos, viewport_size);
+
+        scene
+            .entities
+            .iter()
+            .filter_map(|entity| {
+                let center = Vec3::new(entity.position[0], entity.position[1], entity.position[2]);
+                let half = Vec3::new(
+                    (entity.scale[0].abs() * 0.5).max(0.25),
+                    (entity.scale[1].abs() * 0.5).max(0.25),
+                    (entity.scale[2].abs() * 0.5).max(0.25),
+                );
+                Self::ray_intersects_aabb(ray_origin, ray_dir, center, half)
+                    .map(|distance| (entity.id, distance))
+            })
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(id, _)| id)
+    }
+
     fn play_forward(&self) -> Vec3 {
         let pitch_cos = self.play_player_pitch.cos();
         Vec3::new(
@@ -1503,6 +1652,7 @@ impl EditorApp {
             inspector_start_entity: None,
             last_selected_id: None,
             selected_script_slot_by_entity: HashMap::new(),
+            selected_material_slot_by_entity: HashMap::new(),
             // Scene file management
             current_scene_path: None,
             scene_dirty: false,
@@ -1612,6 +1762,559 @@ impl EditorApp {
             export_error: None,
             export_receiver: None,
         }
+    }
+
+    fn entity_kind_label(entity: &SceneEntity) -> &'static str {
+        match &entity.entity_type {
+            EntityType::Primitive(PrimitiveType::Cube) => "Cube",
+            EntityType::Primitive(PrimitiveType::Sphere) => "Sphere",
+            EntityType::Primitive(PrimitiveType::Cylinder) => "Cylinder",
+            EntityType::Primitive(PrimitiveType::Plane) => "Plane",
+            EntityType::Primitive(PrimitiveType::Capsule) => "Capsule",
+            EntityType::Primitive(PrimitiveType::Cone) => "Cone",
+            EntityType::Vehicle => "Vehicle",
+            EntityType::CrowdAgent { .. } => "Agent",
+            EntityType::Building { .. } => "Building",
+            EntityType::Ground => "Ground",
+            EntityType::Mesh { .. } => "Mesh",
+            EntityType::Camera => "Camera",
+            EntityType::AudioSource { .. } => "Audio",
+            EntityType::Light { .. } => "Light",
+        }
+    }
+
+    fn active_shader(entity: &SceneEntity) -> ShaderPreset {
+        entity
+            .material_slots
+            .get(entity.active_material_slot)
+            .or_else(|| entity.material_slots.first())
+            .map(|slot| slot.shader)
+            .unwrap_or_default()
+    }
+
+    fn shader_preset_code(shader: ShaderPreset) -> f32 {
+        match shader {
+            ShaderPreset::StandardPbr => 0.0,
+            ShaderPreset::Unlit => 1.0,
+            ShaderPreset::Transparent => 2.0,
+            ShaderPreset::Toon => 3.0,
+            ShaderPreset::VertexColor => 4.0,
+            ShaderPreset::SkinnedPbr => 5.0,
+        }
+    }
+
+    fn shader_preview_values(entity: &SceneEntity) -> (GVec3, f32, f32) {
+        let material = entity
+            .material_slots
+            .get(entity.active_material_slot)
+            .or_else(|| entity.material_slots.first())
+            .map(|slot| &slot.material)
+            .unwrap_or(&entity.material);
+        let base = GVec3::new(
+            material.albedo_color[0],
+            material.albedo_color[1],
+            material.albedo_color[2],
+        );
+
+        match Self::active_shader(entity) {
+            ShaderPreset::StandardPbr => (base, material.metallic, material.roughness),
+            ShaderPreset::Unlit => (base.lerp(GVec3::ONE, 0.25), 0.0, 1.0),
+            ShaderPreset::Transparent => (base * 0.45 + GVec3::new(0.25, 0.45, 0.65), 0.0, 0.08),
+            ShaderPreset::Toon => {
+                let stepped = GVec3::new(
+                    if base.x > 0.5 { 1.0 } else { 0.25 },
+                    if base.y > 0.5 { 1.0 } else { 0.25 },
+                    if base.z > 0.5 { 1.0 } else { 0.25 },
+                );
+                (stepped, 0.0, 0.85)
+            }
+            ShaderPreset::VertexColor => (GVec3::splat(1.0), 0.0, 0.65),
+            ShaderPreset::SkinnedPbr => (base.lerp(GVec3::new(0.35, 0.65, 1.0), 0.35), 0.65, 0.22),
+        }
+    }
+
+    fn software_shader_color(
+        shader: ShaderPreset,
+        base_col: GVec3,
+        world_normal: GVec3,
+        light_dir: GVec3,
+        view_dir: GVec3,
+        vertex_color: GVec3,
+    ) -> GVec3 {
+        match shader {
+            ShaderPreset::Unlit => base_col,
+            ShaderPreset::Transparent => base_col * 0.45 + GVec3::new(0.25, 0.45, 0.65),
+            ShaderPreset::Toon => {
+                let ndotl = world_normal.dot(light_dir).max(0.0);
+                let band = if ndotl > 0.72 {
+                    1.0
+                } else if ndotl > 0.35 {
+                    0.68
+                } else {
+                    0.32
+                };
+                base_col * band + GVec3::splat(if ndotl > 0.72 { 0.08 } else { 0.0 })
+            }
+            ShaderPreset::VertexColor => vertex_color,
+            ShaderPreset::SkinnedPbr => {
+                let diffuse = world_normal.dot(light_dir).max(0.0) * 0.55;
+                let half_dir = (light_dir + view_dir).normalize();
+                let specular = world_normal.dot(half_dir).max(0.0).powf(12.0) * 0.5;
+                base_col * (diffuse + 0.30) + GVec3::new(0.20, 0.32, 0.55) * specular
+            }
+            ShaderPreset::StandardPbr => {
+                let diffuse = world_normal.dot(light_dir).max(0.0) * 0.65;
+                let half_dir = (light_dir + view_dir).normalize();
+                let specular = world_normal.dot(half_dir).max(0.0).powf(24.0) * 0.2;
+                base_col * (diffuse + 0.35) + GVec3::splat(specular)
+            }
+        }
+    }
+
+    fn hierarchy_rows(scene: &Scene) -> Vec<HierarchyRow> {
+        scene
+            .entities
+            .iter()
+            .map(|entity| HierarchyRow {
+                id: entity.id,
+                parent_id: entity.parent_id,
+                name: entity.name.clone(),
+                kind: Self::entity_kind_label(entity),
+                deployed: entity.deployed,
+            })
+            .collect()
+    }
+
+    fn draw_hierarchy_rows(
+        ui: &mut egui::Ui,
+        rows: &[HierarchyRow],
+        parent_id: Option<u32>,
+        depth: usize,
+        selected_id: Option<u32>,
+        clicked_id: &mut Option<u32>,
+    ) {
+        let has_parent = |id: u32| rows.iter().any(|row| row.id == id);
+
+        for row in rows {
+            let belongs_here = if let Some(parent_id) = parent_id {
+                row.parent_id == Some(parent_id)
+            } else {
+                row.parent_id.is_none() || row.parent_id.map_or(false, |id| !has_parent(id))
+            };
+
+            if !belongs_here {
+                continue;
+            }
+
+            ui.horizontal(|ui| {
+                ui.add_space((depth as f32) * 14.0);
+                let deployed = if row.deployed { " *" } else { "" };
+                let label = format!("{}  {}{}", row.kind, row.name, deployed);
+                if ui
+                    .selectable_label(selected_id == Some(row.id), label)
+                    .clicked()
+                {
+                    *clicked_id = Some(row.id);
+                }
+            });
+
+            Self::draw_hierarchy_rows(ui, rows, Some(row.id), depth + 1, selected_id, clicked_id);
+        }
+    }
+
+    fn push_selected_material_to_runtime(
+        command_tx: &Sender<AppCommand>,
+        entity: &SceneEntity,
+        push_connected: bool,
+    ) {
+        if !push_connected {
+            return;
+        }
+
+        let _ = command_tx.send(AppCommand::Send(SceneUpdate::UpdateMaterial {
+            id: entity.id,
+            color: Some([
+                entity.material.albedo_color[0],
+                entity.material.albedo_color[1],
+                entity.material.albedo_color[2],
+                1.0,
+            ]),
+            albedo_texture: None,
+            metallic: Some(entity.material.metallic),
+            roughness: Some(entity.material.roughness),
+        }));
+    }
+
+    fn draw_selected_object_viewer(&mut self, ctx: &egui::Context, command_tx: Sender<AppCommand>) {
+        egui::TopBottomPanel::bottom("object_viewer")
+            .resizable(true)
+            .default_height(230.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("Object");
+                    if let Some(id) = self.selected_entity_id {
+                        ui.label(format!("#{}", id));
+                    }
+                });
+                ui.separator();
+
+                let Some(selected_id) = self.selected_entity_id else {
+                    ui.label("No object selected");
+                    return;
+                };
+
+                let mut object_dirty = false;
+                let mut material_dirty = false;
+                let mut scripts_dirty = false;
+                let mut selected_slot_value = self
+                    .selected_material_slot_by_entity
+                    .get(&selected_id)
+                    .copied()
+                    .unwrap_or(0);
+                let push_connected = self.push_connected;
+
+                if let Some(scene) = &mut self.current_scene {
+                    if let Some(entity) = scene
+                        .entities
+                        .iter_mut()
+                        .find(|entity| entity.id == selected_id)
+                    {
+                        let bone_names = entity
+                            .animator_config
+                            .as_ref()
+                            .map(|config| config.bone_names.clone())
+                            .unwrap_or_default();
+                        let entity_kind = Self::entity_kind_label(entity);
+
+                        entity.ensure_material_slots();
+                        if selected_slot_value >= entity.material_slots.len() {
+                            selected_slot_value = entity
+                                .active_material_slot
+                                .min(entity.material_slots.len().saturating_sub(1));
+                        }
+                        entity.active_material_slot = selected_slot_value;
+
+                        ui.horizontal(|ui| {
+                            ui.label("Name");
+                            if ui.text_edit_singleline(&mut entity.name).changed() {
+                                object_dirty = true;
+                            }
+                            ui.separator();
+                            ui.label(entity_kind);
+                            ui.separator();
+                            ui.label(format!(
+                                "{} material slot{}",
+                                entity.material_slots.len(),
+                                if entity.material_slots.len() == 1 {
+                                    ""
+                                } else {
+                                    "s"
+                                }
+                            ));
+                        });
+
+                        ui.add_space(6.0);
+                        ui.columns(2, |columns| {
+                            columns[0].heading("Material Slots");
+                            columns[0].separator();
+                            egui::ScrollArea::vertical()
+                                .id_source("material_slot_list")
+                                .max_height(150.0)
+                                .show(&mut columns[0], |ui| {
+                                    for index in 0..entity.material_slots.len() {
+                                        let slot = &entity.material_slots[index];
+                                        let label = format!(
+                                            "{}: {} ({})",
+                                            index,
+                                            slot.name,
+                                            slot.shader.name()
+                                        );
+                                        if ui
+                                            .selectable_label(selected_slot_value == index, label)
+                                            .clicked()
+                                        {
+                                            selected_slot_value = index;
+                                            entity.active_material_slot = index;
+                                            entity.sync_primary_material_from_active_slot();
+                                            material_dirty = true;
+                                        }
+                                    }
+                                });
+
+                            columns[0].horizontal(|ui| {
+                                if ui.button("+ Slot").clicked() {
+                                    let name = format!("Element {}", entity.material_slots.len());
+                                    entity.material_slots.push(MaterialSlot::from_material(
+                                        name,
+                                        entity.material.clone(),
+                                    ));
+                                    selected_slot_value = entity.material_slots.len() - 1;
+                                    entity.active_material_slot = selected_slot_value;
+                                    object_dirty = true;
+                                }
+                                let can_remove = entity.material_slots.len() > 1;
+                                if ui
+                                    .add_enabled(can_remove, egui::Button::new("Remove"))
+                                    .clicked()
+                                {
+                                    entity.material_slots.remove(selected_slot_value);
+                                    selected_slot_value = selected_slot_value
+                                        .min(entity.material_slots.len().saturating_sub(1));
+                                    entity.active_material_slot = selected_slot_value;
+                                    entity.sync_primary_material_from_active_slot();
+                                    object_dirty = true;
+                                    material_dirty = true;
+                                }
+                            });
+
+                            columns[1].heading("Slot Properties");
+                            columns[1].separator();
+
+                            let mut slot_script_to_apply: Option<String> = None;
+                            if let Some(slot) = entity.material_slots.get_mut(selected_slot_value) {
+                                columns[1].horizontal(|ui| {
+                                    ui.label("Slot");
+                                    if ui.text_edit_singleline(&mut slot.name).changed() {
+                                        object_dirty = true;
+                                    }
+                                });
+
+                                columns[1].horizontal(|ui| {
+                                    ui.label("Shader");
+                                    egui::ComboBox::from_id_source(format!(
+                                        "material_shader_{}_{}",
+                                        entity.id, selected_slot_value
+                                    ))
+                                    .selected_text(slot.shader.name())
+                                    .show_ui(ui, |ui| {
+                                        for shader in ShaderPreset::all() {
+                                            let shader_name = shader.name().to_string();
+                                            if ui
+                                                .selectable_value(
+                                                    &mut slot.shader,
+                                                    shader,
+                                                    shader_name.as_str(),
+                                                )
+                                                .changed()
+                                            {
+                                                object_dirty = true;
+                                                material_dirty = true;
+                                            }
+                                        }
+                                    });
+                                });
+
+                                columns[1].horizontal(|ui| {
+                                    ui.label("Albedo");
+                                    let mut color = egui::Color32::from_rgb(
+                                        (slot.material.albedo_color[0] * 255.0) as u8,
+                                        (slot.material.albedo_color[1] * 255.0) as u8,
+                                        (slot.material.albedo_color[2] * 255.0) as u8,
+                                    );
+                                    if ui.color_edit_button_srgba(&mut color).changed() {
+                                        slot.material.albedo_color = [
+                                            color.r() as f32 / 255.0,
+                                            color.g() as f32 / 255.0,
+                                            color.b() as f32 / 255.0,
+                                        ];
+                                        material_dirty = true;
+                                    }
+                                });
+                                if columns[1]
+                                    .add(
+                                        egui::Slider::new(&mut slot.material.metallic, 0.0..=1.0)
+                                            .text("Metallic"),
+                                    )
+                                    .changed()
+                                {
+                                    material_dirty = true;
+                                }
+                                if columns[1]
+                                    .add(
+                                        egui::Slider::new(&mut slot.material.roughness, 0.0..=1.0)
+                                            .text("Roughness"),
+                                    )
+                                    .changed()
+                                {
+                                    material_dirty = true;
+                                }
+
+                                columns[1].horizontal(|ui| {
+                                    ui.label("Script");
+                                    let selected_text =
+                                        slot.script.as_deref().unwrap_or("None").to_string();
+                                    egui::ComboBox::from_id_source(format!(
+                                        "material_script_{}_{}",
+                                        entity.id, selected_slot_value
+                                    ))
+                                    .selected_text(selected_text)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(slot.script.is_none(), "None")
+                                            .clicked()
+                                        {
+                                            slot.script = None;
+                                            object_dirty = true;
+                                            ui.close_menu();
+                                        }
+                                        for script_name in BUILTIN_SCRIPT_NAMES {
+                                            if ui
+                                                .selectable_label(
+                                                    slot.script.as_deref() == Some(*script_name),
+                                                    *script_name,
+                                                )
+                                                .clicked()
+                                            {
+                                                slot.script = Some((*script_name).to_string());
+                                                object_dirty = true;
+                                                ui.close_menu();
+                                            }
+                                        }
+                                        ui.separator();
+                                        if ui
+                                            .selectable_label(
+                                                slot.script.as_deref()
+                                                    == Some(CUSTOM_FUCKSCRIPT_NAME),
+                                                "Custom FuckScript",
+                                            )
+                                            .clicked()
+                                        {
+                                            slot.script = Some(CUSTOM_FUCKSCRIPT_NAME.to_string());
+                                            object_dirty = true;
+                                            ui.close_menu();
+                                        }
+                                    });
+
+                                    if let Some(script_name) = slot.script.clone() {
+                                        if ui.button("Apply").clicked() {
+                                            slot_script_to_apply = Some(script_name);
+                                        }
+                                    }
+                                });
+
+                                columns[1].horizontal(|ui| {
+                                    ui.label("Bone");
+                                    let selected_text = slot
+                                        .bone_name
+                                        .as_deref()
+                                        .map(str::to_string)
+                                        .or_else(|| {
+                                            slot.bone_index
+                                                .and_then(|idx| bone_names.get(idx).cloned())
+                                        })
+                                        .unwrap_or_else(|| "None".to_string());
+                                    egui::ComboBox::from_id_source(format!(
+                                        "material_bone_{}_{}",
+                                        entity.id, selected_slot_value
+                                    ))
+                                    .selected_text(selected_text)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(slot.bone_index.is_none(), "None")
+                                            .clicked()
+                                        {
+                                            slot.bone_index = None;
+                                            slot.bone_name = None;
+                                            object_dirty = true;
+                                            ui.close_menu();
+                                        }
+                                        for (bone_index, bone_name) in bone_names.iter().enumerate()
+                                        {
+                                            if ui
+                                                .selectable_label(
+                                                    slot.bone_index == Some(bone_index),
+                                                    bone_name,
+                                                )
+                                                .clicked()
+                                            {
+                                                slot.bone_index = Some(bone_index);
+                                                slot.bone_name = Some(bone_name.clone());
+                                                object_dirty = true;
+                                                ui.close_menu();
+                                            }
+                                        }
+                                    });
+                                    if bone_names.is_empty() {
+                                        if ui
+                                            .text_edit_singleline(
+                                                slot.bone_name.get_or_insert_with(String::new),
+                                            )
+                                            .changed()
+                                        {
+                                            if slot.bone_name.as_deref() == Some("") {
+                                                slot.bone_name = None;
+                                            }
+                                            object_dirty = true;
+                                        }
+                                    }
+                                });
+
+                                columns[1].horizontal(|ui| {
+                                    ui.label("Bone Index");
+                                    let mut index_value =
+                                        slot.bone_index.map(|idx| idx as i32).unwrap_or(-1);
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut index_value)
+                                                .speed(1)
+                                                .clamp_range(-1..=255),
+                                        )
+                                        .changed()
+                                    {
+                                        if index_value < 0 {
+                                            slot.bone_index = None;
+                                            slot.bone_name = None;
+                                        } else {
+                                            let idx = index_value as usize;
+                                            slot.bone_index = Some(idx);
+                                            if let Some(name) = bone_names.get(idx) {
+                                                slot.bone_name = Some(name.clone());
+                                            }
+                                        }
+                                        object_dirty = true;
+                                    }
+                                });
+                            }
+
+                            if let Some(script_name) = slot_script_to_apply {
+                                let mut scripts = entity.script_names();
+                                if !scripts.iter().any(|name| name == &script_name) {
+                                    scripts.push(script_name);
+                                    entity.set_script_names(scripts);
+                                    scripts_dirty = true;
+                                }
+                            }
+                        });
+
+                        if material_dirty {
+                            entity.sync_primary_material_from_active_slot();
+                            Self::push_selected_material_to_runtime(
+                                &command_tx,
+                                entity,
+                                push_connected,
+                            );
+                        }
+
+                        if scripts_dirty && push_connected {
+                            let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetScripts {
+                                id: entity.id,
+                                names: entity.script_names(),
+                            }));
+                        }
+                    } else {
+                        ui.label("Selected object no longer exists");
+                    }
+                }
+
+                if object_dirty || material_dirty || scripts_dirty {
+                    self.scene_dirty = true;
+                    self.viewport_idle_frames = 0;
+                    self.last_gpu_render_time =
+                        std::time::Instant::now() - std::time::Duration::from_millis(1000);
+                }
+                self.selected_material_slot_by_entity
+                    .insert(selected_id, selected_slot_value);
+            });
     }
 
     fn push_entity_to_live_runtime(&self, entity: &SceneEntity) {
@@ -1823,6 +2526,8 @@ impl EditorApp {
                 scale: [1.0, 1.0, 1.0],
                 entity_type: EntityType::Primitive(ptype),
                 material: Material::default(),
+                material_slots: vec![],
+                active_material_slot: 0,
                 script: None,
                 scripts: vec![],
                 script_components: vec![],
@@ -2007,6 +2712,7 @@ impl EditorApp {
         self.current_scene_path = Some(path.to_string());
         self.scene_dirty = false;
         self.selected_entity_id = None;
+        self.selected_material_slot_by_entity.clear();
         // Clear undo/redo on scene load
         self.undo_stack.clear();
         self.redo_stack.clear();
@@ -2248,6 +2954,8 @@ impl EditorApp {
                 path: path.to_string(),
             },
             material: Material::default(),
+            material_slots: vec![],
+            active_material_slot: 0,
             script: None,
             scripts: vec![],
             script_components: vec![],
@@ -2408,6 +3116,7 @@ impl EditorApp {
                     self.current_scene = Some(Scene::create_test_scene());
                     self.current_scene_path = None;
                     self.scene_dirty = false;
+                    self.selected_material_slot_by_entity.clear();
                     self.status = "Loaded Test Engine Scene".into();
                 }
                 PendingAction::Exit => {
@@ -2947,11 +3656,9 @@ impl EditorApp {
                         // NOTE: Base-Origin offset removed to match client/deployed behavior.
                         // The client uses raw model transforms without adjustment.
 
-                        let color = GVec3::new(
-                            entity.material.albedo_color[0],
-                            entity.material.albedo_color[1],
-                            entity.material.albedo_color[2],
-                        );
+                        let shader = Self::active_shader(entity);
+                        let shader_preset = Self::shader_preset_code(shader);
+                        let (color, metallic, roughness) = Self::shader_preview_values(entity);
 
                         // Check for animator config for skeletal animation
                         let joints = if entity.animator_config.is_some() {
@@ -3019,6 +3726,9 @@ impl EditorApp {
                                 handle,
                                 model_matrix,
                                 color,
+                                metallic,
+                                roughness,
+                                shader_preset,
                                 material_descriptor_set,
                                 joints: None,
                             });
@@ -3030,6 +3740,9 @@ impl EditorApp {
                                 handle,
                                 model_matrix,
                                 color,
+                                metallic,
+                                roughness,
+                                shader_preset,
                                 material_descriptor_set,
                                 joints: joints.clone(),
                             });
@@ -3114,10 +3827,185 @@ impl EditorApp {
         }
     }
 
+    fn scene_view_gizmo_rect(viewport_rect: egui::Rect) -> egui::Rect {
+        egui::Rect::from_min_size(
+            viewport_rect.min + egui::vec2(10.0, 10.0),
+            egui::vec2(SCENE_VIEW_GIZMO_SIZE, SCENE_VIEW_GIZMO_SIZE),
+        )
+    }
+
+    fn draw_scene_view_gizmo(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        viewport_rect: egui::Rect,
+    ) {
+        if self.play_mode {
+            return;
+        }
+
+        let rect = Self::scene_view_gizmo_rect(viewport_rect);
+        let center = rect.center();
+        let radius = rect.width() * 0.34;
+        let camera = self.camera;
+        let right = camera.get_right();
+        let up = camera.get_up();
+        let forward = camera.get_forward();
+
+        painter.rect_filled(
+            rect,
+            6.0,
+            egui::Color32::from_rgba_unmultiplied(12, 14, 18, 145),
+        );
+        painter.rect_stroke(
+            rect,
+            6.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 55)),
+        );
+
+        let axes = [
+            (
+                Vec3::new(1.0, 0.0, 0.0),
+                egui::Color32::from_rgb(235, 72, 72),
+                "X",
+                "Right",
+            ),
+            (
+                Vec3::new(-1.0, 0.0, 0.0),
+                egui::Color32::from_rgb(140, 58, 58),
+                "-X",
+                "Left",
+            ),
+            (
+                Vec3::new(0.0, 1.0, 0.0),
+                egui::Color32::from_rgb(76, 210, 96),
+                "Y",
+                "Top",
+            ),
+            (
+                Vec3::new(0.0, -1.0, 0.0),
+                egui::Color32::from_rgb(54, 132, 70),
+                "-Y",
+                "Bottom",
+            ),
+            (
+                Vec3::new(0.0, 0.0, 1.0),
+                egui::Color32::from_rgb(72, 126, 245),
+                "Z",
+                "Front",
+            ),
+            (
+                Vec3::new(0.0, 0.0, -1.0),
+                egui::Color32::from_rgb(54, 74, 150),
+                "-Z",
+                "Back",
+            ),
+        ];
+
+        let mut projected_axes: Vec<_> = axes
+            .iter()
+            .map(|(dir, color, label, view_name)| {
+                let offset = egui::vec2(dir.dot(&right), -dir.dot(&up)) * radius;
+                let depth = dir.dot(&forward);
+                (*dir, *color, *label, *view_name, center + offset, depth)
+            })
+            .collect();
+        projected_axes.sort_by(|a, b| a.5.partial_cmp(&b.5).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut clicked_axis = None;
+        for (dir, color, label, view_name, pos, depth) in projected_axes {
+            let visible_strength = if depth > 0.0 { 1.0 } else { 0.55 };
+            let line_color = egui::Color32::from_rgba_unmultiplied(
+                (color.r() as f32 * visible_strength) as u8,
+                (color.g() as f32 * visible_strength) as u8,
+                (color.b() as f32 * visible_strength) as u8,
+                if depth > 0.0 { 220 } else { 115 },
+            );
+            painter.line_segment([center, pos], egui::Stroke::new(2.0, line_color));
+
+            let hit_rect = egui::Rect::from_center_size(pos, egui::vec2(24.0, 24.0));
+            let response = ui
+                .interact(
+                    hit_rect,
+                    ui.id().with(("scene_view_axis", label)),
+                    egui::Sense::click(),
+                )
+                .on_hover_text(format!("View {}", view_name));
+            let hovered = response.hovered();
+            painter.circle_filled(
+                pos,
+                if hovered { 12.0 } else { 10.0 },
+                if hovered { egui::Color32::WHITE } else { line_color },
+            );
+            painter.text(
+                pos,
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(10.0),
+                if hovered { color } else { egui::Color32::WHITE },
+            );
+
+            if response.clicked() {
+                clicked_axis = Some(dir);
+            }
+        }
+
+        let iso_rect = egui::Rect::from_center_size(center, egui::vec2(38.0, 22.0));
+        let iso_response = ui
+            .interact(
+                iso_rect,
+                ui.id().with("scene_view_iso"),
+                egui::Sense::click(),
+            )
+            .on_hover_text("Isometric view");
+        painter.rect_filled(
+            iso_rect,
+            4.0,
+            if iso_response.hovered() {
+                egui::Color32::from_rgb(230, 230, 230)
+            } else {
+                egui::Color32::from_rgba_unmultiplied(36, 40, 48, 230)
+            },
+        );
+        painter.rect_stroke(
+            iso_rect,
+            4.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 80)),
+        );
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            "Iso",
+            egui::FontId::proportional(10.0),
+            if iso_response.hovered() {
+                egui::Color32::from_rgb(28, 32, 38)
+            } else {
+                egui::Color32::WHITE
+            },
+        );
+
+        if clicked_axis.is_some() || iso_response.clicked() {
+            self.center_camera_on_selected();
+        }
+        if let Some(axis) = clicked_axis {
+            self.camera.set_orbit_axis(axis);
+        }
+        if iso_response.clicked() {
+            self.camera.set_isometric_view();
+        }
+    }
+
     fn draw_3d_viewport(&mut self, ui: &mut egui::Ui) -> egui::Rect {
         let available = ui.available_size();
         let (response, painter) = ui.allocate_painter(available, egui::Sense::click_and_drag());
         let rect = response.rect;
+        let pointer_over_view_gizmo = !self.play_mode
+            && ui.input(|i| {
+                i.pointer
+                    .hover_pos()
+                    .map(|pos| Self::scene_view_gizmo_rect(rect).contains(pos))
+                    .unwrap_or(false)
+            });
 
         if self.play_mode {
             self.update_embedded_play_camera(ui, &response);
@@ -3126,7 +4014,7 @@ impl EditorApp {
             self.drag_start_entity = None;
         } else {
             // Camera controls - improved drag detection
-            if response.drag_started() {
+            if response.drag_started() && !pointer_over_view_gizmo {
                 // Unwrapping 0,0 is bad if we rely on it for raycasting. Use hover_pos or interact_pos from input if None.
                 let start_pos = response
                     .interact_pointer_pos()
@@ -3137,46 +4025,14 @@ impl EditorApp {
                 self.last_mouse = start_pos;
 
                 self.drag_button = ui.input(|i| {
-                    // Allow "M" key + Left Click to simulate Middle Click (Drag Object)
-                    if i.key_down(egui::Key::M)
-                        && i.pointer.button_down(egui::PointerButton::Primary)
-                    {
-                        Some(egui::PointerButton::Middle)
-                    } else if i.pointer.button_down(egui::PointerButton::Secondary) {
+                    if i.pointer.button_down(egui::PointerButton::Secondary) {
                         Some(egui::PointerButton::Secondary)
                     } else if i.pointer.button_down(egui::PointerButton::Middle) {
                         Some(egui::PointerButton::Middle)
-                    } else if i.pointer.button_down(egui::PointerButton::Primary) {
-                        Some(egui::PointerButton::Primary)
                     } else {
                         None
                     }
                 });
-
-                // Check for entity drag start (Middle Mouse)
-                if self.drag_button == Some(egui::PointerButton::Middle) {
-                    if let Some(scene) = &self.current_scene {
-                        for entity in &scene.entities {
-                            let pos = Vec3::new(
-                                entity.position[0],
-                                entity.position[1],
-                                entity.position[2],
-                            );
-                            if let Some(center) = self.camera.project(pos, available) {
-                                let c = egui::pos2(rect.min.x + center.x, rect.min.y + center.y);
-                                let size = (8.0 + 400.0 / self.camera.distance).clamp(4.0, 25.0);
-                                if (start_pos.x - c.x).abs() < size + 5.0
-                                    && (start_pos.y - c.y).abs() < size + 5.0
-                                {
-                                    self.dragging_id = Some(entity.id);
-                                    self.drag_start_entity = Some(entity.clone()); // Capture state for undo
-                                    self.selected_entity_id = Some(entity.id);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
             }
 
             if response.drag_stopped() {
@@ -3202,7 +4058,7 @@ impl EditorApp {
                 self.dragging_id = None;
             }
 
-            if response.dragged() {
+            if response.dragged() && !pointer_over_view_gizmo {
                 let mouse = response
                     .interact_pointer_pos()
                     .or_else(|| ui.input(|i| i.pointer.interact_pos()))
@@ -3239,12 +4095,9 @@ impl EditorApp {
                             self.camera.pitch =
                                 (self.camera.pitch - delta.y * 0.01).clamp(-1.5, 1.5);
                         }
-                        Some(egui::PointerButton::Middle) | Some(egui::PointerButton::Primary) => {
-                            let right = self.camera.get_right();
-                            let pan_speed = self.camera.distance * 0.002;
-                            self.camera.target.x -= right.x * delta.x * pan_speed;
-                            self.camera.target.z -= right.z * delta.x * pan_speed;
-                            self.camera.target.y += delta.y * pan_speed;
+                        Some(egui::PointerButton::Middle) => {
+                            let focus_radius = self.selected_camera_focus().map(|(_, radius)| radius);
+                            self.camera.pan(delta, focus_radius);
                         }
                         None | Some(_) => {}
                     }
@@ -3276,13 +4129,28 @@ impl EditorApp {
         }
 
         // Zoom only when the pointer is over the viewport.
-        let scroll = if !self.play_mode && response.hovered() {
+        let scroll = if !self.play_mode && response.hovered() && !pointer_over_view_gizmo {
             ui.input(|i| i.raw_scroll_delta.y)
         } else {
             0.0
         };
         if !self.play_mode {
-            self.camera.distance = (self.camera.distance - scroll * 1.5).clamp(0.1, 1000.0);
+            let cursor_pos = response.interact_pointer_pos().or_else(|| {
+                ui.input(|i| i.pointer.hover_pos())
+                    .filter(|pos| rect.contains(*pos))
+            });
+            let local_cursor =
+                cursor_pos.map(|pos| egui::pos2(pos.x - rect.min.x, pos.y - rect.min.y));
+            if scroll > 0.0 {
+                if let Some((focus, radius)) = self.selected_camera_focus() {
+                    let target_offset = focus.sub(&self.camera.target);
+                    if target_offset.length() > radius * 0.2 {
+                        let pull = (scroll.abs() * 0.01).clamp(0.08, 0.45);
+                        self.camera.target = self.camera.target.add(&target_offset.mul(pull));
+                    }
+                }
+            }
+            self.camera.zoom_towards(scroll, local_cursor, rect.size());
         }
         let viewport_interacting = self.play_mode
             || response.dragged()
@@ -3550,8 +4418,21 @@ impl EditorApp {
             }
         }
 
+        let viewport_click_pos = if !self.play_mode && response.clicked() && !pointer_over_view_gizmo
+        {
+            response
+                .interact_pointer_pos()
+                .filter(|pos| rect.contains(*pos))
+        } else {
+            None
+        };
+
+        let ray_clicked_entity = viewport_click_pos
+            .map(|pos| egui::pos2(pos.x - rect.min.x, pos.y - rect.min.y))
+            .and_then(|local_pos| self.pick_scene_entity_at(local_pos, rect.size()));
+        let mut clicked_entity: Option<u32> = ray_clicked_entity;
+        let use_screen_space_pick_fallback = viewport_click_pos.is_some() && ray_clicked_entity.is_none();
         // Draw entities - parallel projection computation
-        let mut clicked_entity: Option<u32> = None;
         if let Some(scene) = &self.current_scene {
             let camera = self.camera; // Copy for parallel access
             let selected_id = if self.play_mode {
@@ -3652,11 +4533,8 @@ impl EditorApp {
 
                                 let pose =
                                     Self::compute_animated_pose(entity, model_cache, anim_state);
-                                let mat_color = GVec3::new(
-                                    entity.material.albedo_color[0],
-                                    entity.material.albedo_color[1],
-                                    entity.material.albedo_color[2],
-                                );
+                                let (mat_color, _, _) = Self::shader_preview_values(entity);
+                                let shader = Self::active_shader(entity);
 
                                 // Balanced lighting - slightly angled for depth perception
                                 let light_dir = GVec3::new(0.4, 0.8, 0.3).normalize();
@@ -3735,17 +4613,15 @@ impl EditorApp {
                                             let mut color = egui::Color32::BLACK;
                                             if is_valid {
                                                 let view_dir = (cam_pos_g - world_pos).normalize();
-                                                // Bright, balanced ambient lighting
-                                                let ambient = 0.35;
-                                                let diffuse =
-                                                    world_normal.dot(light_dir).max(0.0) * 0.65;
-                                                let half_dir = (light_dir + view_dir).normalize();
-                                                let specular =
-                                                    world_normal.dot(half_dir).max(0.0).powf(24.0)
-                                                        * 0.2;
                                                 let base_col = mat_color * GVec3::from(v.color);
-                                                let mut shaded = base_col * (diffuse + ambient)
-                                                    + GVec3::splat(specular);
+                                                let mut shaded = Self::software_shader_color(
+                                                    shader,
+                                                    base_col,
+                                                    world_normal,
+                                                    light_dir,
+                                                    view_dir,
+                                                    GVec3::from(v.color),
+                                                );
 
                                                 if is_selected {
                                                     shaded = shaded
@@ -4207,19 +5083,42 @@ impl EditorApp {
                             }
                         }
 
-                        // Click detection hitbox (invisible in High mode)
-                        if response.clicked() {
-                            if (self.last_mouse.x
-                                - response.interact_pointer_pos().unwrap_or(self.last_mouse).x)
-                                .abs()
-                                < 2.0
-                            {
-                                if let Some(click) = response.interact_pointer_pos() {
-                                    if (click.x - c.x).abs() < size + 5.0
-                                        && (click.y - c.y).abs() < size + 5.0
-                                    {
-                                        clicked_entity = Some(id);
-                                    }
+                        // Fallback hitbox for icons and cases where the 3D ray misses tiny bounds.
+                        if use_screen_space_pick_fallback {
+                            if let Some(click) = viewport_click_pos {
+                                if (click.x - c.x).abs() < size + 5.0
+                                    && (click.y - c.y).abs() < size + 5.0
+                                {
+                                    clicked_entity = Some(id);
+                                }
+                            }
+                        }
+                    }
+
+                    if use_screen_space_pick_fallback {
+                        if let Some(click) = viewport_click_pos {
+                            let mut min_x = f32::INFINITY;
+                            let mut min_y = f32::INFINITY;
+                            let mut max_x = f32::NEG_INFINITY;
+                            let mut max_y = f32::NEG_INFINITY;
+                            let mut found_point = false;
+
+                            for point in proj.iter().flatten().chain(center_proj.iter()) {
+                                min_x = min_x.min(point.x);
+                                min_y = min_y.min(point.y);
+                                max_x = max_x.max(point.x);
+                                max_y = max_y.max(point.y);
+                                found_point = true;
+                            }
+
+                            if found_point {
+                                let selection_rect = egui::Rect::from_min_max(
+                                    egui::pos2(min_x, min_y),
+                                    egui::pos2(max_x, max_y),
+                                )
+                                .expand(6.0);
+                                if selection_rect.contains(click) {
+                                    clicked_entity = Some(id);
                                 }
                             }
                         }
@@ -4433,6 +5332,10 @@ impl EditorApp {
             }
         }
 
+        if !self.play_mode {
+            self.draw_scene_view_gizmo(ui, &painter, rect);
+        }
+
         if self.play_mode {
             painter.rect_stroke(
                 rect.shrink(1.0),
@@ -4469,9 +5372,9 @@ impl EditorApp {
             );
         } else {
             painter.text(
-                rect.min + egui::vec2(10.0, 10.0),
+                rect.min + egui::vec2(10.0, 122.0),
                 egui::Align2::LEFT_TOP,
-                "Right-drag: Orbit | Middle-drag or M+Left-drag: Move Object | Left-drag: Pan",
+                "Left-click: Select | Middle-drag: Pan | Right-drag: Orbit | Scroll: Zoom",
                 egui::FontId::proportional(11.0),
                 egui::Color32::WHITE,
             );
@@ -5368,7 +6271,7 @@ impl EditorApp {
 
         // Draw "Animation Preview" label (top left)
         painter.text(
-            egui::pos2(rect.min.x + 10.0, rect.min.y + 10.0),
+            egui::pos2(rect.min.x + 10.0, rect.min.y + 146.0),
             egui::Align2::LEFT_TOP,
             "🎭 Animation Preview",
             egui::FontId::proportional(14.0),
@@ -5526,6 +6429,7 @@ impl eframe::App for EditorApp {
                             self.current_scene = Some(Scene::create_test_scene());
                             self.current_scene_path = None;
                             self.scene_dirty = false;
+                            self.selected_material_slot_by_entity.clear();
                             if !self.scenes.contains(&"Test".to_string()) {
                                 self.scenes.push("Test".into());
                             }
@@ -5767,6 +6671,8 @@ impl eframe::App for EditorApp {
                             if let Some(scene) = &mut self.current_scene {
                                 scene.entities.retain(|e| e.id != id);
                             }
+                            self.selected_script_slot_by_entity.remove(&id);
+                            self.selected_material_slot_by_entity.remove(&id);
                             self.selected_entity_id = None;
                         }
                         ui.close_menu();
@@ -5803,30 +6709,19 @@ impl eframe::App for EditorApp {
                         ui.close_menu();
                     }
                     if ui.button("🔍 Focus Selected").clicked() {
-                        if let (Some(id), Some(scene)) =
-                            (self.selected_entity_id, &self.current_scene)
-                        {
-                            if let Some(e) = scene.entities.iter().find(|e| e.id == id) {
-                                self.camera.target =
-                                    Vec3::new(e.position[0], e.position[1], e.position[2]);
-                            }
-                        }
+                        self.center_camera_on_selected();
                         ui.close_menu();
                     }
                 });
-                ui.menu_button("GameObject", |ui| {
-                    ui.label("3D Primitives");
-                    ui.separator();
+                ui.menu_button("+ Primitive", |ui| {
                     for ptype in PrimitiveType::all() {
-                        if ui
-                            .button(format!("{} {}", ptype.icon(), ptype.name()))
-                            .clicked()
-                        {
+                        if ui.button(ptype.name()).clicked() {
                             self.add_primitive(ptype);
                             ui.close_menu();
                         }
                     }
-                    ui.separator();
+                });
+                ui.menu_button("GameObject", |ui| {
                     if ui.button("🚗 Vehicle").clicked() {
                         if let Some(scene) = &mut self.current_scene {
                             let id = scene.entities.iter().map(|e| e.id).max().unwrap_or(0) + 1;
@@ -5841,6 +6736,8 @@ impl eframe::App for EditorApp {
                                     albedo_color: [1.0, 1.0, 0.0],
                                     ..Default::default()
                                 },
+                                material_slots: vec![],
+                                active_material_slot: 0,
                                 script: Some("Vehicle".into()),
                                 scripts: vec!["Vehicle".into()],
                                 script_components: vec![ScriptComponent::builtin("Vehicle")],
@@ -5870,6 +6767,8 @@ impl eframe::App for EditorApp {
                                     speed: 2.0,
                                 },
                                 material: Material::default(),
+                                material_slots: vec![],
+                                active_material_slot: 0,
                                 script: Some("CrowdAgent".into()),
                                 scripts: vec!["CrowdAgent".into()],
                                 script_components: vec![ScriptComponent::builtin("CrowdAgent")],
@@ -5899,6 +6798,8 @@ impl eframe::App for EditorApp {
                                     albedo_color: [0.3, 0.3, 1.0],
                                     ..Default::default()
                                 },
+                                material_slots: vec![],
+                                active_material_slot: 0,
                                 script: None,
                                 scripts: vec![],
                                 script_components: vec![],
@@ -5935,6 +6836,8 @@ impl eframe::App for EditorApp {
                                     albedo_color: [1.0, 1.0, 0.5],
                                     ..Default::default()
                                 },
+                                material_slots: vec![],
+                                active_material_slot: 0,
                                 script: None,
                                 scripts: vec![],
                                 script_components: vec![],
@@ -5969,6 +6872,8 @@ impl eframe::App for EditorApp {
                                     albedo_color: [1.0, 0.8, 0.3],
                                     ..Default::default()
                                 },
+                                material_slots: vec![],
+                                active_material_slot: 0,
                                 script: None,
                                 scripts: vec![],
                                 script_components: vec![],
@@ -6003,6 +6908,8 @@ impl eframe::App for EditorApp {
                                     albedo_color: [1.0, 0.9, 0.5],
                                     ..Default::default()
                                 },
+                                material_slots: vec![],
+                                active_material_slot: 0,
                                 script: None,
                                 scripts: vec![],
                                 script_components: vec![],
@@ -6040,6 +6947,8 @@ impl eframe::App for EditorApp {
                                     albedo_color: [0.2, 0.8, 1.0],
                                     ..Default::default()
                                 },
+                                material_slots: vec![],
+                                active_material_slot: 0,
                                 script: None,
                                 scripts: vec![],
                                 script_components: vec![],
@@ -6215,7 +7124,7 @@ impl eframe::App for EditorApp {
 
         // LEFT - PROJECT
         egui::SidePanel::left("project")
-            .default_width(160.0)
+            .default_width(240.0)
             .show(ctx, |ui| {
                 ui.heading("Project");
 
@@ -6292,6 +7201,7 @@ impl eframe::App for EditorApp {
                             if name == "Test" {
                                 self.current_scene = Some(Scene::create_test_scene());
                                 self.current_scene_path = None;
+                                self.selected_material_slot_by_entity.clear();
                             } else if i < self.open_scene_files.len() {
                                 // Load the scene from file
                                 let path = self.open_scene_files[i].clone();
@@ -6303,18 +7213,32 @@ impl eframe::App for EditorApp {
                     });
 
                 ui.add_space(10.0);
-                egui::CollapsingHeader::new("🧱 Primitives")
+                let hierarchy_rows = self
+                    .current_scene
+                    .as_ref()
+                    .map(Self::hierarchy_rows)
+                    .unwrap_or_default();
+                let mut clicked_hierarchy_id = None;
+                egui::CollapsingHeader::new("3D Hierarchy")
                     .default_open(true)
                     .show(ui, |ui| {
-                        for ptype in PrimitiveType::all() {
-                            if ui
-                                .button(format!("{} {}", ptype.icon(), ptype.name()))
-                                .clicked()
-                            {
-                                self.add_primitive(ptype);
-                            }
-                        }
+                        egui::ScrollArea::vertical()
+                            .id_source("left_3d_hierarchy")
+                            .max_height(360.0)
+                            .show(ui, |ui| {
+                                Self::draw_hierarchy_rows(
+                                    ui,
+                                    &hierarchy_rows,
+                                    None,
+                                    0,
+                                    self.selected_entity_id,
+                                    &mut clicked_hierarchy_id,
+                                );
+                            });
                     });
+                if let Some(id) = clicked_hierarchy_id {
+                    self.selected_entity_id = Some(id);
+                }
             });
 
         // RIGHT - INSPECTOR
@@ -6342,6 +7266,8 @@ impl eframe::App for EditorApp {
                                || start.material.albedo_texture != after.material.albedo_texture
                                || start.material.metallic != after.material.metallic
                                || start.material.roughness != after.material.roughness
+                               || start.material_slots != after.material_slots
+                               || start.active_material_slot != after.active_material_slot
                                || start.script != after.script
                                || start.scripts != after.scripts
                                || start.script_components != after.script_components
@@ -7340,6 +8266,7 @@ impl eframe::App for EditorApp {
                 if self.push_connected { let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::DeleteEntity { id })); }
                 if let Some(scene) = &mut self.current_scene { scene.entities.retain(|e| e.id != id); }
                 self.selected_script_slot_by_entity.remove(&id);
+                self.selected_material_slot_by_entity.remove(&id);
                 self.selected_entity_id = None;
                 self.scene_dirty = true;
             }
@@ -7355,6 +8282,9 @@ impl eframe::App for EditorApp {
             }
         });
 
+        self.draw_selected_object_viewer(ctx, command_tx.clone());
+
+        /*
         // BOTTOM - HIERARCHY
         egui::TopBottomPanel::bottom("hierarchy")
             .resizable(true)
@@ -7395,6 +8325,8 @@ impl eframe::App for EditorApp {
                     });
                 });
             });
+
+        */
 
         // CENTER - 3D VIEWPORT with TABS
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -7454,6 +8386,7 @@ impl eframe::App for EditorApp {
                             self.scene_dirty = false;
                             self.selected_scene_idx = Some(self.scenes.len() - 1);
                             self.selected_entity_id = None;
+                            self.selected_material_slot_by_entity.clear();
                             self.new_scene_name.clear();
                             self.show_new_scene_dialog = false;
                         }
