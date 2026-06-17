@@ -6,6 +6,8 @@ use std::time::SystemTime;
 
 pub mod export;
 pub mod scene;
+pub mod script_cache;
+pub mod script_compiler;
 
 // ============================================================================
 // CONSTANTS

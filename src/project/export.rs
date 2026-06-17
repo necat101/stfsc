@@ -4,31 +4,41 @@
 //! for various target platforms (Linux, Quest, etc.)
 
 use serde::Serialize;
-use std::collections::hash_map::DefaultHasher;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 
 use super::{OptLevel, Project, TargetPlatform};
-use crate::project::scene::{Scene, MAX_SCRIPTS_PER_ENTITY};
+use crate::project::scene::{
+    Scene, ScriptCompileMode, MAX_SCENE_SCRIPTS_PER_SCENE, MAX_SCRIPTS_PER_ENTITY,
+};
+use crate::project::script_cache::{
+    effective_script_source, rewrite_scene_script_cache_keys, scene_script_cache_identity,
+    script_cache_identity,
+};
+use crate::project::script_compiler::{render_native_script_module, NativeScriptSource};
+
+const SCRIPT_BINDINGS_ENV: &str = "STFSC_SCRIPT_BINDINGS_RS";
 
 #[derive(Serialize)]
 struct ScriptCompileManifest {
     version: u32,
     max_scripts_per_entity: usize,
+    max_scene_scripts_per_scene: usize,
     entries: Vec<ScriptCompileEntry>,
 }
 
 #[derive(Serialize)]
 struct ScriptCompileEntry {
+    scope: String,
     scene: String,
     entity_id: u32,
     entity_name: String,
     slot: usize,
     name: String,
+    runtime_name: String,
     enabled: bool,
     compile_mode: String,
     source_hash: u64,
@@ -72,12 +82,19 @@ impl ProjectExporter {
         &self,
         args: &[&str],
         progress_tx: Option<&Sender<String>>,
+        script_bindings: Option<&Path>,
     ) -> Result<String, String> {
-        let mut child = Command::new("cargo")
+        let mut command = Command::new("cargo");
+        command
             .args(args)
             .current_dir(&self.engine_root)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(path) = script_bindings {
+            command.env(SCRIPT_BINDINGS_ENV, path);
+        }
+
+        let mut child = command
             .spawn()
             .map_err(|e| format!("Failed to spawn cargo: {}", e))?;
 
@@ -216,6 +233,7 @@ impl ProjectExporter {
             "  Copied {} assets\n",
             project.assets.total_count()
         ));
+        let script_bindings = self.script_bindings_path(export_path);
 
         // Step 2: Build the engine binary
         log.push_str("Building Linux binary...\n");
@@ -234,6 +252,7 @@ impl ProjectExporter {
         let output = Command::new("cargo")
             .args(&cargo_args)
             .current_dir(&self.engine_root)
+            .env(SCRIPT_BINDINGS_ENV, &script_bindings)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output();
@@ -343,6 +362,8 @@ impl ProjectExporter {
         }
         let _ = progress_tx.send(format!("✓ Copied {} assets", project.assets.total_count()));
 
+        let script_bindings = self.script_bindings_path(export_path);
+
         // Step 2: Build with streaming
         let _ = progress_tx.send("🔨 Compiling Linux binary...".into());
 
@@ -357,7 +378,7 @@ impl ProjectExporter {
             OptLevel::Release | OptLevel::ReleaseLTO => "release",
         };
 
-        match self.run_cargo_streaming(&cargo_args, Some(progress_tx)) {
+        match self.run_cargo_streaming(&cargo_args, Some(progress_tx), Some(&script_bindings)) {
             Ok(output) => {
                 log.push_str(&output);
             }
@@ -533,7 +554,9 @@ impl ProjectExporter {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "scene".into());
                 let dst_path = scenes_dir.join(format!("{}.json", scene_name));
-                if let Err(e) = fs::copy(&src_path, &dst_path) {
+                if let Err(e) =
+                    self.copy_scene_with_native_cache(project, &scene_entry.path, &dst_path)
+                {
                     log.push_str(&format!(
                         "Warning: Failed to copy scene {}: {}\n",
                         scene_name, e
@@ -577,6 +600,17 @@ impl ProjectExporter {
             project.assets.models.len(),
             project.assets.textures.len()
         ));
+        let script_bindings = match self.prepare_script_cache_for_export(project, export_path) {
+            Ok(path) => path,
+            Err(error) => {
+                return ExportResult {
+                    success: false,
+                    output_path: export_path.to_path_buf(),
+                    log,
+                    error: Some(error),
+                };
+            }
+        };
 
         // Step 6: Build the engine binary for Windows
         log.push_str("Building Windows binary...\n");
@@ -595,6 +629,7 @@ impl ProjectExporter {
         let output = Command::new("cargo")
             .args(&cargo_args)
             .current_dir(&self.engine_root)
+            .env(SCRIPT_BINDINGS_ENV, &script_bindings)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output();
@@ -794,7 +829,7 @@ impl ProjectExporter {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "scene".into());
                 let dst_path = scenes_dir.join(format!("{}.json", scene_name));
-                let _ = fs::copy(&src_path, &dst_path);
+                let _ = self.copy_scene_with_native_cache(project, &scene_entry.path, &dst_path);
             }
         }
         let _ = progress_tx.send(format!("✓ Bundled {} scenes", project.assets.scenes.len()));
@@ -828,6 +863,18 @@ impl ProjectExporter {
             project.assets.textures.len()
         ));
 
+        let script_bindings = match self.prepare_script_cache_for_export(project, export_path) {
+            Ok(path) => path,
+            Err(error) => {
+                return ExportResult {
+                    success: false,
+                    output_path: export_path.to_path_buf(),
+                    log,
+                    error: Some(error),
+                };
+            }
+        };
+
         // Step 6: Build with streaming
         let _ = progress_tx.send("🔨 Compiling Windows binary...".into());
 
@@ -842,7 +889,7 @@ impl ProjectExporter {
             OptLevel::Release | OptLevel::ReleaseLTO => "release",
         };
 
-        match self.run_cargo_streaming(&cargo_args, Some(progress_tx)) {
+        match self.run_cargo_streaming(&cargo_args, Some(progress_tx), Some(&script_bindings)) {
             Ok(output) => {
                 log.push_str(&output);
             }
@@ -1069,7 +1116,7 @@ impl ProjectExporter {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "scene".into());
                 let dst_path = scenes_dir.join(format!("{}.json", scene_name));
-                let _ = fs::copy(&src_path, &dst_path);
+                let _ = self.copy_scene_with_native_cache(project, &scene_entry.path, &dst_path);
             }
         }
 
@@ -1099,6 +1146,19 @@ impl ProjectExporter {
             }
         }
 
+        let script_bindings = match self.prepare_script_cache_for_export(project, export_path) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&bundle_dir);
+                return ExportResult {
+                    success: false,
+                    output_path: export_path.to_path_buf(),
+                    log,
+                    error: Some(error),
+                };
+            }
+        };
+
         // Build APK with streaming
         let _ = progress_tx.send("🔨 Building Quest APK...".into());
 
@@ -1112,7 +1172,7 @@ impl ProjectExporter {
             OptLevel::Release | OptLevel::ReleaseLTO => "release",
         };
 
-        match self.run_cargo_streaming(&cargo_args, Some(progress_tx)) {
+        match self.run_cargo_streaming(&cargo_args, Some(progress_tx), Some(&script_bindings)) {
             Ok(output) => {
                 log.push_str(&output);
             }
@@ -1300,7 +1360,9 @@ impl ProjectExporter {
                 // For now, just copy scene JSONs - the engine will parse them
                 // In future: pre-serialize to SceneUpdate bincode
                 let dst_path = scenes_dir.join(format!("{}.json", scene_name));
-                if let Err(e) = fs::copy(&src_path, &dst_path) {
+                if let Err(e) =
+                    self.copy_scene_with_native_cache(project, &scene_entry.path, &dst_path)
+                {
                     log.push_str(&format!(
                         "Warning: Failed to copy scene {}: {}\n",
                         scene_name, e
@@ -1354,6 +1416,18 @@ impl ProjectExporter {
             project.assets.models.len(),
             project.assets.textures.len()
         ));
+        let script_bindings = match self.prepare_script_cache_for_export(project, export_path) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&bundle_dir);
+                return ExportResult {
+                    success: false,
+                    output_path: export_path.to_path_buf(),
+                    log,
+                    error: Some(error),
+                };
+            }
+        };
 
         // Step 6: Build APK
         log.push_str("Building Quest APK...\n");
@@ -1371,6 +1445,7 @@ impl ProjectExporter {
         let output = Command::new("cargo")
             .args(&cargo_args)
             .current_dir(&self.engine_root)
+            .env(SCRIPT_BINDINGS_ENV, &script_bindings)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output();
@@ -1446,6 +1521,22 @@ impl ProjectExporter {
     }
 
     /// Copy project assets to export directory
+    fn script_bindings_path(&self, export_path: &Path) -> PathBuf {
+        export_path
+            .join("script_cache")
+            .join("generated_script_bindings.rs")
+    }
+
+    fn prepare_script_cache_for_export(
+        &self,
+        project: &Project,
+        export_path: &Path,
+    ) -> Result<PathBuf, String> {
+        self.prepare_script_compile_cache(project, export_path)
+            .map_err(|err| format!("Failed to prepare native script cache: {}", err))?;
+        Ok(self.script_bindings_path(export_path))
+    }
+
     fn copy_assets(&self, project: &Project, export_path: &Path) -> io::Result<()> {
         let assets_dst = export_path.join("assets");
         fs::create_dir_all(&assets_dst)?;
@@ -1460,7 +1551,7 @@ impl ProjectExporter {
                 fs::create_dir_all(parent)?;
             }
             if src.exists() {
-                fs::copy(&src, &dst)?;
+                self.copy_scene_with_native_cache(project, &scene.path, &dst)?;
             }
         }
 
@@ -1529,6 +1620,35 @@ impl ProjectExporter {
         Ok(())
     }
 
+    fn copy_scene_with_native_cache(
+        &self,
+        project: &Project,
+        scene_relative_path: &str,
+        dst: &Path,
+    ) -> io::Result<()> {
+        let src = project.root_path.join(scene_relative_path);
+        let scene_json = fs::read_to_string(&src)?;
+        let mut scene: Scene = serde_json::from_str(&scene_json).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to parse scene '{}': {}", scene_relative_path, err),
+            )
+        })?;
+
+        rewrite_scene_script_cache_keys(scene_relative_path, &mut scene);
+
+        let json = serde_json::to_string_pretty(&scene).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "Failed to serialize scene '{}': {}",
+                    scene_relative_path, err
+                ),
+            )
+        })?;
+        fs::write(dst, json)
+    }
+
     fn prepare_script_compile_cache(
         &self,
         project: &Project,
@@ -1538,6 +1658,7 @@ impl ProjectExporter {
         fs::create_dir_all(&cache_dir)?;
 
         let mut entries = Vec::new();
+        let mut native_sources = Vec::new();
         for scene_asset in &project.assets.scenes {
             let scene_path = project.root_path.join(&scene_asset.path);
             if !scene_path.exists() {
@@ -1545,12 +1666,59 @@ impl ProjectExporter {
             }
 
             let scene_json = fs::read_to_string(&scene_path)?;
-            let scene: Scene = serde_json::from_str(&scene_json).map_err(|err| {
+            let mut scene: Scene = serde_json::from_str(&scene_json).map_err(|err| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("Failed to parse scene '{}': {}", scene_asset.path, err),
                 )
             })?;
+
+            let scene_name = scene.name.clone();
+            let scene_components = scene.ensure_scene_script_components().clone();
+            for (slot, component) in scene_components
+                .into_iter()
+                .take(MAX_SCENE_SCRIPTS_PER_SCENE)
+                .enumerate()
+            {
+                let source = effective_script_source(&component.name, &component.source);
+                let name = component.name.trim().to_string();
+                if name.is_empty() {
+                    continue;
+                }
+
+                let identity = scene_script_cache_identity(&scene_asset.path, slot, &name, &source);
+                let use_native_cache =
+                    !matches!(component.compile_mode, ScriptCompileMode::BuiltinNative);
+                let runtime_name = if use_native_cache {
+                    identity.runtime_name.clone()
+                } else {
+                    name.clone()
+                };
+                let native_symbol = identity.native_symbol.clone();
+
+                if use_native_cache {
+                    native_sources.push(NativeScriptSource {
+                        runtime_name: runtime_name.clone(),
+                        struct_name: native_symbol.clone(),
+                        source: source.clone(),
+                    });
+                }
+
+                entries.push(ScriptCompileEntry {
+                    scope: "scene".to_string(),
+                    scene: scene_asset.path.clone(),
+                    entity_id: 0,
+                    entity_name: scene_name.clone(),
+                    slot,
+                    name,
+                    runtime_name,
+                    enabled: component.enabled,
+                    compile_mode: format!("{:?}", component.compile_mode),
+                    source_hash: identity.source_hash,
+                    cache_key: identity.cache_key,
+                    native_symbol,
+                });
+            }
 
             for entity in scene.entities {
                 let mut entity = entity;
@@ -1563,37 +1731,43 @@ impl ProjectExporter {
                     .take(MAX_SCRIPTS_PER_ENTITY)
                     .enumerate()
                 {
-                    let name = component.runtime_name();
+                    let source = effective_script_source(&component.name, &component.source);
+                    let name = component.name.trim().to_string();
                     if name.is_empty() {
                         continue;
                     }
 
-                    let source_hash = hash_script_source(
-                        &scene_asset.path,
-                        entity_id,
-                        slot,
-                        &name,
-                        &component.source,
-                    );
-                    let cache_key = format!("{:016x}", source_hash);
-                    let native_symbol = format!(
-                        "stfsc_script_{}_{}_{}_{}",
-                        sanitize_symbol(&scene.name),
-                        entity_id,
-                        slot,
-                        sanitize_symbol(&name)
-                    );
+                    let identity =
+                        script_cache_identity(&scene_asset.path, entity_id, slot, &name, &source);
+                    let use_native_cache =
+                        !matches!(component.compile_mode, ScriptCompileMode::BuiltinNative);
+                    let runtime_name = if use_native_cache {
+                        identity.runtime_name.clone()
+                    } else {
+                        name.clone()
+                    };
+                    let native_symbol = identity.native_symbol.clone();
+
+                    if use_native_cache {
+                        native_sources.push(NativeScriptSource {
+                            runtime_name: runtime_name.clone(),
+                            struct_name: native_symbol.clone(),
+                            source: source.clone(),
+                        });
+                    }
 
                     entries.push(ScriptCompileEntry {
+                        scope: "entity".to_string(),
                         scene: scene_asset.path.clone(),
                         entity_id,
                         entity_name: entity_name.clone(),
                         slot,
                         name,
+                        runtime_name,
                         enabled: component.enabled,
                         compile_mode: format!("{:?}", component.compile_mode),
-                        source_hash,
-                        cache_key,
+                        source_hash: identity.source_hash,
+                        cache_key: identity.cache_key,
                         native_symbol,
                     });
                 }
@@ -1603,6 +1777,7 @@ impl ProjectExporter {
         let manifest = ScriptCompileManifest {
             version: 1,
             max_scripts_per_entity: MAX_SCRIPTS_PER_ENTITY,
+            max_scene_scripts_per_scene: MAX_SCENE_SCRIPTS_PER_SCENE,
             entries,
         };
 
@@ -1613,48 +1788,36 @@ impl ProjectExporter {
             )
         })?;
         fs::write(cache_dir.join("script_manifest.json"), manifest_json)?;
+        let generated = render_native_script_module(&native_sources).map_err(|diagnostics| {
+            let message = diagnostics
+                .into_iter()
+                .map(|diag| diag.message)
+                .collect::<Vec<_>>()
+                .join("\n");
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("FuckScript native compilation failed:\n{}", message),
+            )
+        })?;
         fs::write(
             cache_dir.join("generated_script_bindings.rs"),
-            render_script_bindings(&manifest),
+            render_script_bindings(&manifest, &generated),
         )?;
 
         Ok(())
     }
 }
 
-fn hash_script_source(scene: &str, entity_id: u32, slot: usize, name: &str, source: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    scene.hash(&mut hasher);
-    entity_id.hash(&mut hasher);
-    slot.hash(&mut hasher);
-    name.hash(&mut hasher);
-    source.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn sanitize_symbol(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-        } else {
-            out.push('_');
-        }
-    }
-    while out.contains("__") {
-        out = out.replace("__", "_");
-    }
-    out.trim_matches('_').to_string()
-}
-
-fn render_script_bindings(manifest: &ScriptCompileManifest) -> String {
+fn render_script_bindings(manifest: &ScriptCompileManifest, generated_scripts: &str) -> String {
     let mut out = String::new();
     out.push_str("// Generated by STFSC export. Do not edit by hand.\n");
     out.push_str("pub struct CachedScriptBinding {\n");
+    out.push_str("    pub scope: &'static str,\n");
     out.push_str("    pub scene: &'static str,\n");
     out.push_str("    pub entity_id: u32,\n");
     out.push_str("    pub slot: usize,\n");
     out.push_str("    pub name: &'static str,\n");
+    out.push_str("    pub runtime_name: &'static str,\n");
     out.push_str("    pub enabled: bool,\n");
     out.push_str("    pub source_hash: u64,\n");
     out.push_str("    pub native_symbol: &'static str,\n");
@@ -1662,14 +1825,22 @@ fn render_script_bindings(manifest: &ScriptCompileManifest) -> String {
     out.push_str("pub const MAX_SCRIPTS_PER_ENTITY: usize = ");
     out.push_str(&manifest.max_scripts_per_entity.to_string());
     out.push_str(";\n\n");
+    out.push_str("pub const MAX_SCENE_SCRIPTS_PER_SCENE: usize = ");
+    out.push_str(&manifest.max_scene_scripts_per_scene.to_string());
+    out.push_str(";\n\n");
     out.push_str("pub const SCRIPT_BINDINGS: &[CachedScriptBinding] = &[\n");
 
     for entry in &manifest.entries {
         out.push_str("    CachedScriptBinding {\n");
+        out.push_str(&format!("        scope: {:?},\n", entry.scope));
         out.push_str(&format!("        scene: {:?},\n", entry.scene));
         out.push_str(&format!("        entity_id: {},\n", entry.entity_id));
         out.push_str(&format!("        slot: {},\n", entry.slot));
         out.push_str(&format!("        name: {:?},\n", entry.name));
+        out.push_str(&format!(
+            "        runtime_name: {:?},\n",
+            entry.runtime_name
+        ));
         out.push_str(&format!("        enabled: {},\n", entry.enabled));
         out.push_str(&format!(
             "        source_hash: 0x{:016x},\n",
@@ -1683,6 +1854,8 @@ fn render_script_bindings(manifest: &ScriptCompileManifest) -> String {
     }
 
     out.push_str("];\n");
+    out.push('\n');
+    out.push_str(generated_scripts);
     out
 }
 

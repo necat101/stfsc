@@ -271,6 +271,10 @@ pub struct WorldScene {
     #[serde(default)]
     pub entities: Vec<SceneEntity>,
     #[serde(default)]
+    pub scene_scripts: Vec<String>,
+    #[serde(default)]
+    pub scene_script_components: Vec<ScriptComponent>,
+    #[serde(default)]
     pub respawn_enabled: bool,
     #[serde(default)]
     pub respawn_y: f32,
@@ -297,6 +301,7 @@ pub struct UiScene {
 }
 
 pub const MAX_SCRIPTS_PER_ENTITY: usize = 32;
+pub const MAX_SCENE_SCRIPTS_PER_SCENE: usize = 8;
 pub const CUSTOM_FUCKSCRIPT_NAME: &str = "CustomFuckScript";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -352,6 +357,14 @@ impl ScriptComponent {
     }
 
     pub fn runtime_name(&self) -> String {
+        if !matches!(self.compile_mode, ScriptCompileMode::BuiltinNative) {
+            if let Some(cache_key) = self.cache_key.as_ref().map(|key| key.trim()) {
+                if !cache_key.is_empty() {
+                    return cache_key.to_string();
+                }
+            }
+        }
+
         self.name.trim().to_string()
     }
 
@@ -465,11 +478,32 @@ impl SceneEntity {
     }
 
     pub fn runtime_script_names(&self) -> Vec<String> {
-        let names = self.script_names();
-        if names.is_empty() && matches!(self.entity_type, EntityType::Vehicle) {
-            vec!["Vehicle".to_string()]
-        } else {
-            names
+        let mut names = self.script_names();
+        if matches!(self.entity_type, EntityType::Vehicle)
+            && !names.iter().any(|name| name == "Vehicle")
+        {
+            names.insert(0, "Vehicle".to_string());
+            names.truncate(MAX_SCRIPTS_PER_ENTITY);
+        }
+        names
+    }
+
+    pub fn effective_collision_enabled(&self) -> bool {
+        self.collision_enabled
+            || matches!(self.entity_type, EntityType::Ground | EntityType::Vehicle)
+    }
+
+    pub fn effective_layer(&self) -> u32 {
+        if self.layer != 0 {
+            return self.layer;
+        }
+
+        match self.entity_type {
+            EntityType::Ground | EntityType::Building { .. } => LAYER_ENVIRONMENT,
+            EntityType::Vehicle => LAYER_VEHICLE,
+            EntityType::CrowdAgent { .. } => LAYER_CHARACTER,
+            EntityType::Primitive(_) => LAYER_PROP,
+            _ => LAYER_DEFAULT,
         }
     }
 
@@ -609,6 +643,10 @@ pub struct Scene {
     #[serde(default)]
     pub domain: SceneDomain,
     pub entities: Vec<SceneEntity>,
+    #[serde(default)]
+    pub scene_scripts: Vec<String>,
+    #[serde(default)]
+    pub scene_script_components: Vec<ScriptComponent>,
     pub respawn_enabled: bool,
     pub respawn_y: f32,
     /// Per-scene sandbox settings. Disabled by default so existing scenes keep current behavior.
@@ -637,6 +675,8 @@ impl Scene {
             version: "1.0".into(),
             domain: SceneDomain::World3d,
             entities: Vec::new(),
+            scene_scripts: Vec::new(),
+            scene_script_components: Vec::new(),
             respawn_enabled: false,
             respawn_y: -20.0,
             sandbox: SandboxWorldSettings::default(),
@@ -652,6 +692,8 @@ impl Scene {
             name: self.name.clone(),
             version: self.version.clone(),
             entities: self.entities.clone(),
+            scene_scripts: self.scene_scripts.clone(),
+            scene_script_components: self.scene_script_components.clone(),
             respawn_enabled: self.respawn_enabled,
             respawn_y: self.respawn_y,
             sandbox: self.sandbox.clone(),
@@ -685,6 +727,8 @@ impl Scene {
             version: world.version,
             domain: SceneDomain::World3d,
             entities: world.entities,
+            scene_scripts: world.scene_scripts,
+            scene_script_components: world.scene_script_components,
             respawn_enabled: world.respawn_enabled,
             respawn_y: world.respawn_y,
             sandbox: world.sandbox,
@@ -702,6 +746,59 @@ impl Scene {
         }
         let idx = idx.min(self.ui_layouts.len() - 1);
         &mut self.ui_layouts[idx]
+    }
+
+    pub fn scene_script_names(&self) -> Vec<String> {
+        if !self.scene_script_components.is_empty() {
+            return self
+                .scene_script_components
+                .iter()
+                .filter(|component| component.enabled)
+                .map(ScriptComponent::runtime_name)
+                .filter(|name| !name.is_empty())
+                .take(MAX_SCENE_SCRIPTS_PER_SCENE)
+                .collect();
+        }
+
+        Self::normalize_scene_script_names(self.scene_scripts.clone())
+    }
+
+    pub fn ensure_scene_script_components(&mut self) -> &mut Vec<ScriptComponent> {
+        if self.scene_script_components.is_empty() {
+            self.scene_script_components =
+                Self::normalize_scene_script_names(self.scene_scripts.clone())
+                    .into_iter()
+                    .map(ScriptComponent::builtin)
+                    .collect();
+        }
+        self.clamp_scene_script_components();
+        &mut self.scene_script_components
+    }
+
+    pub fn sync_legacy_scene_script_fields(&mut self) {
+        self.clamp_scene_script_components();
+        self.scene_scripts = self
+            .scene_script_components
+            .iter()
+            .filter(|component| component.enabled)
+            .map(ScriptComponent::runtime_name)
+            .filter(|name| !name.is_empty())
+            .take(MAX_SCENE_SCRIPTS_PER_SCENE)
+            .collect();
+    }
+
+    pub fn clamp_scene_script_components(&mut self) {
+        self.scene_script_components
+            .truncate(MAX_SCENE_SCRIPTS_PER_SCENE);
+    }
+
+    fn normalize_scene_script_names(names: Vec<String>) -> Vec<String> {
+        names
+            .into_iter()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .take(MAX_SCENE_SCRIPTS_PER_SCENE)
+            .collect()
     }
 
     pub fn create_test_scene() -> Self {
@@ -899,5 +996,72 @@ impl Scene {
         });
 
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vehicle_runtime_scripts_keep_builtin_driver_with_extra_script() {
+        let mut scene = Scene::create_test_scene();
+        let vehicle = scene
+            .entities
+            .iter_mut()
+            .find(|entity| matches!(entity.entity_type, EntityType::Vehicle))
+            .expect("test scene should contain a vehicle");
+        vehicle.script_components = vec![ScriptComponent {
+            name: "CustomVehicleLogic".to_string(),
+            enabled: true,
+            source: "script CustomVehicleLogic {}".to_string(),
+            compile_mode: ScriptCompileMode::CustomNativeCache,
+            cache_key: Some("__stfsc_script_test".to_string()),
+        }];
+        vehicle.sync_legacy_script_fields();
+
+        let names = vehicle.runtime_script_names();
+        assert_eq!(names[0], "Vehicle");
+        assert!(names.iter().any(|name| name == "__stfsc_script_test"));
+    }
+
+    #[test]
+    fn legacy_ground_and_vehicle_get_runtime_physics_defaults() {
+        let mut scene = Scene::create_test_scene();
+        let ground = scene
+            .entities
+            .iter_mut()
+            .find(|entity| matches!(entity.entity_type, EntityType::Ground))
+            .expect("test scene should contain ground");
+        ground.collision_enabled = false;
+        ground.layer = 0;
+        assert!(ground.effective_collision_enabled());
+        assert_eq!(ground.effective_layer(), LAYER_ENVIRONMENT);
+
+        let vehicle = scene
+            .entities
+            .iter_mut()
+            .find(|entity| matches!(entity.entity_type, EntityType::Vehicle))
+            .expect("test scene should contain vehicle");
+        vehicle.collision_enabled = false;
+        vehicle.layer = 0;
+        assert!(vehicle.effective_collision_enabled());
+        assert_eq!(vehicle.effective_layer(), LAYER_VEHICLE);
+    }
+
+    #[test]
+    fn scene_script_components_clamp_to_scene_limit_without_changing_entity_limit() {
+        let mut scene = Scene::new("Procedural");
+        scene.scene_script_components = (0..(MAX_SCENE_SCRIPTS_PER_SCENE + 3))
+            .map(|index| ScriptComponent::builtin(format!("SceneScript{}", index)))
+            .collect();
+        scene.sync_legacy_scene_script_fields();
+
+        assert_eq!(
+            scene.scene_script_components.len(),
+            MAX_SCENE_SCRIPTS_PER_SCENE
+        );
+        assert_eq!(scene.scene_scripts.len(), MAX_SCENE_SCRIPTS_PER_SCENE);
+        assert_eq!(MAX_SCRIPTS_PER_ENTITY, 32);
     }
 }

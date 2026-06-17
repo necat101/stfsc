@@ -884,10 +884,10 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                                         },
                                         crate::world::MeshHandle(0), // Cube placeholder
                                         crate::world::Vehicle {
-                                            speed: 0.0,
-                                            max_speed: 10.0,
+                                            speed: 120.0,
+                                            max_speed: 25.0,
                                             steering: 0.0,
-                                            accelerating: false,
+                                            accelerating: true,
                                         },
                                         material,
                                     ));
@@ -1200,16 +1200,16 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                         .ecs
                         .query::<(&world::Vehicle, &world::RigidBodyHandle)>()
                         .iter()
-                        .map(|(_, (v, h))| (v.speed, h.0))
+                        .map(|(_, (v, h))| (v.speed, v.max_speed, v.accelerating, h.0))
                         .collect();
                 } else {
                     vehicle_data = Vec::new();
                 }
 
                 // Process each vehicle with short lock
-                for (speed, body_handle) in vehicle_data {
+                for (speed, max_speed, accelerating, body_handle) in vehicle_data {
                     if let Ok(mut state) = game_state_thread.try_write() {
-                        if let Some(rot) = crate::world::scripting::apply_vehicle_suspension(
+                        let suspension_rot = crate::world::scripting::apply_vehicle_suspension(
                             &mut state.physics,
                             body_handle,
                             fixed_dt,
@@ -1218,16 +1218,48 @@ fn render_loop(app: AndroidApp, event_rx: std::sync::mpsc::Receiver<AndroidEvent
                             0.75,
                             0.18,
                             1.35,
-                        ) {
+                        );
+                        if suspension_rot.is_some() {
                             crate::world::scripting::apply_vehicle_lateral_damping(
                                 &mut state.physics,
                                 body_handle,
                                 fixed_dt,
                                 10.0,
                             );
+                        }
+                        if accelerating || speed > 0.0 {
+                            let autopilot_bounds =
+                                crate::world::scripting::vehicle_autopilot_bounds_from_world(
+                                    &state.world.ecs,
+                                );
                             if let Some(body) = state.physics.rigid_body_set.get_mut(body_handle) {
+                                let steering =
+                                    crate::world::scripting::vehicle_autopilot_steering_with_bounds(
+                                        body.translation(),
+                                        body.rotation(),
+                                        autopilot_bounds,
+                                    );
+                                let yaw_delta = steering * fixed_dt;
+                                if yaw_delta.abs() > 0.0001 {
+                                    let turn = rapier3d::na::UnitQuaternion::from_axis_angle(
+                                        &rapier3d::na::Vector3::y_axis(),
+                                        yaw_delta,
+                                    );
+                                    let next_rot = turn * *body.rotation();
+                                    body.set_rotation(next_rot, true);
+                                }
+
+                                let rot = suspension_rot.unwrap_or_else(|| *body.rotation());
                                 let forward_dir = rot.transform_vector(&vector![0.0, 0.0, -1.0]);
-                                body.apply_impulse(forward_dir * speed * fixed_dt, true);
+                                let forward_speed = body.linvel().dot(&forward_dir);
+                                if forward_speed < max_speed.max(1.0) {
+                                    let drive = if accelerating {
+                                        speed.max(120.0)
+                                    } else {
+                                        speed
+                                    };
+                                    body.apply_impulse(forward_dir * drive * fixed_dt, true);
+                                }
                             }
                         }
                     }

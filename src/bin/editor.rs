@@ -2,7 +2,7 @@ use ash::vk;
 use eframe::egui;
 use glam::{Mat4, Quat as GQuat, Vec3 as GVec3};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::TcpStream;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -14,6 +14,8 @@ use stfsc_engine::graphics::viewport_renderer::{
 };
 use stfsc_engine::graphics::{GraphicsContext, Texture};
 use stfsc_engine::physics::PhysicsWorld;
+use stfsc_engine::project::script_cache::{collect_native_scripts_for_scene, normalize_scene_key};
+use stfsc_engine::project::script_compiler::render_native_script_module;
 use stfsc_engine::world::{
     animation::{EditorKeyframe, KeyframeChannel, KeyframeInterpolation, KeyframeValue},
     fbx_loader::ModelScene,
@@ -165,7 +167,12 @@ impl Camera3D {
             .add(&up.mul(delta.y * pan_speed));
         self.target = self.target.add(&world_delta);
     }
-    fn zoom_towards(&mut self, scroll_delta: f32, cursor_pos: Option<egui::Pos2>, size: egui::Vec2) {
+    fn zoom_towards(
+        &mut self,
+        scroll_delta: f32,
+        cursor_pos: Option<egui::Pos2>,
+        size: egui::Vec2,
+    ) {
         if scroll_delta.abs() <= f32::EPSILON || size.x <= 1.0 || size.y <= 1.0 {
             return;
         }
@@ -177,8 +184,8 @@ impl Camera3D {
         } else {
             1.0 + zoom_amount
         };
-        let new_distance =
-            (old_distance * zoom_factor).clamp(SCENE_CAMERA_MIN_DISTANCE, SCENE_CAMERA_MAX_DISTANCE);
+        let new_distance = (old_distance * zoom_factor)
+            .clamp(SCENE_CAMERA_MIN_DISTANCE, SCENE_CAMERA_MAX_DISTANCE);
         let distance_delta = old_distance - new_distance;
         let ray_dir = cursor_pos
             .map(|pos| self.get_ray(pos, size).1)
@@ -329,7 +336,7 @@ impl Camera3D {
 use stfsc_engine::project::scene::{
     EntityType, LightType as LightTypeEditor, Material, MaterialSlot, NamedUiLayout, PrimitiveType,
     Scene, SceneEntity, ScriptCompileMode, ScriptComponent, ShaderPreset, CUSTOM_FUCKSCRIPT_NAME,
-    MAX_SCRIPTS_PER_ENTITY,
+    MAX_SCENE_SCRIPTS_PER_SCENE, MAX_SCRIPTS_PER_ENTITY,
 };
 
 // ============================================================================
@@ -632,6 +639,12 @@ struct EmbeddedPlayRuntime {
     player_rb: RigidBodyHandle,
 }
 
+struct PlayScriptCompileReport {
+    cache_path: std::path::PathBuf,
+    native_script_count: usize,
+    runtime_names: Vec<String>,
+}
+
 #[derive(Clone)]
 struct HierarchyRow {
     id: u32,
@@ -679,6 +692,7 @@ struct EditorApp {
     inspector_start_entity: Option<SceneEntity>, // Entity state at inspector edit start for undo
     last_selected_id: Option<u32>,          // Track selection changes
     selected_script_slot_by_entity: HashMap<u32, usize>,
+    selected_scene_script_slot: usize,
     selected_material_slot_by_entity: HashMap<u32, usize>,
 
     // Scene file management
@@ -775,7 +789,10 @@ impl EditorApp {
     fn selected_camera_focus(&self) -> Option<(Vec3, f32)> {
         let selected_id = self.selected_entity_id?;
         let scene = self.current_scene.as_ref()?;
-        let entity = scene.entities.iter().find(|entity| entity.id == selected_id)?;
+        let entity = scene
+            .entities
+            .iter()
+            .find(|entity| entity.id == selected_id)?;
         let target = Vec3::new(entity.position[0], entity.position[1], entity.position[2]);
         let radius = entity
             .scale
@@ -825,7 +842,11 @@ impl EditorApp {
         Some(t_min.max(0.0))
     }
 
-    fn pick_scene_entity_at(&self, local_pos: egui::Pos2, viewport_size: egui::Vec2) -> Option<u32> {
+    fn pick_scene_entity_at(
+        &self,
+        local_pos: egui::Pos2,
+        viewport_size: egui::Vec2,
+    ) -> Option<u32> {
         let scene = self.current_scene.as_ref()?;
         let (ray_origin, ray_dir) = self.camera.get_ray(local_pos, viewport_size);
 
@@ -942,8 +963,104 @@ impl EditorApp {
         }
     }
 
+    fn play_script_cache_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("script_cache")
+            .join("generated_script_bindings.rs")
+    }
+
+    fn current_scene_cache_key(&self, scene: &Scene) -> String {
+        self.current_scene_path
+            .as_deref()
+            .map(normalize_scene_key)
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or_else(|| format!("<unsaved:{}>", scene.name.trim()))
+    }
+
+    fn load_project_scene_for_script_cache(&self, scene_path: &str) -> Result<Scene, String> {
+        let Some(project) = &self.current_project else {
+            return Err("No project is open".into());
+        };
+
+        let absolute_path = project.root_path.join(scene_path);
+        let scene_json = std::fs::read_to_string(&absolute_path)
+            .map_err(|err| format!("Failed to read scene '{}': {}", scene_path, err))?;
+        serde_json::from_str(&scene_json)
+            .map_err(|err| format!("Failed to parse scene '{}': {}", scene_path, err))
+    }
+
+    fn prepare_play_script_cache(
+        &self,
+        scene: &Scene,
+    ) -> Result<(Scene, PlayScriptCompileReport), String> {
+        let active_scene_key = self.current_scene_cache_key(scene);
+        let mut active_scene = scene.clone();
+        let mut native_sources =
+            collect_native_scripts_for_scene(&active_scene_key, &mut active_scene);
+
+        if let Some(project) = &self.current_project {
+            for scene_asset in &project.assets.scenes {
+                let scene_key = normalize_scene_key(&scene_asset.path);
+                if scene_key == active_scene_key {
+                    continue;
+                }
+
+                let mut cached_scene =
+                    self.load_project_scene_for_script_cache(&scene_asset.path)?;
+                native_sources.extend(collect_native_scripts_for_scene(
+                    &scene_key,
+                    &mut cached_scene,
+                ));
+            }
+        }
+
+        let mut seen = HashSet::new();
+        native_sources.retain(|source| seen.insert(source.runtime_name.clone()));
+        let runtime_names = native_sources
+            .iter()
+            .map(|source| source.runtime_name.clone())
+            .collect::<Vec<_>>();
+        let generated = render_native_script_module(&native_sources).map_err(|diagnostics| {
+            let message = diagnostics
+                .into_iter()
+                .map(|diag| diag.message)
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("FuckScript native compilation failed:\n{}", message)
+        })?;
+
+        let cache_path = Self::play_script_cache_path();
+        if let Some(parent) = cache_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                format!(
+                    "Failed to create native script cache directory '{}': {}",
+                    parent.display(),
+                    err
+                )
+            })?;
+        }
+        std::fs::write(&cache_path, generated).map_err(|err| {
+            format!(
+                "Failed to write native script cache '{}': {}",
+                cache_path.display(),
+                err
+            )
+        })?;
+
+        Ok((
+            active_scene,
+            PlayScriptCompileReport {
+                cache_path,
+                native_script_count: runtime_names.len(),
+                runtime_names,
+            },
+        ))
+    }
+
     fn runtime_updates_for_entity(&self, entity: &SceneEntity) -> Vec<SceneUpdate> {
         let mut updates = Vec::new();
+        let collision_enabled = entity.effective_collision_enabled();
+        let layer = entity.effective_layer();
 
         if let (Some(texture_id), Some(texture_data)) = (
             &entity.material.albedo_texture,
@@ -1016,8 +1133,8 @@ impl EditorApp {
                     color: entity.material.albedo_color,
                     half_extents: [entity.scale[0] / 2.0, entity.scale[2] / 2.0],
                     albedo_texture: entity.material.albedo_texture.clone(),
-                    collision_enabled: entity.collision_enabled,
-                    layer: entity.layer,
+                    collision_enabled,
+                    layer,
                 });
             }
             EntityType::Mesh { path } => {
@@ -1030,8 +1147,8 @@ impl EditorApp {
                             position: entity.position,
                             rotation: entity.rotation,
                             scale: entity.scale,
-                            collision_enabled: entity.collision_enabled,
-                            layer: entity.layer,
+                            collision_enabled,
+                            layer,
                             is_static: entity.is_static,
                         });
                     } else {
@@ -1042,8 +1159,8 @@ impl EditorApp {
                             rotation: entity.rotation,
                             scale: entity.scale,
                             albedo_texture: entity.material.albedo_texture.clone(),
-                            collision_enabled: entity.collision_enabled,
-                            layer: entity.layer,
+                            collision_enabled,
+                            layer,
                             is_static: entity.is_static,
                         });
                     }
@@ -1072,8 +1189,8 @@ impl EditorApp {
                     scale: entity.scale,
                     color: entity.material.albedo_color,
                     albedo_texture: entity.material.albedo_texture.clone(),
-                    collision_enabled: entity.collision_enabled,
-                    layer: entity.layer,
+                    collision_enabled,
+                    layer,
                     is_static: entity.is_static,
                 });
             }
@@ -1121,6 +1238,14 @@ impl EditorApp {
             },
         ];
 
+        let scene_script_names = scene.scene_script_names();
+        if !scene_script_names.is_empty() {
+            updates.push(SceneUpdate::SetSceneScripts {
+                scene_id: scene.name.clone(),
+                names: scene_script_names,
+            });
+        }
+
         for entity in &scene.entities {
             updates.extend(self.runtime_updates_for_entity(entity));
         }
@@ -1140,7 +1265,11 @@ impl EditorApp {
         updates
     }
 
-    fn create_embedded_play_runtime(&self, eye_position: Vec3) -> EmbeddedPlayRuntime {
+    fn create_embedded_play_runtime(
+        &self,
+        eye_position: Vec3,
+        play_scene: Option<&Scene>,
+    ) -> EmbeddedPlayRuntime {
         let mut physics = PhysicsWorld::new();
         let mut world = GameWorld::new();
         let body_position = [eye_position.x, eye_position.y - 0.8, eye_position.z];
@@ -1179,7 +1308,7 @@ impl EditorApp {
             body.user_data = player_entity.to_bits().get() as u128;
         }
 
-        if let Some(scene) = &self.current_scene {
+        if let Some(scene) = play_scene.or(self.current_scene.as_ref()) {
             for update in self.scene_runtime_updates(scene) {
                 Self::queue_embedded_runtime_update(
                     &mut world,
@@ -1457,6 +1586,42 @@ impl EditorApp {
             return;
         }
 
+        let (play_scene, script_report) = if let Some(scene) = &self.current_scene {
+            match self.prepare_play_script_cache(scene) {
+                Ok(result) => (Some(result.0), Some(result.1)),
+                Err(err) => {
+                    self.status = format!("Play blocked: {}", err);
+                    return;
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+        if let Some(report) = &script_report {
+            let registry_probe = GameWorld::new();
+            let missing_names = report
+                .runtime_names
+                .iter()
+                .filter(|name| !registry_probe.script_registry.contains(name))
+                .cloned()
+                .collect::<Vec<_>>();
+            let missing = missing_names.iter().take(4).cloned().collect::<Vec<_>>();
+            if !missing_names.is_empty() {
+                self.status = format!(
+                    "Play blocked: native script cache updated at {}; rebuild the editor so these scripts are compiled in: {}{}",
+                    report.cache_path.display(),
+                    missing.join(", "),
+                    if missing_names.len() > missing.len() {
+                        "..."
+                    } else {
+                        ""
+                    }
+                );
+                return;
+            }
+        }
+
         self.play_scene_snapshot = self.current_scene.clone();
         self.play_scene_dirty_snapshot = self.scene_dirty;
         self.play_camera_snapshot = Some(self.camera);
@@ -1469,7 +1634,7 @@ impl EditorApp {
         self.play_player_yaw = yaw;
         self.play_player_pitch = pitch;
         self.camera = Camera3D::from_eye_forward(position, self.play_forward(), fov);
-        self.play_runtime = Some(self.create_embedded_play_runtime(position));
+        self.play_runtime = Some(self.create_embedded_play_runtime(position, play_scene.as_ref()));
         self.play_paused = false;
         self.play_jump_was_down = false;
 
@@ -1480,7 +1645,13 @@ impl EditorApp {
         self.play_mode = true;
         self.set_play_mouse_capture(ctx, true);
         self.active_view = EditorView::SceneEditor;
-        self.status = "Embedded Game View running".into();
+        self.status = match script_report {
+            Some(report) if report.native_script_count > 0 => format!(
+                "Embedded Game View running with {} native cached script(s)",
+                report.native_script_count
+            ),
+            _ => "Embedded Game View running".into(),
+        };
     }
 
     fn exit_play_mode(&mut self, ctx: &egui::Context) {
@@ -1652,6 +1823,7 @@ impl EditorApp {
             inspector_start_entity: None,
             last_selected_id: None,
             selected_script_slot_by_entity: HashMap::new(),
+            selected_scene_script_slot: 0,
             selected_material_slot_by_entity: HashMap::new(),
             // Scene file management
             current_scene_path: None,
@@ -2393,6 +2565,8 @@ impl EditorApp {
             }
             _ => {
                 let color = entity.material.albedo_color;
+                let collision_enabled = entity.effective_collision_enabled();
+                let layer = entity.effective_layer();
 
                 // Upload texture if present (for any entity type including Ground)
                 if let (Some(texture_id), Some(texture_data)) = (
@@ -2419,8 +2593,8 @@ impl EditorApp {
                             color,
                             half_extents: [entity.scale[0] / 2.0, entity.scale[2] / 2.0], // Half of X and Z scale
                             albedo_texture: entity.material.albedo_texture.clone(),
-                            collision_enabled: entity.collision_enabled,
-                            layer: entity.layer,
+                            collision_enabled,
+                            layer,
                         }));
                 } else if let EntityType::Mesh { path } = &entity.entity_type {
                     // Load mesh from file and send via SpawnFbxMesh
@@ -2453,8 +2627,8 @@ impl EditorApp {
                         scale: entity.scale,
                         color,
                         albedo_texture: entity.material.albedo_texture.clone(),
-                        collision_enabled: entity.collision_enabled,
-                        layer: entity.layer,
+                        collision_enabled,
+                        layer,
                         is_static: entity.is_static,
                     }));
                 }
@@ -2486,6 +2660,15 @@ impl EditorApp {
                 .send(AppCommand::Send(SceneUpdate::SetSceneHierarchy {
                     hierarchy: scene.hierarchy.clone(),
                 }));
+            let scene_script_names = scene.scene_script_names();
+            if !scene_script_names.is_empty() {
+                let _ = self
+                    .command_tx
+                    .send(AppCommand::Send(SceneUpdate::SetSceneScripts {
+                        scene_id: scene.name.clone(),
+                        names: scene_script_names,
+                    }));
+            }
 
             // Deploy all entities
             for entity in &scene.entities {
@@ -3009,6 +3192,9 @@ impl EditorApp {
 
     /// Push a mesh entity to the live runtime via SpawnGltfMesh or SpawnFbxMesh
     fn deploy_mesh_entity(&self, entity: &SceneEntity, mesh_data: &[u8]) {
+        let collision_enabled = entity.effective_collision_enabled();
+        let layer = entity.effective_layer();
+
         // Upload texture if present (mainly for OBJ/FBX fallback)
         if let (Some(texture_id), Some(texture_data)) = (
             &entity.material.albedo_texture,
@@ -3038,8 +3224,8 @@ impl EditorApp {
                     position: entity.position,
                     rotation: entity.rotation,
                     scale: entity.scale,
-                    collision_enabled: entity.collision_enabled,
-                    layer: entity.layer,
+                    collision_enabled,
+                    layer,
                     is_static: entity.is_static,
                 }));
         } else {
@@ -3052,8 +3238,8 @@ impl EditorApp {
                     rotation: entity.rotation,
                     scale: entity.scale,
                     albedo_texture: entity.material.albedo_texture.clone(),
-                    collision_enabled: entity.collision_enabled,
-                    layer: entity.layer,
+                    collision_enabled,
+                    layer,
                     is_static: entity.is_static,
                 }));
         }
@@ -3860,7 +4046,10 @@ impl EditorApp {
         painter.rect_stroke(
             rect,
             6.0,
-            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 55)),
+            egui::Stroke::new(
+                1.0,
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 55),
+            ),
         );
 
         let axes = [
@@ -3935,7 +4124,11 @@ impl EditorApp {
             painter.circle_filled(
                 pos,
                 if hovered { 12.0 } else { 10.0 },
-                if hovered { egui::Color32::WHITE } else { line_color },
+                if hovered {
+                    egui::Color32::WHITE
+                } else {
+                    line_color
+                },
             );
             painter.text(
                 pos,
@@ -3970,7 +4163,10 @@ impl EditorApp {
         painter.rect_stroke(
             iso_rect,
             4.0,
-            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 80)),
+            egui::Stroke::new(
+                1.0,
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 80),
+            ),
         );
         painter.text(
             center,
@@ -4096,7 +4292,8 @@ impl EditorApp {
                                 (self.camera.pitch - delta.y * 0.01).clamp(-1.5, 1.5);
                         }
                         Some(egui::PointerButton::Middle) => {
-                            let focus_radius = self.selected_camera_focus().map(|(_, radius)| radius);
+                            let focus_radius =
+                                self.selected_camera_focus().map(|(_, radius)| radius);
                             self.camera.pan(delta, focus_radius);
                         }
                         None | Some(_) => {}
@@ -4418,20 +4615,21 @@ impl EditorApp {
             }
         }
 
-        let viewport_click_pos = if !self.play_mode && response.clicked() && !pointer_over_view_gizmo
-        {
-            response
-                .interact_pointer_pos()
-                .filter(|pos| rect.contains(*pos))
-        } else {
-            None
-        };
+        let viewport_click_pos =
+            if !self.play_mode && response.clicked() && !pointer_over_view_gizmo {
+                response
+                    .interact_pointer_pos()
+                    .filter(|pos| rect.contains(*pos))
+            } else {
+                None
+            };
 
         let ray_clicked_entity = viewport_click_pos
             .map(|pos| egui::pos2(pos.x - rect.min.x, pos.y - rect.min.y))
             .and_then(|local_pos| self.pick_scene_entity_at(local_pos, rect.size()));
         let mut clicked_entity: Option<u32> = ray_clicked_entity;
-        let use_screen_space_pick_fallback = viewport_click_pos.is_some() && ray_clicked_entity.is_none();
+        let use_screen_space_pick_fallback =
+            viewport_click_pos.is_some() && ray_clicked_entity.is_none();
         // Draw entities - parallel projection computation
         if let Some(scene) = &self.current_scene {
             let camera = self.camera; // Copy for parallel access
@@ -7292,7 +7490,279 @@ impl eframe::App for EditorApp {
                 }
                 self.last_selected_id = self.selected_entity_id;
             }
-            
+
+            if let Some(scene) = &mut self.current_scene {
+                egui::CollapsingHeader::new("Scene Scripts")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        let mut scripts_changed = false;
+                        let mut script_source_changed = false;
+                        let mut remove_script_index = None;
+
+                        {
+                            let selected_slot = &mut self.selected_scene_script_slot;
+                            let components = scene.ensure_scene_script_components();
+
+                            if components.is_empty() {
+                                ui.label("No scene script components");
+                            }
+
+                            ui.label(format!(
+                                "{} / {} scene script slots",
+                                components.len(),
+                                MAX_SCENE_SCRIPTS_PER_SCENE
+                            ));
+
+                            for script_index in 0..components.len() {
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .selectable_label(
+                                            *selected_slot == script_index,
+                                            format!("Scene {}", script_index + 1),
+                                        )
+                                        .clicked()
+                                    {
+                                        *selected_slot = script_index;
+                                    }
+
+                                    let component = &mut components[script_index];
+                                    if ui
+                                        .checkbox(&mut component.enabled, "")
+                                        .on_hover_text("Enabled")
+                                        .changed()
+                                    {
+                                        script_source_changed = true;
+                                    }
+
+                                    let selected_text = if component.name.trim().is_empty() {
+                                        "Choose script"
+                                    } else {
+                                        component.name.as_str()
+                                    };
+                                    let mut selected_preset: Option<String> = None;
+                                    egui::ComboBox::from_id_source(format!(
+                                        "scene_script_name_{}",
+                                        script_index
+                                    ))
+                                    .selected_text(selected_text)
+                                    .show_ui(ui, |ui| {
+                                        for script_name in BUILTIN_SCRIPT_NAMES {
+                                            if ui
+                                                .selectable_label(
+                                                    component.name == *script_name,
+                                                    *script_name,
+                                                )
+                                                .clicked()
+                                            {
+                                                selected_preset =
+                                                    Some((*script_name).to_string());
+                                                ui.close_menu();
+                                            }
+                                        }
+                                        ui.separator();
+                                        if ui
+                                            .selectable_label(
+                                                component.name == CUSTOM_FUCKSCRIPT_NAME,
+                                                "Custom FuckScript",
+                                            )
+                                            .clicked()
+                                        {
+                                            selected_preset =
+                                                Some(CUSTOM_FUCKSCRIPT_NAME.to_string());
+                                            ui.close_menu();
+                                        }
+                                    });
+
+                                    if let Some(new_name) = selected_preset {
+                                        set_script_component_preset(component, &new_name);
+                                        *selected_slot = script_index;
+                                        scripts_changed = true;
+                                        script_source_changed = true;
+                                    }
+
+                                    if ui.small_button("Edit").clicked() {
+                                        *selected_slot = script_index;
+                                    }
+                                    if ui.small_button("Remove").clicked() {
+                                        remove_script_index = Some(script_index);
+                                    }
+                                });
+                            }
+
+                            if let Some(script_index) = remove_script_index {
+                                components.remove(script_index);
+                                scripts_changed = true;
+                                if components.is_empty() {
+                                    *selected_slot = 0;
+                                } else if *selected_slot >= components.len() {
+                                    *selected_slot = components.len() - 1;
+                                } else if *selected_slot > script_index {
+                                    *selected_slot -= 1;
+                                }
+                            }
+
+                            if components.len() < MAX_SCENE_SCRIPTS_PER_SCENE {
+                                ui.menu_button("+ Add Scene Script", |ui| {
+                                    for script_name in BUILTIN_SCRIPT_NAMES {
+                                        if ui.button(*script_name).clicked() {
+                                            if components.len() < MAX_SCENE_SCRIPTS_PER_SCENE {
+                                                components
+                                                    .push(ScriptComponent::builtin(*script_name));
+                                                *selected_slot = components.len() - 1;
+                                                scripts_changed = true;
+                                            }
+                                            ui.close_menu();
+                                        }
+                                    }
+                                    ui.separator();
+                                    if ui.button("Custom FuckScript").clicked() {
+                                        if components.len() < MAX_SCENE_SCRIPTS_PER_SCENE {
+                                            components.push(ScriptComponent::custom());
+                                            *selected_slot = components.len() - 1;
+                                            scripts_changed = true;
+                                        }
+                                        ui.close_menu();
+                                    }
+                                });
+                            } else {
+                                ui.label("Max scene scripts reached");
+                            }
+
+                            ui.collapsing("Edit Scene Script Source", |ui| {
+                                if components.is_empty() {
+                                    ui.label("Add a scene script to edit its source.");
+                                } else {
+                                    if *selected_slot >= components.len() {
+                                        *selected_slot = components.len() - 1;
+                                    }
+                                    let script_index = *selected_slot;
+
+                                    ui.horizontal(|ui| {
+                                        ui.label("Editing:");
+                                        egui::ComboBox::from_id_source("scene_script_source_picker")
+                                            .selected_text(format!(
+                                                "{}: {}",
+                                                script_index + 1,
+                                                components[script_index].name
+                                            ))
+                                            .show_ui(ui, |ui| {
+                                                for (candidate_index, candidate) in
+                                                    components.iter().enumerate()
+                                                {
+                                                    let label = format!(
+                                                        "{}: {}{}",
+                                                        candidate_index + 1,
+                                                        candidate.name,
+                                                        if candidate.enabled {
+                                                            ""
+                                                        } else {
+                                                            " (disabled)"
+                                                        }
+                                                    );
+                                                    if ui
+                                                        .selectable_label(
+                                                            script_index == candidate_index,
+                                                            label,
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        *selected_slot = candidate_index;
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                            });
+                                    });
+
+                                    let component = &mut components[script_index];
+                                    ui.horizontal(|ui| {
+                                        ui.label("Name:");
+                                        if ui.text_edit_singleline(&mut component.name).changed() {
+                                            scripts_changed = true;
+                                        }
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        if ui.checkbox(&mut component.enabled, "Enabled").changed()
+                                        {
+                                            script_source_changed = true;
+                                        }
+                                        egui::ComboBox::from_id_source(format!(
+                                            "scene_script_compile_mode_{}",
+                                            script_index
+                                        ))
+                                        .selected_text(match component.compile_mode {
+                                            ScriptCompileMode::BuiltinNative => "Preset Native",
+                                            ScriptCompileMode::EditableNativeCache => {
+                                                "Edited Native Cache"
+                                            }
+                                            ScriptCompileMode::CustomNativeCache => {
+                                                "Custom Native Cache"
+                                            }
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            script_source_changed |= ui
+                                                .selectable_value(
+                                                    &mut component.compile_mode,
+                                                    ScriptCompileMode::BuiltinNative,
+                                                    "Preset Native",
+                                                )
+                                                .changed();
+                                            script_source_changed |= ui
+                                                .selectable_value(
+                                                    &mut component.compile_mode,
+                                                    ScriptCompileMode::EditableNativeCache,
+                                                    "Edited Native Cache",
+                                                )
+                                                .changed();
+                                            script_source_changed |= ui
+                                                .selectable_value(
+                                                    &mut component.compile_mode,
+                                                    ScriptCompileMode::CustomNativeCache,
+                                                    "Custom Native Cache",
+                                                )
+                                                .changed();
+                                        });
+                                    });
+
+                                    if component.name == CUSTOM_FUCKSCRIPT_NAME {
+                                        component.compile_mode = ScriptCompileMode::CustomNativeCache;
+                                    }
+
+                                    let edit = egui::TextEdit::multiline(&mut component.source)
+                                        .desired_rows(10)
+                                        .code_editor()
+                                        .desired_width(f32::INFINITY);
+                                    if ui.add(edit).changed() {
+                                        if matches!(
+                                            component.compile_mode,
+                                            ScriptCompileMode::BuiltinNative
+                                        ) {
+                                            component.compile_mode =
+                                                ScriptCompileMode::EditableNativeCache;
+                                        }
+                                        script_source_changed = true;
+                                    }
+                                }
+                            });
+                        }
+
+                        if scripts_changed || script_source_changed {
+                            scene.sync_legacy_scene_script_fields();
+                            inspector_dirty = true;
+                            if self.push_connected {
+                                let _ = command_tx.send(AppCommand::Send(
+                                    SceneUpdate::SetSceneScripts {
+                                        scene_id: scene.name.clone(),
+                                        names: scene.scene_script_names(),
+                                    },
+                                ));
+                            }
+                        }
+                    });
+
+                ui.separator();
+            }
+
             if let Some(id) = self.selected_entity_id {
                 if let Some(scene) = &mut self.current_scene {
                     // Pre-collect potential parents for the dropdown
@@ -7852,7 +8322,7 @@ impl eframe::App for EditorApp {
                                 let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetCollision {
                                     id: entity.id,
                                     enabled: entity.collision_enabled,
-                                    layer: entity.layer,
+                                    layer: entity.effective_layer(),
                                 }));
                             }
                         }
@@ -7877,7 +8347,7 @@ impl eframe::App for EditorApp {
                                         inspector_dirty = true;
                                         if entity.collision_enabled && self.push_connected {
                                             let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetCollision {
-                                                id: entity.id, enabled: true, layer: entity.layer
+                                                id: entity.id, enabled: true, layer: entity.effective_layer()
                                             }));
                                         }
                                     }
@@ -7885,7 +8355,7 @@ impl eframe::App for EditorApp {
                                         inspector_dirty = true;
                                         if entity.collision_enabled && self.push_connected {
                                             let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetCollision {
-                                                id: entity.id, enabled: true, layer: entity.layer
+                                                id: entity.id, enabled: true, layer: entity.effective_layer()
                                             }));
                                         }
                                     }
@@ -7893,7 +8363,7 @@ impl eframe::App for EditorApp {
                                         inspector_dirty = true;
                                         if entity.collision_enabled && self.push_connected {
                                             let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetCollision {
-                                                id: entity.id, enabled: true, layer: entity.layer
+                                                id: entity.id, enabled: true, layer: entity.effective_layer()
                                             }));
                                         }
                                     }
@@ -7901,7 +8371,7 @@ impl eframe::App for EditorApp {
                                         inspector_dirty = true;
                                         if entity.collision_enabled && self.push_connected {
                                             let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetCollision {
-                                                id: entity.id, enabled: true, layer: entity.layer
+                                                id: entity.id, enabled: true, layer: entity.effective_layer()
                                             }));
                                         }
                                     }
@@ -7909,7 +8379,7 @@ impl eframe::App for EditorApp {
                                         inspector_dirty = true;
                                         if entity.collision_enabled && self.push_connected {
                                             let _ = command_tx.send(AppCommand::Send(SceneUpdate::SetCollision {
-                                                id: entity.id, enabled: true, layer: entity.layer
+                                                id: entity.id, enabled: true, layer: entity.effective_layer()
                                             }));
                                         }
                                     }
@@ -8175,6 +8645,8 @@ impl eframe::App for EditorApp {
                 if let Some(scene) = &mut self.current_scene {
                     if let Some(e) = scene.entities.iter_mut().find(|e| e.id == id) {
                         if self.push_connected {
+                            let collision_enabled = e.effective_collision_enabled();
+                            let layer = e.effective_layer();
                             match &e.entity_type {
                                 EntityType::Camera => {
                                     let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SetActiveCamera {
@@ -8192,8 +8664,8 @@ impl eframe::App for EditorApp {
                                                 position: e.position,
                                                 rotation: e.rotation,
                                                 scale: e.scale,
-                                                collision_enabled: e.collision_enabled,
-                                                layer: e.layer,
+                                                collision_enabled,
+                                                layer,
                                                 is_static: e.is_static,
                                             }));
                                         } else {
@@ -8205,8 +8677,8 @@ impl eframe::App for EditorApp {
                                                 rotation: e.rotation,
                                                 scale: e.scale,
                                                 albedo_texture: e.material.albedo_texture.clone(),
-                                                collision_enabled: e.collision_enabled,
-                                                layer: e.layer,
+                                                collision_enabled,
+                                                layer,
                                                 is_static: e.is_static,
                                             }));
                                         }
@@ -8226,8 +8698,8 @@ impl eframe::App for EditorApp {
                                     let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::Spawn {
                                         id: e.id, primitive, position: e.position, rotation: e.rotation, scale: e.scale, color,
                                         albedo_texture: e.material.albedo_texture.clone(),
-                                        collision_enabled: e.collision_enabled,
-                                        layer: e.layer,
+                                        collision_enabled,
+                                        layer,
                                         is_static: e.is_static,
                                     }));
                                 }

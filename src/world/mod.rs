@@ -1,5 +1,5 @@
 use crate::physics::PhysicsWorld;
-use crate::project::scene::MAX_SCRIPTS_PER_ENTITY;
+use crate::project::scene::{MAX_SCENE_SCRIPTS_PER_SCENE, MAX_SCRIPTS_PER_ENTITY};
 use glam;
 use hecs::{Entity, World};
 use log::{info, warn};
@@ -16,6 +16,10 @@ pub mod fbx_loader;
 pub mod gltf_loader;
 pub mod sandbox;
 pub mod scripting;
+#[allow(dead_code, unused_imports)]
+mod generated_fuckscript {
+    include!(concat!(env!("OUT_DIR"), "/generated_fuckscript.rs"));
+}
 use animation::{AnimParam, AnimationEventQueue, AnimationState, Animator, AnimatorController};
 use scripting::{
     FuckScript, ScriptContext, ScriptRegistry, XrHapticRequest, XrInputEvent, XrInputSnapshot,
@@ -219,6 +223,11 @@ pub struct EditorEntityId(pub u32);
 #[derive(Debug)]
 pub struct Procedural; // Tag for procedurally generated entities
 
+#[derive(Debug)]
+pub struct SceneScriptController {
+    pub scene_id: String,
+}
+
 /// Hierarchy component for parent-child relationships
 #[derive(Clone, Copy, Debug)]
 pub struct Hierarchy {
@@ -312,10 +321,21 @@ pub const LAYER_PROP: u32 = 4;
 pub const LAYER_CHARACTER: u32 = 8;
 pub const LAYER_VEHICLE: u32 = 16;
 
+#[derive(Clone, Debug)]
+pub struct Projectile {
+    pub velocity: glam::Vec3,
+    pub damage: f32,
+    pub lifetime: f32,
+    pub age: f32,
+    pub owner: Option<Entity>,
+    pub gravity_scale: f32,
+}
+
 /// Component to hold scripts on an entity
 pub struct ScriptSlot {
     pub name: String,
     pub script: Option<Box<dyn FuckScript>>,
+    pub awoken: bool,
     pub started: bool,
     pub enabled: bool,
 }
@@ -325,6 +345,7 @@ impl ScriptSlot {
         Self {
             name: name.into(),
             script: Some(script),
+            awoken: false,
             started: false,
             enabled: true,
         }
@@ -509,6 +530,19 @@ pub enum SceneUpdate {
         #[serde(default)]
         is_static: bool, // If true, object is not affected by gravity
     },
+    SpawnProjectile {
+        id: u32,
+        position: [f32; 3],
+        rotation: [f32; 4],
+        velocity: [f32; 3],
+        radius: f32,
+        lifetime: f32,
+        damage: f32,
+        color: [f32; 3],
+        layer: u32,
+        gravity_scale: f32,
+        owner: Option<u64>,
+    },
     SpawnMesh {
         id: u32,
         mesh: Mesh,
@@ -646,6 +680,11 @@ pub enum SceneUpdate {
     /// Replace the full script component stack on an entity.
     SetScripts {
         id: u32,
+        names: Vec<String>,
+    },
+    /// Replace the script stack for a scene-level controller entity.
+    SetSceneScripts {
+        scene_id: String,
         names: Vec<String>,
     },
     /// Attach an animator controller to an entity
@@ -819,7 +858,11 @@ impl GameWorld {
                 reg.register("Vehicle", || scripting::VehicleScript);
                 reg.register("PoliceAgent", || scripting::PoliceAgentScript);
                 reg.register("TrafficAI", || scripting::TrafficAIScript);
+                reg.register("EnemyTracker", || scripting::EnemyTrackerScript::default());
                 reg.register("WeaponNPC", || scripting::WeaponNPCScript);
+                reg.register("GunWeapon", || scripting::GunWeaponScript::default());
+                reg.register("BowWeapon", || scripting::BowWeaponScript::default());
+                reg.register("Projectile", || scripting::ProjectileScript);
                 reg.register("CollisionLogger", || scripting::CollisionLoggerScript);
                 reg.register("TouchToDestroy", || scripting::TouchToDestroyScript);
                 reg.register("HeadAnchor", || {
@@ -841,6 +884,7 @@ impl GameWorld {
                 reg.register(scripting::CUSTOM_FUCKSCRIPT_RUNTIME_NAME, || {
                     scripting::CustomFuckScript
                 });
+                generated_fuckscript::register_generated_scripts(&mut reg);
                 Arc::new(reg)
             },
             respawn_enabled: false,
@@ -1254,6 +1298,14 @@ impl GameWorld {
             },
         ];
 
+        let scene_script_names = scene.scene_script_names();
+        if !scene_script_names.is_empty() {
+            updates.push(SceneUpdate::SetSceneScripts {
+                scene_id: scene.name.clone(),
+                names: scene_script_names,
+            });
+        }
+
         for entity in &scene.entities {
             updates.extend(Self::runtime_updates_for_scene_entity(entity, scene_dir));
         }
@@ -1274,6 +1326,8 @@ impl GameWorld {
         scene_dir: Option<&Path>,
     ) -> Vec<SceneUpdate> {
         let mut updates = Vec::new();
+        let collision_enabled = entity.effective_collision_enabled();
+        let layer = entity.effective_layer();
 
         if let (Some(texture_id), Some(texture_data)) = (
             &entity.material.albedo_texture,
@@ -1350,8 +1404,8 @@ impl GameWorld {
                     color: entity.material.albedo_color,
                     half_extents: [entity.scale[0] / 2.0, entity.scale[2] / 2.0],
                     albedo_texture: entity.material.albedo_texture.clone(),
-                    collision_enabled: entity.collision_enabled,
-                    layer: entity.layer,
+                    collision_enabled,
+                    layer,
                 });
             }
             crate::project::scene::EntityType::Mesh { path } => {
@@ -1369,8 +1423,8 @@ impl GameWorld {
                                 position: entity.position,
                                 rotation: entity.rotation,
                                 scale: entity.scale,
-                                collision_enabled: entity.collision_enabled,
-                                layer: entity.layer,
+                                collision_enabled,
+                                layer,
                                 is_static: entity.is_static,
                             });
                         } else {
@@ -1381,8 +1435,8 @@ impl GameWorld {
                                 rotation: entity.rotation,
                                 scale: entity.scale,
                                 albedo_texture: entity.material.albedo_texture.clone(),
-                                collision_enabled: entity.collision_enabled,
-                                layer: entity.layer,
+                                collision_enabled,
+                                layer,
                                 is_static: entity.is_static,
                             });
                         }
@@ -1417,8 +1471,8 @@ impl GameWorld {
                     scale: entity.scale,
                     color: entity.material.albedo_color,
                     albedo_texture: entity.material.albedo_texture.clone(),
-                    collision_enabled: entity.collision_enabled,
-                    layer: entity.layer,
+                    collision_enabled,
+                    layer,
                     is_static: entity.is_static,
                 });
             }
@@ -1574,7 +1628,10 @@ impl GameWorld {
                     Some(&mut self.pending_xr_haptics),
                     Some(&mut self.pending_scene_commands),
                 );
-                script.on_disable(&mut ctx);
+                if slot.awoken {
+                    script.on_disable(&mut ctx);
+                }
+                script.on_destroy(&mut ctx);
             }
         }
     }
@@ -1794,6 +1851,94 @@ impl GameWorld {
                         id, primitive, scale, collision_enabled, is_static
                     );
                 }
+                SceneUpdate::SpawnProjectile {
+                    id,
+                    position,
+                    rotation,
+                    velocity,
+                    radius,
+                    lifetime,
+                    damage,
+                    color,
+                    layer,
+                    gravity_scale,
+                    owner,
+                } => {
+                    let radius = radius.max(0.01);
+                    let lifetime = lifetime.max(0.01);
+                    let velocity_vec = glam::Vec3::from(velocity);
+                    let owner_entity = owner.and_then(Entity::from_bits);
+
+                    let entity = self.ecs.spawn((
+                        EditorEntityId(id),
+                        Transform {
+                            position: glam::Vec3::from(position),
+                            rotation: glam::Quat::from_array(rotation),
+                            scale: glam::Vec3::splat(radius * 2.0),
+                        },
+                        LocalTransform {
+                            position: glam::Vec3::from(position),
+                            rotation: glam::Quat::from_array(rotation),
+                            scale: glam::Vec3::splat(radius * 2.0),
+                        },
+                        MeshHandle(1),
+                        Material {
+                            color: [color[0], color[1], color[2], 1.0],
+                            albedo_texture: None,
+                            metallic: 0.0,
+                            roughness: 0.45,
+                        },
+                        Projectile {
+                            velocity: velocity_vec,
+                            damage: damage.max(0.0),
+                            lifetime,
+                            age: 0.0,
+                            owner: owner_entity,
+                            gravity_scale,
+                        },
+                    ));
+
+                    let rb_handle = physics.add_sphere_rigid_body(
+                        entity.to_bits().get() as u128,
+                        position,
+                        radius,
+                        true,
+                        layer,
+                        u32::MAX,
+                    );
+
+                    if let Some(body) = physics.rigid_body_set.get_mut(rb_handle) {
+                        body.set_rotation(
+                            rapier3d::na::UnitQuaternion::from_quaternion(
+                                rapier3d::na::Quaternion::new(
+                                    rotation[3],
+                                    rotation[0],
+                                    rotation[1],
+                                    rotation[2],
+                                ),
+                            ),
+                            true,
+                        );
+                        body.set_linvel(
+                            rapier3d::na::Vector3::new(velocity[0], velocity[1], velocity[2]),
+                            true,
+                        );
+                        body.set_gravity_scale(gravity_scale, true);
+                    }
+
+                    let _ = self.ecs.insert_one(entity, RigidBodyHandle(rb_handle));
+                    if let Some(script_box) = self.script_registry.create("Projectile") {
+                        let _ = self.ecs.insert_one(
+                            entity,
+                            DynamicScript::from_named("Projectile", script_box),
+                        );
+                    }
+
+                    info!(
+                        "Spawned projectile {} velocity {:?}, lifetime {:.2}, damage {:.1}",
+                        id, velocity, lifetime, damage
+                    );
+                }
                 SceneUpdate::SpawnMesh {
                     id,
                     mesh,
@@ -1901,6 +2046,9 @@ impl GameWorld {
                         to_delete.push(entity);
                     }
                     for (entity, _) in self.ecs.query::<&StartupScene>().iter() {
+                        to_delete.push(entity);
+                    }
+                    for (entity, _) in self.ecs.query::<&SceneScriptController>().iter() {
                         to_delete.push(entity);
                     }
 
@@ -2205,6 +2353,68 @@ impl GameWorld {
                     } else {
                         warn!("SetScripts: No entity found with id {}", id);
                     }
+                }
+                SceneUpdate::SetSceneScripts { scene_id, names } => {
+                    let mut target_entity = None;
+                    for (entity, controller) in self.ecs.query::<&SceneScriptController>().iter() {
+                        if controller.scene_id == scene_id {
+                            target_entity = Some(entity);
+                            break;
+                        }
+                    }
+
+                    let entity = if let Some(entity) = target_entity {
+                        self.disable_all_scripts(physics, entity);
+                        let _ = self.ecs.remove_one::<DynamicScript>(entity);
+                        entity
+                    } else {
+                        self.ecs.spawn((
+                            SceneScriptController {
+                                scene_id: scene_id.clone(),
+                            },
+                            Transform {
+                                position: glam::Vec3::ZERO,
+                                rotation: glam::Quat::IDENTITY,
+                                scale: glam::Vec3::ONE,
+                            },
+                            LocalTransform {
+                                position: glam::Vec3::ZERO,
+                                rotation: glam::Quat::IDENTITY,
+                                scale: glam::Vec3::ONE,
+                            },
+                        ))
+                    };
+
+                    let mut component = DynamicScript::empty();
+                    for name in names.into_iter().take(MAX_SCENE_SCRIPTS_PER_SCENE) {
+                        let name = name.trim();
+                        if name.is_empty() {
+                            continue;
+                        }
+
+                        if let Some(script_box) = self.script_registry.create(name) {
+                            let _ = component.push_named(name.to_string(), script_box);
+                        } else {
+                            warn!(
+                                "SetSceneScripts: Script '{}' not found in registry for scene '{}'",
+                                name, scene_id
+                            );
+                        }
+                    }
+
+                    if component.is_empty() {
+                        let _ = self.ecs.despawn(entity);
+                    } else if let Err(err) = self.ecs.insert_one(entity, component) {
+                        warn!(
+                            "SetSceneScripts: Failed to attach scripts to scene '{}': {:?}",
+                            scene_id, err
+                        );
+                    }
+
+                    info!(
+                        "SetSceneScripts: Updated script stack for scene '{}'",
+                        scene_id
+                    );
                 }
                 SceneUpdate::AttachAnimator { id, config } => {
                     // Find entity by EditorEntityId
@@ -3132,6 +3342,10 @@ impl GameWorld {
                             Some(&mut self.pending_scene_commands),
                         );
 
+                        if !slot.awoken {
+                            s.on_awake(&mut ctx);
+                            slot.awoken = true;
+                        }
                         if !slot.started {
                             s.on_start(&mut ctx);
                             s.on_enable(&mut ctx);
@@ -4171,5 +4385,325 @@ mod tests {
 
         assert!(!component.push_named("Overflow", Box::new(NoopScript)));
         assert_eq!(component.scripts.len(), MAX_SCRIPTS_PER_ENTITY);
+    }
+
+    #[test]
+    fn scene_script_stack_is_capped_at_scene_limit() {
+        let mut world = GameWorld::new();
+        let mut physics = PhysicsWorld::new();
+        world
+            .command_sender
+            .try_send(SceneUpdate::SetSceneScripts {
+                scene_id: "test-scene".to_string(),
+                names: vec![
+                    "TestBounce".to_string(),
+                    "CrowdAgent".to_string(),
+                    "Vehicle".to_string(),
+                    "PoliceAgent".to_string(),
+                    "TrafficAI".to_string(),
+                    "EnemyTracker".to_string(),
+                    "WeaponNPC".to_string(),
+                    "GunWeapon".to_string(),
+                    "BowWeapon".to_string(),
+                    "Projectile".to_string(),
+                ],
+            })
+            .expect("scene script command should enqueue");
+
+        world.update_streaming(glam::Vec3::ZERO, &mut physics);
+
+        let controller = world
+            .ecs
+            .query::<(&SceneScriptController, &DynamicScript)>()
+            .iter()
+            .find(|(_, (controller, _))| controller.scene_id == "test-scene")
+            .map(|(_, (_, scripts))| scripts.scripts.len())
+            .expect("scene script controller should exist");
+        assert_eq!(controller, MAX_SCENE_SCRIPTS_PER_SCENE);
+        assert_eq!(MAX_SCRIPTS_PER_ENTITY, 32);
+    }
+
+    #[test]
+    fn set_scripts_vehicle_drives_through_runtime_update_path() {
+        let mut world = GameWorld::new();
+        let mut physics = PhysicsWorld::new();
+
+        world
+            .command_sender
+            .try_send(SceneUpdate::Spawn {
+                id: 3,
+                primitive: 0,
+                position: [0.0, 2.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [2.0, 1.0, 4.0],
+                color: [0.8, 0.8, 0.8],
+                albedo_texture: None,
+                collision_enabled: true,
+                layer: LAYER_VEHICLE,
+                is_static: false,
+            })
+            .expect("spawn command should enqueue");
+        world
+            .command_sender
+            .try_send(SceneUpdate::SetScripts {
+                id: 3,
+                names: vec!["Vehicle".to_string()],
+            })
+            .expect("script command should enqueue");
+
+        world.update_streaming(glam::Vec3::ZERO, &mut physics);
+
+        let vehicle_entity = world.find_by_editor_id(3).expect("vehicle should spawn");
+        let rb_handle = world
+            .ecs
+            .get::<&RigidBodyHandle>(vehicle_entity)
+            .expect("vehicle should have physics")
+            .0;
+        let script_names = world
+            .ecs
+            .get::<&DynamicScript>(vehicle_entity)
+            .expect("vehicle should have dynamic script")
+            .scripts
+            .iter()
+            .map(|slot| slot.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(script_names, vec!["Vehicle"]);
+
+        world.update_logic(&mut physics, 1.0 / 60.0, Vec::new());
+
+        let body = physics
+            .rigid_body_set
+            .get(rb_handle)
+            .expect("vehicle body should remain alive");
+        assert!(
+            body.linvel().z < -0.001,
+            "vehicle script should drive forward, linvel was {:?}",
+            body.linvel()
+        );
+    }
+
+    #[test]
+    fn set_scripts_vehicle_changes_position_after_full_physics_frames() {
+        let mut world = GameWorld::new();
+        let mut physics = PhysicsWorld::new();
+
+        for command in [
+            SceneUpdate::SpawnGroundPlane {
+                id: 1,
+                primitive: 0,
+                position: [0.0, -1.1, 0.0],
+                scale: [100.0, 2.0, 100.0],
+                color: [0.8, 0.8, 0.8],
+                half_extents: [50.0, 50.0],
+                albedo_texture: None,
+                collision_enabled: true,
+                layer: LAYER_ENVIRONMENT,
+            },
+            SceneUpdate::Spawn {
+                id: 3,
+                primitive: 0,
+                position: [0.0, 2.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [2.0, 1.0, 4.0],
+                color: [0.8, 0.8, 0.8],
+                albedo_texture: None,
+                collision_enabled: true,
+                layer: LAYER_VEHICLE,
+                is_static: false,
+            },
+            SceneUpdate::SetScripts {
+                id: 3,
+                names: vec!["Vehicle".to_string()],
+            },
+        ] {
+            world
+                .command_sender
+                .try_send(command)
+                .expect("scene command should enqueue");
+        }
+
+        world.update_streaming(glam::Vec3::ZERO, &mut physics);
+        let vehicle_entity = world.find_by_editor_id(3).expect("vehicle should spawn");
+        let rb_handle = world
+            .ecs
+            .get::<&RigidBodyHandle>(vehicle_entity)
+            .expect("vehicle should have physics")
+            .0;
+        let start_z = physics
+            .rigid_body_set
+            .get(rb_handle)
+            .unwrap()
+            .translation()
+            .z;
+        let start_rotation = *physics.rigid_body_set.get(rb_handle).unwrap().rotation();
+
+        for _ in 0..60 {
+            physics.step_with_dt(1.0 / 60.0);
+            world.update_logic(&mut physics, 1.0 / 60.0, Vec::new());
+        }
+
+        let body = physics.rigid_body_set.get(rb_handle).unwrap();
+        assert!(
+            body.translation().z < start_z - 1.0,
+            "vehicle should move visibly forward, start_z={}, end_z={}, linvel={:?}",
+            start_z,
+            body.translation().z,
+            body.linvel()
+        );
+        assert!(
+            start_rotation.angle_to(body.rotation()) < 0.05,
+            "vehicle should cruise mostly straight before reaching map edge, start_rot={:?}, end_rot={:?}",
+            start_rotation,
+            body.rotation()
+        );
+    }
+
+    #[test]
+    fn set_scripts_vehicle_steers_when_near_map_edge() {
+        let mut world = GameWorld::new();
+        let mut physics = PhysicsWorld::new();
+
+        for command in [
+            SceneUpdate::SpawnGroundPlane {
+                id: 1,
+                primitive: 0,
+                position: [0.0, -1.1, 0.0],
+                scale: [100.0, 2.0, 100.0],
+                color: [0.8, 0.8, 0.8],
+                half_extents: [50.0, 50.0],
+                albedo_texture: None,
+                collision_enabled: true,
+                layer: LAYER_ENVIRONMENT,
+            },
+            SceneUpdate::Spawn {
+                id: 3,
+                primitive: 0,
+                position: [0.0, 2.0, -44.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [2.0, 1.0, 4.0],
+                color: [0.8, 0.8, 0.8],
+                albedo_texture: None,
+                collision_enabled: true,
+                layer: LAYER_VEHICLE,
+                is_static: false,
+            },
+            SceneUpdate::SetScripts {
+                id: 3,
+                names: vec!["Vehicle".to_string()],
+            },
+        ] {
+            world
+                .command_sender
+                .try_send(command)
+                .expect("scene command should enqueue");
+        }
+
+        world.update_streaming(glam::Vec3::ZERO, &mut physics);
+        let vehicle_entity = world.find_by_editor_id(3).expect("vehicle should spawn");
+        let rb_handle = world
+            .ecs
+            .get::<&RigidBodyHandle>(vehicle_entity)
+            .expect("vehicle should have physics")
+            .0;
+        let start_rotation = *physics.rigid_body_set.get(rb_handle).unwrap().rotation();
+        let mut min_z = physics
+            .rigid_body_set
+            .get(rb_handle)
+            .unwrap()
+            .translation()
+            .z;
+
+        for _ in 0..75 {
+            physics.step_with_dt(1.0 / 60.0);
+            world.update_logic(&mut physics, 1.0 / 60.0, Vec::new());
+            min_z = min_z.min(
+                physics
+                    .rigid_body_set
+                    .get(rb_handle)
+                    .unwrap()
+                    .translation()
+                    .z,
+            );
+        }
+
+        let body = physics.rigid_body_set.get(rb_handle).unwrap();
+        assert!(
+            start_rotation.angle_to(body.rotation()) > 0.2,
+            "vehicle should steer hard near edge, start_rot={:?}, end_rot={:?}",
+            start_rotation,
+            body.rotation()
+        );
+        assert!(
+            min_z >= -50.0,
+            "vehicle should turn before running off the map edge, min_z={}, final_pos={:?}",
+            min_z,
+            body.translation(),
+        );
+    }
+
+    #[test]
+    fn set_scripts_vehicle_stays_on_ground_during_demo_loop() {
+        let mut world = GameWorld::new();
+        let mut physics = PhysicsWorld::new();
+
+        for command in [
+            SceneUpdate::SpawnGroundPlane {
+                id: 1,
+                primitive: 0,
+                position: [0.0, -1.1, 0.0],
+                scale: [100.0, 2.0, 100.0],
+                color: [0.8, 0.8, 0.8],
+                half_extents: [50.0, 50.0],
+                albedo_texture: None,
+                collision_enabled: true,
+                layer: LAYER_ENVIRONMENT,
+            },
+            SceneUpdate::Spawn {
+                id: 3,
+                primitive: 0,
+                position: [0.0, 2.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [2.0, 1.0, 4.0],
+                color: [0.8, 0.8, 0.8],
+                albedo_texture: None,
+                collision_enabled: true,
+                layer: LAYER_VEHICLE,
+                is_static: false,
+            },
+            SceneUpdate::SetScripts {
+                id: 3,
+                names: vec!["Vehicle".to_string()],
+            },
+        ] {
+            world
+                .command_sender
+                .try_send(command)
+                .expect("scene command should enqueue");
+        }
+
+        world.update_streaming(glam::Vec3::ZERO, &mut physics);
+        let vehicle_entity = world.find_by_editor_id(3).expect("vehicle should spawn");
+        let rb_handle = world
+            .ecs
+            .get::<&RigidBodyHandle>(vehicle_entity)
+            .expect("vehicle should have physics")
+            .0;
+        let mut max_abs_x = 0.0f32;
+        let mut max_abs_z = 0.0f32;
+
+        for _ in 0..420 {
+            physics.step_with_dt(1.0 / 60.0);
+            world.update_logic(&mut physics, 1.0 / 60.0, Vec::new());
+            let pos = physics.rigid_body_set.get(rb_handle).unwrap().translation();
+            max_abs_x = max_abs_x.max(pos.x.abs());
+            max_abs_z = max_abs_z.max(pos.z.abs());
+        }
+
+        assert!(
+            max_abs_x <= 50.0 && max_abs_z <= 50.0,
+            "vehicle should stay on the 100x100 ground during the demo loop, max_abs_x={}, max_abs_z={}",
+            max_abs_x,
+            max_abs_z
+        );
     }
 }
