@@ -68,4 +68,36 @@ fn main() {
             }
         }
     }
+
+    // Exported projects can provide a generated native script module. Editor
+    // builds also look for the viewport play cache written by the editor so
+    // custom scripts can be baked into the native registry at compile time.
+    println!("cargo:rerun-if-env-changed=STFSC_SCRIPT_BINDINGS_RS");
+    println!("cargo:rerun-if-changed=script_cache/generated_script_bindings.rs");
+    let generated_script_dst = out_path.join("generated_fuckscript.rs");
+    if let Ok(script_bindings) = env::var("STFSC_SCRIPT_BINDINGS_RS") {
+        let script_bindings = Path::new(&script_bindings);
+        if script_bindings.exists() {
+            println!("cargo:rerun-if-changed={}", script_bindings.display());
+            std::fs::copy(script_bindings, &generated_script_dst).unwrap();
+        } else {
+            write_empty_generated_scripts(&generated_script_dst);
+        }
+    } else if Path::new("script_cache/generated_script_bindings.rs").exists() {
+        std::fs::copy(
+            "script_cache/generated_script_bindings.rs",
+            &generated_script_dst,
+        )
+        .unwrap();
+    } else {
+        write_empty_generated_scripts(&generated_script_dst);
+    }
+}
+
+fn write_empty_generated_scripts(path: &Path) {
+    std::fs::write(
+        path,
+        "use super::scripting::ScriptRegistry;\n\npub fn register_generated_scripts(_registry: &mut ScriptRegistry) {}\n",
+    )
+    .unwrap();
 }

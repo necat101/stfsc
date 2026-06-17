@@ -3,7 +3,7 @@
 **Steal This Fucking Source Code** — *Because gaming deserves better.*
 
 <p align="center">
-  <strong>v0.4 Alpha —</strong>
+  <strong>v0.3.5 Alpha —</strong>
 </p>
 
 ---
@@ -67,11 +67,12 @@ The engine still keeps its 556-class goals: dense city streaming, vehicles, crow
 
 ### Scripting — "Fuck Script" 🔥
 - **Native Rust scripting** via `FuckScript` trait
-- **Lifecycle hooks**: `on_start`, `on_update`, `on_enable`, `on_disable`
+- **Editable source export compiler**: cache-mode FuckScript sources are parsed and generated as native Rust during export; no runtime interpreter is used in the game loop
+- **Lifecycle hooks**: `on_awake`, `on_start`, `on_update`, `on_enable`, `on_disable`, `on_destroy`
 - **Fixed/late update hooks** for physics-step logic and post-update pose following
-- **Collision callbacks**: `on_collision_start`, `on_collision_end`, `on_trigger_start`
+- **Collision callbacks**: `on_collision_start`, `on_collision_stay`, `on_collision_end`, `on_trigger_start`, `on_trigger_stay`, `on_trigger_end`
 - **XR callbacks and helpers**: HMD/controller poses, abstract actions, edge events, and haptic requests through `ScriptContext`
-- **Built-in scripts**: CrowdAgent, PoliceAgent, TrafficAI, VehicleAI, WeaponNPC, HeadAnchor, LeftHandAnchor, RightHandAnchor, TriggerHaptics
+- **Built-in scripts**: CrowdAgent, PoliceAgent, TrafficAI, EnemyTracker, VehicleAI, WeaponNPC, HeadAnchor, LeftHandAnchor, RightHandAnchor, TriggerHaptics
 
 ### Engine Architecture
 - **Entity Component System (ECS)** via `hecs`

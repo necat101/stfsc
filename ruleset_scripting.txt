@@ -14,24 +14,52 @@ There are two kinds of FuckScript work:
    These run now. They implement the Rust trait `FuckScript`.
 
 2. Editable FuckScript source.
-   This is saved in `ScriptComponent.source` and exported into the native script
-   cache. Live preview still runs the registered runtime script name, usually
-   `CustomFuckScript`, until generated native bindings are connected.
+   This is saved in `ScriptComponent.source` when the slot uses
+   `EditableNativeCache` or `CustomNativeCache`. The editor and exporter do not
+   interpret this source in the game loop. They compile it into generated native
+   Rust bindings, then the runtime runs those generated `FuckScript` types.
 
-Important: do not claim editable source is interpreted live. It is preserved and
-exported. Native Rust presets are what actually run today.
+Important: do not claim editable source is interpreted live. There is no runtime
+interpreter in the game loop. Native Rust presets run directly. Editable/cache
+source becomes native Rust in the viewport play cache and in exported builds.
+
+Viewport Play behavior:
+
+- Clicking Play regenerates `script_cache/generated_script_bindings.rs` for the
+  active scene and other project scenes.
+- Play then checks whether the generated runtime names are already present in
+  the editor binary's script registry.
+- If a generated script is missing, Play is blocked and the editor tells the
+  user to rebuild so the new cache is compiled into the binary.
+- After rebuild, clicking Play runs the generated native Rust script, not an
+  interpreter and not a slow reflection path.
+
+Export behavior:
+
+- Export writes a fresh native script cache under the export directory.
+- The export build uses `STFSC_SCRIPT_BINDINGS_RS` so `build.rs` includes that
+  generated cache at Rust compile time.
 
 ## 1. Hard Rules
 
 - Max scripts on one entity: `MAX_SCRIPTS_PER_ENTITY == 32`.
+- Max scripts at the scene level: `MAX_SCENE_SCRIPTS_PER_SCENE == 8`.
 - Script order matters. Keep the user's order.
 - Do not remove existing scripts unless the user asks.
 - Prefer `SetScripts { id, names }` for editor deploys.
+- Use `SetSceneScripts { scene_id, names }` for scene-level deploys.
 - Use enabled script names only in `SetScripts`.
+- Use enabled scene script names only in `SetSceneScripts`.
 - Unknown script names are ignored by the runtime registry.
 - Keep `script_components`, `script`, and `scripts` in sync for scene files.
+- Keep `scene_script_components` and `scene_scripts` in sync for scene files.
 - New native presets must be registered and added to the built-in name list.
 - Use `ScriptContext`. Do not reach around it unless native Rust code must.
+- Do not add a runtime interpreter for editable source.
+- Do not invent a second script cache directory or generated binding system.
+- Cache-mode scripts must compile through `src/project/script_compiler.rs`.
+- Generated runtime names use `__stfsc_script_<16 hex hash>`.
+- If Play is blocked by missing generated scripts, rebuild the editor binary.
 
 ## 2. Current Built-In Script Names
 
@@ -43,7 +71,11 @@ CrowdAgent
 Vehicle
 PoliceAgent
 TrafficAI
+EnemyTracker
 WeaponNPC
+GunWeapon
+BowWeapon
+Projectile
 CollisionLogger
 TouchToDestroy
 HeadAnchor
@@ -65,6 +97,7 @@ For each script, the engine does this:
 
 ```text
 if script has not started:
+    on_awake(ctx)
     on_start(ctx)
     on_enable(ctx)
 
@@ -79,9 +112,11 @@ on_late_update(ctx)
 Simple rule:
 
 - Use `on_start` for setup.
+- Use `on_awake` for one-time native instance initialization before start.
 - Use `on_update` for normal gameplay.
 - Use `on_fixed_update` for physics.
 - Use `on_late_update` for head/hand/camera following.
+- Use `on_destroy` for teardown when a script instance is removed.
 - Use collision hooks for collision behavior.
 - Use XR hooks for controller edges and XR pose data.
 
@@ -90,21 +125,27 @@ Simple rule:
 Use only these hook names:
 
 ```text
+on_awake(ctx)
 on_start(ctx)
 on_update(ctx)
 on_fixed_update(ctx)
 on_late_update(ctx)
 on_enable(ctx)
 on_disable(ctx)
+on_destroy(ctx)
 on_collision_start(ctx, other)
+on_collision_stay(ctx, other)
 on_collision_end(ctx, other)
 on_trigger_start(ctx, other)
+on_trigger_stay(ctx, other)
 on_trigger_end(ctx, other)
 on_player_respawn(ctx)
 on_ui_event(ctx, event)
 on_animation_event(ctx, event_name)
 on_xr_frame(ctx, xr)
 on_xr_input(ctx, event)
+on_application_pause(ctx, paused)
+on_application_focus(ctx, focused)
 ```
 
 Do not write `Update`, `tick`, `awake`, `ready`, `process`, `Start`, or Unity
@@ -116,21 +157,27 @@ Native scripts implement this trait in `src/world/scripting.rs`:
 
 ```rust
 pub trait FuckScript: Send + Sync {
+    fn on_awake(&mut self, _ctx: &mut ScriptContext) {}
     fn on_start(&mut self, _ctx: &mut ScriptContext) {}
     fn on_update(&mut self, _ctx: &mut ScriptContext) {}
     fn on_fixed_update(&mut self, _ctx: &mut ScriptContext) {}
     fn on_late_update(&mut self, _ctx: &mut ScriptContext) {}
     fn on_enable(&mut self, _ctx: &mut ScriptContext) {}
     fn on_disable(&mut self, _ctx: &mut ScriptContext) {}
+    fn on_destroy(&mut self, _ctx: &mut ScriptContext) {}
     fn on_collision_start(&mut self, _ctx: &mut ScriptContext, _other: Entity) {}
+    fn on_collision_stay(&mut self, _ctx: &mut ScriptContext, _other: Entity) {}
     fn on_collision_end(&mut self, _ctx: &mut ScriptContext, _other: Entity) {}
     fn on_trigger_start(&mut self, _ctx: &mut ScriptContext, _other: Entity) {}
+    fn on_trigger_stay(&mut self, _ctx: &mut ScriptContext, _other: Entity) {}
     fn on_trigger_end(&mut self, _ctx: &mut ScriptContext, _other: Entity) {}
     fn on_player_respawn(&mut self, _ctx: &mut ScriptContext) {}
     fn on_ui_event(&mut self, _ctx: &mut ScriptContext, _event: &crate::ui::UiEvent) {}
     fn on_animation_event(&mut self, _ctx: &mut ScriptContext, _event_name: &str) {}
     fn on_xr_frame(&mut self, _ctx: &mut ScriptContext, _xr: &XrInputSnapshot) {}
     fn on_xr_input(&mut self, _ctx: &mut ScriptContext, _event: &XrInputEvent) {}
+    fn on_application_pause(&mut self, _ctx: &mut ScriptContext, _paused: bool) {}
+    fn on_application_focus(&mut self, _ctx: &mut ScriptContext, _focused: bool) {}
 }
 ```
 
@@ -150,6 +197,18 @@ ctx.get_component::<T>()
 ctx.get_component_mut::<T>()
 ctx.transform()
 ctx.transform_mut()
+ctx.log(message)
+ctx.get_component_on::<T>(entity)
+ctx.get_component_mut_on::<T>(entity)
+ctx.transform_of(entity)
+ctx.transform_of_mut(entity)
+ctx.find_entity_by_editor_id(id)
+ctx.has_player()
+ctx.player_position()
+ctx.distance_to_player()
+ctx.track_player(radius, speed, stop_distance, turn_speed)
+ctx.translate(delta)
+ctx.rotate_y(radians)
 ctx.despawn_self()
 ctx.xr_pose(space)
 ctx.head_pose()
@@ -160,11 +219,45 @@ ctx.action_just_pressed(name)
 ctx.action_just_released(name)
 ctx.action_value(name)
 ctx.request_haptic(hand, amplitude, seconds)
+ctx.set_procedural_generation(enabled)
+ctx.set_game_mode(mode)
+ctx.set_sandbox_clock(time_of_day, day_index)
+ctx.configure_sandbox(profile, game_mode, seed, chunk_size, load_radius, tree_density, resource_density, passive_mob_density, hostile_mob_density, max_natural_objects_per_chunk, max_active_mobs)
+ctx.configure_twilight_survival(seed, chunk_size, load_radius, tree_density, resource_density, passive_mob_density, hostile_mob_density)
+ctx.spawn_primitive(kind, position, rotation, scale, color, collision_enabled, is_static)
+ctx.spawn_ground(position, scale, color, collision_enabled)
+ctx.spawn_light(kind, position, direction, color, intensity, range)
+ctx.spawn_light_with_cones(kind, position, direction, color, intensity, range, inner_cone, outer_cone)
+ctx.spawn_scatter(kind, count, center, area, min_scale, max_scale, color, seed, collision_enabled, is_static)
+ctx.spawn_scatter_range(kind, count, center, area, min_scale, max_scale, min_color, max_color, seed, collision_enabled, is_static)
+ctx.spawn_grid(kind, columns, rows, center, spacing, scale, color, collision_enabled, is_static)
+ctx.spawn_resource_cluster(resource_kind, count, center, area, seed)
+ctx.spawn_tree_cluster(count, center, area, seed)
+ctx.spawn_campfire(position, radius, lit)
+ctx.spawn_furry_npc(species, position, color, scale, script_a, script_b)
+ctx.set_script(entity_id, script_name)
+ctx.set_scripts(entity_id, script_a, script_b, script_c, script_d)
+ctx.fire_projectile(origin, direction, speed, lifetime, radius, damage, gravity_scale)
+ctx.fire_projectile_from_self(speed, lifetime, radius, damage, gravity_scale)
+ctx.fire_projectile_with_color(origin, direction, speed, lifetime, radius, damage, gravity_scale, color)
 ctx.track_transform_to_xr_pose(space, position_offset, rotation_offset)
 ```
 
-Do not use non-existent native helpers like `ctx.player_position()` or
-`ctx.menu_back()` in Rust unless you add them first.
+Procedural helper strings:
+
+```text
+primitive kind: "cube", "sphere", "cylinder", "plane", "capsule", "cone"
+light kind: "point", "spot", "directional"
+resource kind: "wood", "stone", "ore", "crystal", "fiber", "food"
+furry species: "fox", "wolf", "cat", "rabbit", "bear"
+game mode: "survival", "god_mode"
+sandbox profile: "forest_survival", "urban_streaming", "hybrid"
+```
+
+`ctx.fire_projectile_with_color(...)` is native Rust only. It is not in the editable-source compiler; editable scripts use `ctx.fire_projectile(...)` and get the default warm color.
+
+Do not use non-existent native helpers like `ctx.menu_back()` or
+`ctx.teleport_to_player()` in Rust unless you add them first.
 
 ## 7. Editable Source Syntax
 
@@ -197,6 +290,89 @@ Small-agent syntax rules:
 - Avoid ternary expressions.
 - Avoid custom syntax.
 
+Supported statements:
+
+```text
+let name = expression;
+ctx.state.name = expression;
+ctx.transform.position = expression;
+ctx.transform.position.x = expression;
+ctx.transform.rotation = expression;
+ctx.transform.scale = expression;
+helper_call(...);
+if condition {
+}
+if condition {
+} else {
+}
+```
+
+Supported literals and values:
+
+```text
+123.0
+true
+false
+"text"
+ctx.dt
+ctx.state.name
+ctx.transform.position
+ctx.transform.position.x
+ctx.transform.position.y
+ctx.transform.position.z
+ctx.transform.rotation
+ctx.transform.rotation.x
+ctx.transform.rotation.y
+ctx.transform.rotation.z
+ctx.transform.rotation.w
+ctx.transform.scale
+ctx.transform.scale.x
+ctx.transform.scale.y
+ctx.transform.scale.z
+ctx.has_player()
+ctx.player_position()
+ctx.distance_to_player()
+local_name
+local_name.x
+local_name.y
+local_name.z
+local_name.w
+other
+event
+event_name
+xr
+paused
+focused
+```
+
+`other`, `event`, `event_name`, `xr`, `paused`, and `focused` only exist in the
+hooks that receive those parameters.
+
+Supported operators:
+
+```text
+!
+-
+*
+/
++
+-
+<
+<=
+>
+>=
+==
+!=
+&&
+||
+```
+
+Use `&&` and `||`. A single `&` or `|` is rejected.
+
+`ctx.state.*` fields become fields on the generated Rust script struct. The
+compiler infers their types from assignments. If a state type is unknown, it
+defaults to `f32`.
+
 Approved value helpers for editable source:
 
 ```text
@@ -221,8 +397,53 @@ ctx.action_pressed(name)
 ctx.action_just_pressed(name)
 ctx.action_just_released(name)
 ctx.action_value(name)
+ctx.has_player()
+ctx.player_position()
+ctx.distance_to_player()
+ctx.track_player(radius, speed, stop_distance, turn_speed)
 ctx.request_haptic(hand, amplitude, seconds)
+ctx.set_procedural_generation(enabled)
+ctx.set_game_mode(mode)
+ctx.set_sandbox_clock(time_of_day, day_index)
+ctx.configure_sandbox(profile, game_mode, seed, chunk_size, load_radius, tree_density, resource_density, passive_mob_density, hostile_mob_density, max_natural_objects_per_chunk, max_active_mobs)
+ctx.configure_twilight_survival(seed, chunk_size, load_radius, tree_density, resource_density, passive_mob_density, hostile_mob_density)
+ctx.spawn_primitive(kind, position, rotation, scale, color, collision_enabled, is_static)
+ctx.spawn_ground(position, scale, color, collision_enabled)
+ctx.spawn_light(kind, position, direction, color, intensity, range)
+ctx.spawn_light_with_cones(kind, position, direction, color, intensity, range, inner_cone, outer_cone)
+ctx.spawn_scatter(kind, count, center, area, min_scale, max_scale, color, seed, collision_enabled, is_static)
+ctx.spawn_scatter_range(kind, count, center, area, min_scale, max_scale, min_color, max_color, seed, collision_enabled, is_static)
+ctx.spawn_grid(kind, columns, rows, center, spacing, scale, color, collision_enabled, is_static)
+ctx.spawn_resource_cluster(resource_kind, count, center, area, seed)
+ctx.spawn_tree_cluster(count, center, area, seed)
+ctx.spawn_campfire(position, radius, lit)
+ctx.spawn_furry_npc(species, position, color, scale, script_a, script_b)
+ctx.set_script(entity_id, script_name)
+ctx.set_scripts(entity_id, script_a, script_b, script_c, script_d)
+ctx.fire_projectile(origin, direction, speed, lifetime, radius, damage, gravity_scale)
+ctx.fire_projectile_from_self(speed, lifetime, radius, damage, gravity_scale)
 ctx.track_transform_to_xr_pose(space, position_offset, rotation_offset)
+```
+
+`ctx.fire_projectile_with_color(...)` is not in the editable-source compiler. It is native Rust only.
+
+Use primitive strings:
+
+```text
+"cube"
+"sphere"
+"cylinder"
+"plane"
+"capsule"
+"cone"
+```
+
+Use light strings:
+
+```text
+"point"
+"spot"
+"directional"
 ```
 
 Use hand strings:
@@ -242,7 +463,368 @@ Use XR pose strings:
 "right_aim"
 ```
 
+Use resource kind strings for `ctx.spawn_resource_cluster(...)`:
+
+```text
+"wood"
+"stone"
+"ore"
+"crystal"
+"fiber"
+"food"
+```
+
+Each resource kind maps to a fixed primitive, scale range, color range, and
+seed salt. The script does not pass those; the native code picks them from the
+kind. This keeps cluster generation consistent across rebuilds.
+
+Use furry species strings for `ctx.spawn_furry_npc(...)`:
+
+```text
+"fox"
+"wolf"
+"cat"
+"rabbit"
+"bear"
+```
+
+Use game mode strings for `ctx.set_game_mode(...)` and
+`ctx.configure_sandbox(...)`:
+
+```text
+"survival"
+"god_mode"
+```
+
+`"godmode"` is also accepted as an alias.
+
+Use sandbox profile strings for `ctx.configure_sandbox(...)`:
+
+```text
+"forest_survival"
+"urban_streaming"
+"hybrid"
+```
+
+`"forest"` is an alias for `"forest_survival"`. `"urban"` is an alias for
+`"urban_streaming"`.
+
 If a helper is not in this file, do not invent it.
+
+Projectile helper rules:
+
+- `origin` is a `vec3`.
+- `direction` is a `vec3`; it is normalized by native code.
+- `speed` is units per second.
+- `lifetime` is seconds before auto-despawn.
+- `radius` controls the projectile sphere collider and visible sphere size.
+- `damage` is stored on the projectile for native damage systems.
+- `gravity_scale` is `0.0` for gun bullets and `1.0` for arrows.
+- `ctx.fire_projectile_from_self(...)` fires from the entity's forward
+  direction, where forward is `ctx.transform.rotation * vec3(0.0, 0.0, -1.0)`.
+- Projectiles are spawned through `SceneUpdate::SpawnProjectile` and compiled
+  cache scripts call the native helper directly.
+
+Procedural helper rules:
+
+- Prefer scene-level scripts for one-time generation in `on_start(ctx)`.
+- `ctx.set_procedural_generation(enabled)` toggles the native streaming
+  generator.
+- `ctx.spawn_primitive(...)` spawns one primitive using the normal
+  `SceneUpdate::Spawn` path.
+- `ctx.spawn_ground(...)` spawns a ground plane through
+  `SceneUpdate::SpawnGroundPlane`.
+- `ctx.spawn_light(...)` spawns a runtime light through `SceneUpdate::SpawnLight`.
+- `ctx.spawn_light_with_cones(...)` is the spot-light variant with explicit
+  cone angles in radians. Values are clamped to `0.0..PI`, and `outer_cone`
+  is never allowed below `inner_cone`.
+- `ctx.spawn_scatter(...)` deterministically scatters up to 512 primitives.
+- `ctx.spawn_scatter_range(...)` is the same deterministic scatter path, but
+  randomizes color between `min_color` and `max_color`.
+- `ctx.spawn_grid(...)` spawns a centered X/Z grid. `columns` and `rows` are
+  floats in source, rounded by native code, and capped to 1024 total objects.
+- `count` in `ctx.spawn_scatter(...)` is a float in source, rounded by native
+  code.
+- `count` in `ctx.spawn_scatter_range(...)` is also rounded and capped to 512.
+- `area` uses X and Z as the scatter footprint; Y is ignored for both scatter
+  helpers.
+- `min_scale` and `max_scale` are `vec3` values.
+- `color`, `min_color`, and `max_color` are clamped to `0.0..1.0`.
+- `ctx.set_script(entity_id, script_name)` replaces the generated object's
+  object-level script stack with one script.
+- `ctx.set_scripts(entity_id, script_a, script_b, script_c, script_d)`
+  replaces the generated object's object-level script stack with up to four
+  non-empty script names. Use `""` for unused slots.
+- These helpers return generated runtime entity ids as numbers. Store the id in
+  a local if you need to call `ctx.set_script(...)` or `ctx.set_scripts(...)`.
+- Do not hand-create procedural entities by editing ECS state directly from
+  generated scripts.
+
+Higher-level procedural cluster helpers:
+
+These build on top of `ctx.spawn_primitive(...)` and
+`ctx.spawn_scatter_range(...)` so a small agent does not have to hand-place many
+parts. They are scene-friendly and deterministic. Prefer them for survival or
+sandbox scenes.
+
+```text
+ctx.spawn_resource_cluster(resource_kind, count, center, area, seed)
+ctx.spawn_tree_cluster(count, center, area, seed)
+ctx.spawn_campfire(position, radius, lit)
+ctx.spawn_furry_npc(species, position, color, scale, script_a, script_b)
+```
+
+Cluster helper rules:
+
+- `ctx.spawn_resource_cluster(...)` is a fixed-parameter scatter for gatherable
+  resources. The script only chooses the `resource_kind` string, `count`,
+  `center`, `area`, and `seed`.
+- The resource kind fixes the primitive, min/max scale, min/max color, and a
+  seed salt. Do not pass those; the native code picks them.
+- `count` is a float in source, rounded by native code, and capped to 512 (same
+  cap as `ctx.spawn_scatter_range(...)`).
+- `area` uses X and Z as the footprint; Y is ignored, same as scatter.
+- `seed` is added to the kind's salt internally. Same seed + same kind always
+  produces the same layout.
+- It returns the number of resources spawned as a number. You usually ignore it.
+
+Tree cluster rules:
+
+- `ctx.spawn_tree_cluster(count, center, area, seed)` spawns trees, each made of
+  a cylinder trunk parent and a sphere canopy child attached to it.
+- `count` is a float in source, rounded by native code, and capped to 256.
+- `area` uses X and Z; Y is ignored.
+- Tree height is randomized between 1.4 and 3.6 units. Trunk and canopy colors
+  are fixed by native code.
+- It returns the number of trees spawned.
+
+Campfire rules:
+
+- `ctx.spawn_campfire(position, radius, lit)` builds a small campfire: a stone
+  ring base, four log children, and (when `lit` is `true`) a flame cone plus a
+  warm point light above it.
+- `radius` scales the whole campfire and the light range. It is clamped to a
+  minimum of 0.001.
+- `lit` is `true` or `false`.
+- It returns the base entity id. Use that id if you want to attach more parts or
+  scripts with `ctx.set_script(...)`.
+
+Furry NPC rules:
+
+- `ctx.spawn_furry_npc(species, position, color, scale, script_a, script_b)`
+  builds a simple character: a capsule body on the character collision layer, a
+  sphere head, two cone ears, and a capsule tail. All non-body parts are
+  parented to the body.
+- `species` is one of the furry species strings. It fixes the accent color blend
+  and the ear/tail proportions.
+- `color` is a `vec3` base color clamped to `0.0..1.0`. The species accent color
+  is blended with it; you do not control parts individually.
+- `scale` scales the whole NPC. It is clamped to a minimum of 0.001.
+- `script_a` and `script_b` are script name strings attached to the body's
+  object-level stack. Use `""` for the unused slot. Built-in behavior scripts
+  like `"CrowdAgent"` work here.
+- It returns the body entity id.
+
+General rules for all cluster helpers:
+
+- All four are deterministic from `seed`. Reuse the same seed for stable scenes.
+- `count` arguments are floats in source but are rounded by native code. Write
+  them as `12.0`, not `12`.
+- All color arguments are `vec3` clamped to `0.0..1.0`.
+- All position and area arguments are `vec3`.
+- These helpers enqueue the same `SceneUpdate::Spawn` / `AttachEntity` /
+  `SpawnLight` messages as the low-level helpers, so the generated objects are
+  real entities. Do not also hand-edit their ECS state.
+- Cache-mode cluster scripts compile through `render_native_script_module()``
+  into `generated_script_bindings.rs`; there is no interpreter path.
+
+Sandbox / world configuration helpers:
+
+These configure the native streaming sandbox and game mode. They enqueue
+`SceneUpdate` messages; they do not spawn objects themselves. Call them in a
+scene-level `on_start(ctx)` before any cluster spawning so the sandbox streamer
+and the explicit spawns agree on settings.
+
+```text
+ctx.set_game_mode(mode)
+ctx.set_sandbox_clock(time_of_day, day_index)
+ctx.configure_sandbox(profile, game_mode, seed, chunk_size, load_radius, tree_density, resource_density, passive_mob_density, hostile_mob_density, max_natural_objects_per_chunk, max_active_mobs)
+ctx.configure_twilight_survival(seed, chunk_size, load_radius, tree_density, resource_density, passive_mob_density, hostile_mob_density)
+```
+
+Sandbox helper rules:
+
+- `ctx.set_game_mode(mode)` switches the native game mode. `mode` is the game
+  mode string `"survival"` or `"god_mode"`.
+- `ctx.set_sandbox_clock(time_of_day, day_index)` jumps the sandbox day/night
+  clock. `time_of_day` is a fraction of one day in `0.0..1.0` where `0.0` and
+  `1.0` are midnight and `0.5` is noon. `day_index` is a float rounded by
+  native code; use `0.0` for the first day.
+- `ctx.configure_sandbox(...)` is the full sandbox setup. It enables the
+  sandbox streamer and procedural generation, then sends the settings.
+- `profile` is the sandbox profile string. `game_mode` is the game mode string.
+- `seed` is a float rounded by native code. Same seed gives the same world.
+- `chunk_size` is world units per chunk.
+- `load_radius` is the chunk radius around the player. It is rounded and clamped
+  to `1..24` chunks by native code.
+- The four density floats (`tree_density`, `resource_density`,
+  `passive_mob_density`, `hostile_mob_density`) are author tuning knobs; native
+  code clamps the runtime limits after applying them.
+- `max_natural_objects_per_chunk` is a float rounded and capped to 512.
+- `max_active_mobs` is a float rounded and capped to 8192.
+- `ctx.configure_twilight_survival(...)` is a convenience preset for the
+  Twilight survival game. It fixes `ForestSurvival` profile, `Survival` mode,
+  vertical scale, day length, night window, and chunk caps; the script only
+  passes the seed, chunk size, load radius, and the four density floats. It also
+  sets the starting clock to late day (`time_of_day = 0.68`).
+- Prefer `ctx.configure_twilight_survival(...)` for the Twilight game. Use
+  `ctx.configure_sandbox(...)` only when you need a non-default profile or mode.
+- All four helpers compile through `render_native_script_module()`; there is no
+  interpreter path.
+
+Scene-level procedural example:
+
+```fuckscript
+script SceneGenerator {
+    on_start(ctx) {
+        ctx.set_procedural_generation(false);
+        ctx.spawn_ground(
+            vec3(0.0, -0.5, 0.0),
+            vec3(80.0, 1.0, 80.0),
+            vec3(0.18, 0.42, 0.22),
+            true
+        );
+
+        let hero = ctx.spawn_primitive(
+            "cube",
+            vec3(0.0, 1.0, -4.0),
+            quat_identity(),
+            vec3(2.0, 2.0, 2.0),
+            vec3(0.9, 0.4, 0.2),
+            true,
+            true
+        );
+        ctx.set_script(hero, "TestBounce");
+
+        ctx.spawn_light_with_cones(
+            "spot",
+            vec3(0.0, 5.0, 0.0),
+            vec3(0.0, -1.0, 0.0),
+            vec3(1.0, 0.9, 0.7),
+            4.0,
+            24.0,
+            0.25,
+            0.85
+        );
+
+        ctx.spawn_scatter_range(
+            "sphere",
+            24.0,
+            vec3(0.0, 0.35, 0.0),
+            vec3(30.0, 0.0, 30.0),
+            vec3(0.35, 0.35, 0.35),
+            vec3(1.2, 1.2, 1.2),
+            vec3(0.25, 0.5, 0.35),
+            vec3(0.65, 0.85, 0.45),
+            42.0,
+            true,
+            true
+        );
+
+        ctx.spawn_grid(
+            "cube",
+            4.0,
+            3.0,
+            vec3(0.0, 0.25, 10.0),
+            vec3(2.0, 0.0, 2.0),
+            vec3(1.0, 0.5, 1.0),
+            vec3(0.25, 0.35, 0.8),
+            true,
+            true
+        );
+    }
+}
+```
+
+Cluster helper procedural example:
+
+This scene-level script fills a survival-style scene with trees, resources, a
+campfire, and a friendly NPC, all deterministically from seeds.
+
+```fuckscript
+script SurvivalScene {
+    on_start(ctx) {
+        ctx.set_procedural_generation(false);
+
+        ctx.spawn_ground(
+            vec3(0.0, -0.5, 0.0),
+            vec3(80.0, 1.0, 80.0),
+            vec3(0.16, 0.34, 0.18),
+            true
+        );
+
+        ctx.spawn_tree_cluster(
+            14.0,
+            vec3(-12.0, 0.0, 8.0),
+            vec3(24.0, 0.0, 24.0),
+            202.0
+        );
+
+        ctx.spawn_resource_cluster(
+            "crystal",
+            16.0,
+            vec3(8.0, 0.4, -8.0),
+            vec3(18.0, 0.0, 18.0),
+            101.0
+        );
+
+        ctx.spawn_resource_cluster(
+            "ore",
+            10.0,
+            vec3(-8.0, 0.4, -10.0),
+            vec3(12.0, 0.0, 12.0),
+            303.0
+        );
+
+        let fire = ctx.spawn_campfire(
+            vec3(0.0, 0.0, 0.0),
+            1.0,
+            true
+        );
+        ctx.set_script(fire, "TouchToDestroy");
+
+        ctx.spawn_furry_npc(
+            "fox",
+            vec3(2.0, 0.0, 2.0),
+            vec3(0.9, 0.5, 0.22),
+            1.0,
+            "CrowdAgent",
+            ""
+        );
+    }
+}
+```
+
+Enemy tracking helper rules:
+
+- Use `EnemyTracker` as the built-in native preset when the default values are
+  enough.
+- Use cache-mode source when the radius or speed should live as script floats.
+- `ctx.has_player()` returns true when a player marker exists.
+- `ctx.player_position()` returns the player position as a `vec3` in editable
+  source. Check `ctx.has_player()` first when the world might not have a
+  player yet.
+- `ctx.distance_to_player()` returns horizontal X/Z gameplay distance in world
+  units.
+- `ctx.track_player(radius, speed, stop_distance, turn_speed)` rotates and
+  moves the current entity toward the player while inside `radius`.
+- `radius` is a developer-authored float in the script, such as `18.0`.
+- `speed` is units per second.
+- `stop_distance` keeps the enemy from standing exactly on the player.
+- `turn_speed` is the per-second smoothing factor; use `0.0` for instant facing.
+- The helper returns true when the player existed and was inside radius.
+- Cache-mode enemy tracking compiles through `render_native_script_module()`
+  into `generated_script_bindings.rs`; do not add an interpreter path.
 
 ## 8. Best Default Custom Script
 
@@ -350,6 +932,53 @@ script FollowRightHand {
 }
 ```
 
+### Cache-Compiled Gun Shot
+
+Use `gravity_scale = 0.0` for straight, fast projectiles.
+
+```fuckscript
+script SimpleGun {
+    on_update(ctx) {
+        if ctx.action_just_pressed("fire") {
+            let forward = ctx.transform.rotation * vec3(0.0, 0.0, -1.0);
+            let origin = ctx.transform.position + forward * 0.6;
+
+            ctx.fire_projectile(origin, forward, 55.0, 3.0, 0.05, 10.0, 0.0);
+            ctx.request_haptic("right", 0.35, 0.04);
+        }
+    }
+}
+```
+
+### Cache-Compiled Bow Shot
+
+Use `gravity_scale = 1.0` for arrows or thrown projectiles.
+
+```fuckscript
+script SimpleBow {
+    on_start(ctx) {
+        ctx.state.charge = 0.0;
+    }
+
+    on_update(ctx) {
+        if ctx.action_pressed("fire") {
+            ctx.state.charge = clamp(ctx.state.charge + ctx.dt, 0.0, 1.25);
+        }
+
+        if ctx.action_just_released("fire") {
+            let power = clamp(ctx.state.charge / 1.25, 0.0, 1.0);
+            let speed = 16.0 + power * 34.0;
+            let damage = 8.0 + power * 20.0;
+
+            ctx.fire_projectile_from_self(speed, 6.0, 0.035, damage, 1.0);
+            ctx.request_haptic("right", 0.25 + power * 0.3, 0.05);
+
+            ctx.state.charge = 0.0;
+        }
+    }
+}
+```
+
 ### Open A Door Slowly
 
 ```fuckscript
@@ -368,6 +997,25 @@ script OpenDoorOnTouch {
             ctx.state.angle = ctx.state.angle + 1.5 * ctx.dt;
             ctx.state.angle = clamp(ctx.state.angle, 0.0, 1.5708);
             ctx.transform.rotation = quat_from_rotation_y(ctx.state.angle);
+        }
+    }
+}
+```
+
+### Cache-Compiled Enemy Tracker
+
+Put the radius in the script as a normal float so designers can tune it.
+
+```fuckscript
+script EnemyTrackerTuned {
+    on_update(ctx) {
+        let radius = 18.0;
+        let speed = 3.5;
+        let stop = 1.25;
+        let turn = 9.0;
+
+        if ctx.has_player() && ctx.distance_to_player() < radius {
+            ctx.track_player(radius, speed, stop, turn);
         }
     }
 }
@@ -523,6 +1171,31 @@ impl FuckScript for FacePlayerScript {
 }
 ```
 
+### Native Enemy Tracker
+
+Use this pattern when you need a built-in preset or behavior that runs before a
+cache rebuild. Keep the tunable floats on the script type.
+
+```rust
+pub struct EnemyTrackerScript {
+    pub track_radius: f32,
+    pub move_speed: f32,
+    pub stop_distance: f32,
+    pub turn_speed: f32,
+}
+
+impl FuckScript for EnemyTrackerScript {
+    fn on_update(&mut self, ctx: &mut ScriptContext) {
+        let _ = ctx.track_player(
+            self.track_radius,
+            self.move_speed,
+            self.stop_distance,
+            self.turn_speed,
+        );
+    }
+}
+```
+
 ### Native Trigger Haptic
 
 ```rust
@@ -577,6 +1250,18 @@ script_components: Vec<ScriptComponent>
 
 Use `script_components` as the real editable stack.
 
+`Scene` has these scene-level script fields:
+
+```text
+scene_scripts: Vec<String>
+scene_script_components: Vec<ScriptComponent>
+```
+
+Use `scene_script_components` as the real editable scene-level stack.
+Scene-level scripts run on a hidden scene controller entity and receive the same
+runtime hooks as object scripts. Use them for scene setup, procedural
+generation, global scene behavior, and UI/scene orchestration.
+
 `ScriptComponent` has:
 
 ```text
@@ -599,13 +1284,46 @@ Rules:
 
 - Built-in script slots usually use `BuiltinNative`.
 - Custom editable slots use `CustomNativeCache`.
+- Editable copies of built-in presets use `EditableNativeCache`.
 - Disabled slots stay in the editor but are not sent in `SetScripts`.
+- Disabled cache-mode slots are still compiled into the cache so syntax errors
+  are caught early.
+- Cache-mode slots use their generated runtime name when running:
+  `__stfsc_script_<16 hex hash>`.
+- `cache_key` stores the generated runtime/cache name for cache-mode slots.
+- The hash identity includes normalized scene path, entity id, slot index,
+  script name, and source text.
+- Keep the source `script Name { ... }` name aligned with `ScriptComponent.name`
+  unless there is a deliberate migration reason.
+- Vehicle entities keep the built-in `Vehicle` driver in their runtime script
+  stack even when custom cache-mode scripts are also attached.
 - Call `sync_legacy_script_fields()` after changing scene script components.
 - Clamp to 32 scripts.
+- Scene-level slots have their own limit:
+  `MAX_SCENE_SCRIPTS_PER_SCENE == 8`.
+- Call `sync_legacy_scene_script_fields()` after changing
+  `scene_script_components`.
+- Scene-level runtime deploys use `SetSceneScripts { scene_id, names }`.
+- Scene-level cache identity includes normalized scene path, scene scope, slot
+  index, script name, and source text. There is no entity id in the scene-level
+  hash.
+- Disabled scene-level cache-mode slots are still compiled into the native
+  cache, but disabled names are not sent in `SetSceneScripts`.
+- Clamp scene-level stacks to 8 scripts. Do not reduce object script stacks;
+  object entities keep 32 slots.
 
-## 16. Export Cache Rules
+## 16. Native Script Cache Rules
 
-Export writes script cache data here:
+There is one native script cache system. Use it for both viewport Play and
+project export.
+
+Editor viewport Play writes the active cache here:
+
+```text
+script_cache/generated_script_bindings.rs
+```
+
+Export writes script cache data under the export directory:
 
 ```text
 script_cache/script_manifest.json
@@ -614,19 +1332,79 @@ script_cache/generated_script_bindings.rs
 
 Agents must extend this path. Do not invent a second script cache system.
 
+Viewport Play flow:
+
+1. Clone the active scene.
+2. Collect every scene-level and entity-level `EditableNativeCache` and
+   `CustomNativeCache` slot from the active scene and other project scenes.
+3. Compile those editable sources with `render_native_script_module()`.
+4. Write `script_cache/generated_script_bindings.rs`.
+5. Rewrite the cloned active scene so cache-mode slots use generated runtime
+   names.
+6. Probe the runtime registry.
+7. If generated names are missing, block Play and ask for an editor rebuild.
+8. After rebuild, Play runs generated native Rust scripts.
+
+Export flow:
+
+1. Collect scene-level and entity-level script entries from every project
+   scene.
+2. Write `script_manifest.json`.
+3. Compile cache-mode sources with `render_native_script_module()`.
+4. Write `generated_script_bindings.rs`.
+5. Rewrite exported scene JSON so cache-mode slots use generated runtime names.
+6. Build/export with `STFSC_SCRIPT_BINDINGS_RS` pointing at the generated file.
+
 The cache stores:
 
 ```text
 scene path
+scope (`scene` or `entity`)
 entity id
 slot index
 script name
+runtime name
 enabled state
 compile mode
 source hash
 cache key
 native symbol
 ```
+
+For `scope == "scene"`, `entity_id` is `0` and `entity_name` stores the scene
+name. For `scope == "entity"`, `entity_id` and `entity_name` refer to the
+authored scene entity.
+
+Editable/cache scripts are compiled by `src/project/script_compiler.rs` into
+`generated_script_bindings.rs`. `build.rs` includes that file in two ways:
+
+```text
+STFSC_SCRIPT_BINDINGS_RS
+script_cache/generated_script_bindings.rs
+```
+
+Use `STFSC_SCRIPT_BINDINGS_RS` for exported builds. The editor build uses the
+workspace `script_cache/generated_script_bindings.rs` when it exists, which is
+why Play may ask the user to rebuild after the cache changes.
+
+Generated runtime names look like:
+
+```text
+__stfsc_script_0123456789abcdef
+```
+
+Do not hand-author these names unless you are repairing serialized scene data.
+Prefer recomputing them through `script_cache_identity()` or
+`collect_native_scripts_for_scene()`.
+
+Ranged weapon cache rule:
+
+- Editable gun/bow scripts must use `ctx.fire_projectile(...)` or
+  `ctx.fire_projectile_from_self(...)`.
+- These helpers compile to native Rust through `render_native_script_module()`;
+  they enqueue `SceneUpdate::SpawnProjectile`.
+- Do not create projectiles by hand with plain `SceneUpdate::Spawn` unless you
+  also add velocity, lifetime, and collision cleanup in native Rust.
 
 ## 17. Common Mistakes To Avoid
 
@@ -672,19 +1450,24 @@ script CustomFuckScript {
 Before writing:
 
 1. Can a built-in script do it?
-2. Does it need to run now? If yes, use native Rust.
-3. Is it just saved/exported custom logic? If yes, use editable source.
-4. Is the script under 32 slots?
-5. Is the hook name allowed?
-6. Did you avoid invented helpers?
+2. Does it need to run without rebuilding the editor? If yes, use native Rust.
+3. Is cache-mode native compilation acceptable? If yes, use editable source.
+4. If object-level, is the script stack under 32 slots?
+5. If scene-level, is the script stack under 8 slots?
+6. Is the hook name allowed?
+7. Did you avoid invented helpers?
 
 Before finishing:
 
 1. Keep script order.
 2. Keep existing scripts unless asked.
-3. Sync legacy fields.
-4. For Rust changes, run `cargo check --bins`.
-5. Prefer `cargo test --lib` if scripting behavior changed.
+3. Sync legacy fields: `sync_legacy_script_fields()` for entities and
+   `sync_legacy_scene_script_fields()` for scene-level scripts.
+4. If editable source or cache metadata changed, make sure cache-mode scripts
+   still compile through `render_native_script_module()`.
+5. If Play reports missing generated scripts, rebuild the editor.
+6. For Rust changes, run `cargo check --lib` and `cargo check --bin editor`.
+7. Prefer `cargo test --lib` if scripting behavior changed.
 
 ## 19. Default Answer For Unsure Agents
 
@@ -701,5 +1484,6 @@ script CustomFuckScript {
 }
 ```
 
-Then tell the user: live preview runs the native `CustomFuckScript` placeholder
-until the export/native binding step is connected.
+Then tell the user: Play/export compiles cache-mode source into native Rust.
+If Play says generated scripts are missing, rebuild the editor so
+`script_cache/generated_script_bindings.rs` is included in the binary.
