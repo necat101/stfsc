@@ -76,6 +76,8 @@ WeaponNPC
 GunWeapon
 BowWeapon
 Projectile
+ResourceNode
+TwighlightBootstrap
 CollisionLogger
 TouchToDestroy
 HeadAnchor
@@ -676,7 +678,9 @@ Sandbox helper rules:
   Twilight survival game. It fixes `ForestSurvival` profile, `Survival` mode,
   vertical scale, day length, night window, and chunk caps; the script only
   passes the seed, chunk size, load radius, and the four density floats. It also
-  sets the starting clock to late day (`time_of_day = 0.68`).
+  sets the starting clock to late day (`time_of_day = 0.68`) and reserves a
+  spawn clearing so streaming trees/resources start outside the first-play
+  view.
 - Prefer `ctx.configure_twilight_survival(...)` for the Twilight game. Use
   `ctx.configure_sandbox(...)` only when you need a non-default profile or mode.
 - All four helpers compile through `render_native_script_module()`; there is no

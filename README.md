@@ -20,7 +20,12 @@ This engine is built from the ground up for one audacious goal: **open-world gam
 
 ## Target Projects
 
-STFSC is being shaped for ambitious open-world games that need smooth simulation under pressure. The near-term engine target is **Twilight**, a Rust/Minecraft-like survival sandbox with seeded procedural worlds, object-based building, day/night danger, survival play, and god-mode creation tools.
+STFSC is being shaped for ambitious open-world games that need smooth simulation under pressure. The near-term engine target is **Twighlight**, a Rust/Minecraft-like survival sandbox with seeded procedural worlds, object-based building, day/night danger, survival play, and god-mode creation tools. Its project root lives at `projects/twighlight/`, with project-local `assets/`, `scenes/`, `scripts/`, and `ui/` folders.
+
+### Project Layout
+- Engine source and shared tooling stay at the repository root.
+- Game projects live under `projects/<project-name>/`, like Unity-style project folders.
+- Each project owns its own `project.json`, scene JSON, UI scene JSON, FuckScript source files, generated assets, and third-party asset folders.
 
 The engine still keeps its 556-class goals: dense city streaming, vehicles, crowds, multiplayer-ready architecture, and standalone VR performance. Sandbox support is an added optimization profile, not a narrowing of the engine.
 
