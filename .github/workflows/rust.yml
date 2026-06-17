@@ -1,0 +1,116 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform_name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform_name: Linux
+            editor_binary: editor
+            engine_binary: stfsc_engine_windows
+            editor_output: stfsc_editor
+            engine_output: stfsc_engine
+            artifact_name: stfsc-linux-binaries
+
+          - os: windows-latest
+            platform_name: Windows
+            editor_binary: editor.exe
+            engine_binary: stfsc_engine_windows.exe
+            editor_output: stfsc_editor.exe
+            engine_output: stfsc_engine.exe
+            artifact_name: stfsc-windows-binaries
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install 1.84.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.84.0
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libvulkan-dev \
+            mesa-vulkan-drivers \
+            libasound2-dev \
+            libx11-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libudev-dev
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets
+
+      - name: Run tests
+        run: cargo test --locked --all-targets
+
+      - name: Build release editor and engine
+        run: cargo build --locked --release --bin editor --bin stfsc_engine_windows
+
+      - name: Package Linux binaries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/release/${{ matrix.editor_binary }}" "dist/${{ matrix.editor_output }}"
+          cp "target/release/${{ matrix.engine_binary }}" "dist/${{ matrix.engine_output }}"
+          chmod +x "dist/${{ matrix.editor_output }}"
+          chmod +x "dist/${{ matrix.engine_output }}"
+
+      - name: Package Windows binaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/release/${{ matrix.editor_binary }}" "dist/${{ matrix.editor_output }}" -Force
+          Copy-Item "target/release/${{ matrix.engine_binary }}" "dist/${{ matrix.engine_output }}" -Force
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/*
+          if-no-files-found: error
