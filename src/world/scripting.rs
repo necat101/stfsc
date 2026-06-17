@@ -17,6 +17,8 @@ pub const BUILTIN_SCRIPT_NAMES: &[&str] = &[
     "GunWeapon",
     "BowWeapon",
     "Projectile",
+    "ResourceNode",
+    "TwighlightBootstrap",
     "CollisionLogger",
     "TouchToDestroy",
     "HeadAnchor",
@@ -1146,6 +1148,7 @@ impl<'a> ScriptContext<'a> {
             passive_mob_density,
             hostile_mob_density,
             max_natural_objects_per_chunk: 96,
+            spawn_clear_radius: 42.0,
             max_buildables_per_chunk: 2048,
             max_active_mobs: 512,
             ..SandboxWorldSettings::default()
@@ -1473,18 +1476,14 @@ impl<'a> ScriptContext<'a> {
                 id: canopy_id,
                 parent_id: Some(trunk_id),
             });
+            self.queue_script_stack(trunk_id, &["ResourceNode"]);
             spawned += 1;
         }
 
         spawned
     }
 
-    pub fn spawn_campfire(
-        &mut self,
-        position: glam::Vec3,
-        radius: f32,
-        lit: bool,
-    ) -> u32 {
+    pub fn spawn_campfire(&mut self, position: glam::Vec3, radius: f32, lit: bool) -> u32 {
         let radius = script_radius(radius, 1.0);
         let base_id = self.spawn_primitive(
             ScriptPrimitive::Cylinder,
@@ -1500,7 +1499,11 @@ impl<'a> ScriptContext<'a> {
             let angle = index as f32 * std::f32::consts::FRAC_PI_2;
             let log_id = self.spawn_primitive(
                 ScriptPrimitive::Cylinder,
-                glam::Vec3::new(angle.cos() * 0.18 * radius, 0.15 * radius, angle.sin() * 0.18 * radius),
+                glam::Vec3::new(
+                    angle.cos() * 0.18 * radius,
+                    0.15 * radius,
+                    angle.sin() * 0.18 * radius,
+                ),
                 glam::Quat::from_rotation_y(angle),
                 glam::Vec3::new(0.1 * radius, 0.38 * radius, 0.1 * radius),
                 glam::Vec3::new(0.42, 0.24, 0.12),
@@ -2653,6 +2656,180 @@ impl FuckScript for ProjectileScript {
             damage
         );
         ctx.despawn_self();
+    }
+}
+
+pub struct ResourceNodeScript {
+    health: f32,
+    max_health: f32,
+    material_name: &'static str,
+    yield_amount: u32,
+}
+
+impl Default for ResourceNodeScript {
+    fn default() -> Self {
+        Self {
+            health: 3.0,
+            max_health: 3.0,
+            material_name: "materials",
+            yield_amount: 3,
+        }
+    }
+}
+
+impl FuckScript for ResourceNodeScript {
+    fn on_start(&mut self, ctx: &mut ScriptContext) {
+        self.health = self.max_health;
+        log::info!(
+            "ResourceNode ready on {:?}: {} x{}",
+            ctx.entity,
+            self.material_name,
+            self.yield_amount
+        );
+    }
+
+    fn on_collision_start(&mut self, ctx: &mut ScriptContext, other: Entity) {
+        let mut damage = 1.0;
+        if let Ok(projectile) = ctx.world.get::<&Projectile>(other) {
+            damage = (projectile.damage / 8.0).clamp(1.0, 3.0);
+        }
+
+        self.health -= damage;
+        log::info!(
+            "ResourceNode hit for {:.1}; {:.1}/{:.1} {} remaining",
+            damage,
+            self.health.max(0.0),
+            self.max_health,
+            self.material_name
+        );
+        ctx.request_haptic(XrHand::Right, 0.22, 0.035);
+
+        if self.health <= 0.0 {
+            log::info!(
+                "Harvested {} x{} from {:?}",
+                self.material_name,
+                self.yield_amount,
+                ctx.entity
+            );
+            ctx.despawn_self();
+        }
+    }
+}
+
+pub struct TwighlightBootstrapScript;
+
+impl FuckScript for TwighlightBootstrapScript {
+    fn on_start(&mut self, ctx: &mut ScriptContext) {
+        ctx.configure_twilight_survival(8842.0, 48.0, 8.0, 0.28, 0.24, 0.08, 0.12);
+
+        ctx.spawn_light(
+            ScriptLightType::Directional,
+            glam::Vec3::new(20.0, 36.0, 18.0),
+            glam::Vec3::new(-0.45, -1.0, -0.35),
+            glam::Vec3::new(1.0, 0.86, 0.62),
+            4.5,
+            500.0,
+        );
+        ctx.spawn_light(
+            ScriptLightType::Point,
+            glam::Vec3::new(0.0, 2.4, 2.0),
+            glam::Vec3::NEG_Y,
+            glam::Vec3::new(1.0, 0.48, 0.18),
+            3.0,
+            16.0,
+        );
+
+        // Keep the first-play clearing readable; procedural density starts outside spawn.
+        ctx.spawn_tree_cluster(
+            24.0,
+            glam::Vec3::new(-38.0, 0.0, -34.0),
+            glam::Vec3::new(34.0, 0.0, 28.0),
+            202.0,
+        );
+        ctx.spawn_tree_cluster(
+            22.0,
+            glam::Vec3::new(42.0, 0.0, -30.0),
+            glam::Vec3::new(32.0, 0.0, 30.0),
+            303.0,
+        );
+        ctx.spawn_tree_cluster(
+            18.0,
+            glam::Vec3::new(18.0, 0.0, 42.0),
+            glam::Vec3::new(34.0, 0.0, 24.0),
+            353.0,
+        );
+
+        ctx.spawn_resource_cluster(
+            ScriptResourceKind::Stone,
+            16.0,
+            glam::Vec3::new(-18.0, 0.35, -24.0),
+            glam::Vec3::new(16.0, 0.0, 14.0),
+            411.0,
+        );
+        ctx.spawn_resource_cluster(
+            ScriptResourceKind::Ore,
+            12.0,
+            glam::Vec3::new(22.0, 0.4, -22.0),
+            glam::Vec3::new(16.0, 0.0, 16.0),
+            512.0,
+        );
+        ctx.spawn_resource_cluster(
+            ScriptResourceKind::Fiber,
+            20.0,
+            glam::Vec3::new(0.0, 0.35, -22.0),
+            glam::Vec3::new(24.0, 0.0, 18.0),
+            613.0,
+        );
+        ctx.spawn_resource_cluster(
+            ScriptResourceKind::Crystal,
+            10.0,
+            glam::Vec3::new(28.0, 0.55, 22.0),
+            glam::Vec3::new(12.0, 0.0, 12.0),
+            714.0,
+        );
+
+        let fire = ctx.spawn_campfire(glam::Vec3::new(0.0, 0.0, 2.0), 1.1, true);
+        ctx.set_script(fire, "ResourceNode");
+
+        let fox = ctx.spawn_furry_npc(
+            ScriptFurrySpecies::Fox,
+            glam::Vec3::new(3.0, 0.0, 1.0),
+            glam::Vec3::new(0.92, 0.42, 0.16),
+            1.0,
+            "CrowdAgent",
+            "",
+        );
+        ctx.set_script(fox, "CrowdAgent");
+
+        ctx.spawn_furry_npc(
+            ScriptFurrySpecies::Wolf,
+            glam::Vec3::new(-4.0, 0.0, 1.5),
+            glam::Vec3::new(0.44, 0.50, 0.58),
+            1.08,
+            "CrowdAgent",
+            "",
+        );
+        ctx.spawn_furry_npc(
+            ScriptFurrySpecies::Rabbit,
+            glam::Vec3::new(6.5, 0.0, -4.0),
+            glam::Vec3::new(0.80, 0.72, 0.62),
+            0.88,
+            "CrowdAgent",
+            "",
+        );
+
+        let guide_marker = ctx.spawn_primitive(
+            ScriptPrimitive::Cone,
+            glam::Vec3::new(0.0, 1.4, -4.0),
+            glam::Quat::IDENTITY,
+            glam::Vec3::new(0.35, 1.0, 0.35),
+            glam::Vec3::new(0.48, 0.82, 1.0),
+            false,
+            true,
+        );
+        ctx.set_script(guide_marker, "TestBounce");
+
+        log::info!("TwighlightBootstrap: procedural survival sandbox initialized");
     }
 }
 

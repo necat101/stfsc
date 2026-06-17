@@ -863,6 +863,10 @@ impl GameWorld {
                 reg.register("GunWeapon", || scripting::GunWeaponScript::default());
                 reg.register("BowWeapon", || scripting::BowWeaponScript::default());
                 reg.register("Projectile", || scripting::ProjectileScript);
+                reg.register("ResourceNode", || scripting::ResourceNodeScript::default());
+                reg.register("TwighlightBootstrap", || {
+                    scripting::TwighlightBootstrapScript
+                });
                 reg.register("CollisionLogger", || scripting::CollisionLoggerScript);
                 reg.register("TouchToDestroy", || scripting::TouchToDestroyScript);
                 reg.register("HeadAnchor", || {
@@ -3828,9 +3832,13 @@ impl GameWorld {
         size: f32,
     ) -> Vec<(Transform, MeshHandle, Material)> {
         let mut entities = Vec::new();
+        let mut settings = self.sandbox_settings.clone();
+        settings.clamp_runtime_limits();
 
-        // Skip center chunks (clear spawn area)
-        if cx.abs() <= 1 && cz.abs() <= 1 {
+        let clear_radius = settings.spawn_clear_radius.max(0.0);
+        let chunk_center = glam::Vec2::new(cx as f32 * size, cz as f32 * size);
+        let chunk_half_diag = size * std::f32::consts::SQRT_2 * 0.5;
+        if clear_radius > 0.0 && chunk_center.length() + chunk_half_diag < clear_radius {
             return entities;
         }
 
@@ -3843,30 +3851,83 @@ impl GameWorld {
 
         let count = 4;
         let step = size / count as f32;
+        let spawn_chance = (settings.tree_density + settings.resource_density).clamp(0.0, 0.75);
+        if spawn_chance <= 0.0 {
+            return entities;
+        }
+        let tree_share = settings.tree_density / (settings.tree_density + settings.resource_density).max(0.001);
 
         for i in 0..count {
             for j in 0..count {
-                if rand() > 0.7 {
-                    let lx = (i as f32) * step + step * 0.5 - size * 0.5;
-                    let lz = (j as f32) * step + step * 0.5 - size * 0.5;
+                if rand() > spawn_chance {
+                    continue;
+                }
 
-                    let wx = (cx as f32) * size + lx;
-                    let wz = (cz as f32) * size + lz;
+                let jitter_x = (rand() - 0.5) * step * 0.45;
+                let jitter_z = (rand() - 0.5) * step * 0.45;
+                let lx = (i as f32) * step + step * 0.5 - size * 0.5 + jitter_x;
+                let lz = (j as f32) * step + step * 0.5 - size * 0.5 + jitter_z;
 
-                    let height = 0.5 + rand() * 5.0;
+                let wx = (cx as f32) * size + lx;
+                let wz = (cz as f32) * size + lz;
+                if clear_radius > 0.0 && glam::Vec2::new(wx, wz).length_squared() < clear_radius * clear_radius {
+                    continue;
+                }
 
+                if rand() < tree_share {
+                    let trunk_height = 2.0 + rand() * 2.4;
+                    let trunk_width = 0.42 + rand() * 0.28;
+                    let canopy_size = 1.6 + rand() * 1.1;
                     entities.push((
                         Transform {
-                            position: glam::Vec3::new(wx, height * 0.5, wz),
+                            position: glam::Vec3::new(wx, trunk_height * 0.5, wz),
                             rotation: glam::Quat::IDENTITY,
-                            scale: glam::Vec3::new(step * 0.8, height, step * 0.8),
+                            scale: glam::Vec3::new(trunk_width, trunk_height, trunk_width),
                         },
                         MeshHandle(0),
                         Material {
-                            color: [0.7, 0.7, 0.8, 1.0],
+                            color: [0.34, 0.22, 0.12, 1.0],
                             albedo_texture: None,
                             metallic: 0.0,
-                            roughness: 0.5,
+                            roughness: 0.72,
+                        },
+                    ));
+                    entities.push((
+                        Transform {
+                            position: glam::Vec3::new(wx, trunk_height + canopy_size * 0.35, wz),
+                            rotation: glam::Quat::IDENTITY,
+                            scale: glam::Vec3::splat(canopy_size),
+                        },
+                        MeshHandle(1),
+                        Material {
+                            color: [0.12, 0.36, 0.16, 1.0],
+                            albedo_texture: None,
+                            metallic: 0.0,
+                            roughness: 0.68,
+                        },
+                    ));
+                } else {
+                    let roll = rand();
+                    let scale = 0.65 + rand() * 0.85;
+                    let (mesh, color) = if roll < 0.5 {
+                        (1, [0.36, 0.36, 0.33, 1.0])
+                    } else if roll < 0.8 {
+                        (0, [0.72, 0.64, 0.36, 1.0])
+                    } else {
+                        (1, [0.54, 0.78, 0.46, 1.0])
+                    };
+                    entities.push((
+                        Transform {
+                            position: glam::Vec3::new(wx, scale * 0.35, wz),
+                            rotation: glam::Quat::IDENTITY,
+                            scale: glam::Vec3::new(scale, scale * 0.7, scale),
+                        },
+                        MeshHandle(mesh),
+                        Material {
+                            color,
+                            albedo_texture: None,
+                            metallic: 0.0,
+                            roughness: 0.68,
                         },
                     ));
                 }

@@ -963,6 +963,330 @@ impl EditorApp {
         }
     }
 
+    fn play_ui_color(color: [f32; 4]) -> egui::Color32 {
+        egui::Color32::from_rgba_unmultiplied(
+            (color[0].clamp(0.0, 1.0) * 255.0) as u8,
+            (color[1].clamp(0.0, 1.0) * 255.0) as u8,
+            (color[2].clamp(0.0, 1.0) * 255.0) as u8,
+            (color[3].clamp(0.0, 1.0) * 255.0) as u8,
+        )
+    }
+
+    fn play_ui_scale_and_offset(viewport: egui::Rect) -> (f32, egui::Vec2) {
+        let ref_w = stfsc_engine::ui::DEFAULT_REFERENCE_RESOLUTION.0;
+        let ref_h = stfsc_engine::ui::DEFAULT_REFERENCE_RESOLUTION.1;
+        let scale = (viewport.width() / ref_w)
+            .min(viewport.height() / ref_h)
+            .max(0.0001);
+        let offset = egui::vec2(
+            (viewport.width() - ref_w * scale) * 0.5,
+            (viewport.height() - ref_h * scale) * 0.5,
+        );
+        (scale, offset)
+    }
+
+    fn play_ui_rect(
+        viewport: egui::Rect,
+        position: [f32; 2],
+        size: [f32; 2],
+        anchor: stfsc_engine::ui::Anchor,
+    ) -> egui::Rect {
+        let ref_w = stfsc_engine::ui::DEFAULT_REFERENCE_RESOLUTION.0;
+        let ref_h = stfsc_engine::ui::DEFAULT_REFERENCE_RESOLUTION.1;
+        let (scale, offset) = Self::play_ui_scale_and_offset(viewport);
+        let anchor_offset = anchor.offset();
+        let scaled_size = egui::vec2(size[0] * scale, size[1] * scale);
+        let top_left = egui::pos2(
+            viewport.min.x + offset.x + ref_w * scale * anchor_offset.x + position[0] * scale
+                - scaled_size.x * anchor_offset.x,
+            viewport.min.y + offset.y + ref_h * scale * anchor_offset.y + position[1] * scale
+                - scaled_size.y * anchor_offset.y,
+        );
+        egui::Rect::from_min_size(top_left, scaled_size)
+    }
+
+    fn play_ui_panel_rect(
+        viewport: egui::Rect,
+        panel: &stfsc_engine::ui::Panel,
+        parent_offset: Option<[f32; 2]>,
+    ) -> egui::Rect {
+        let mut position = panel.position;
+        if let Some(offset) = parent_offset {
+            position[0] += offset[0];
+            position[1] += offset[1];
+        }
+        Self::play_ui_rect(viewport, position, panel.size, panel.anchor)
+    }
+
+    fn draw_play_ui_text(
+        painter: &egui::Painter,
+        viewport: egui::Rect,
+        text: &stfsc_engine::ui::Text,
+        parent_offset: Option<[f32; 2]>,
+    ) {
+        let ref_w = stfsc_engine::ui::DEFAULT_REFERENCE_RESOLUTION.0;
+        let ref_h = stfsc_engine::ui::DEFAULT_REFERENCE_RESOLUTION.1;
+        let (scale, offset) = Self::play_ui_scale_and_offset(viewport);
+        let color = Self::play_ui_color(text.color);
+        let font_size = (text.font_size * scale).max(8.0);
+        let galley = painter.layout_no_wrap(
+            text.content.clone(),
+            egui::FontId::proportional(font_size),
+            color,
+        );
+        let mut position = text.position;
+        if let Some(parent_offset) = parent_offset {
+            position[0] += parent_offset[0];
+            position[1] += parent_offset[1];
+        }
+        let anchor_offset = text.anchor.offset();
+        let top_left = egui::pos2(
+            viewport.min.x + offset.x + ref_w * scale * anchor_offset.x + position[0] * scale
+                - galley.size().x * anchor_offset.x,
+            viewport.min.y + offset.y + ref_h * scale * anchor_offset.y + position[1] * scale
+                - galley.size().y * anchor_offset.y,
+        );
+        painter.galley(top_left, galley, color);
+    }
+
+    fn draw_play_ui_button(
+        &self,
+        painter: &egui::Painter,
+        viewport: egui::Rect,
+        button: &stfsc_engine::ui::Button,
+        hovered_button: Option<u32>,
+        parent_offset: Option<[f32; 2]>,
+    ) {
+        let mut color = button.panel.color;
+        if hovered_button == Some(button.id) || button.hovered {
+            color = [
+                (color[0] + 0.08).min(1.0),
+                (color[1] + 0.08).min(1.0),
+                (color[2] + 0.08).min(1.0),
+                color[3],
+            ];
+        }
+        if button.pressed {
+            color = [0.1, 0.1, 0.16, color[3].max(0.9)];
+        }
+
+        let rect = Self::play_ui_panel_rect(viewport, &button.panel, parent_offset);
+        let (scale, _) = Self::play_ui_scale_and_offset(viewport);
+        painter.rect_filled(
+            rect,
+            button.panel.corner_radius * scale,
+            Self::play_ui_color(color),
+        );
+        painter.rect_stroke(
+            rect,
+            button.panel.corner_radius * scale,
+            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 35)),
+        );
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            &button.label.content,
+            egui::FontId::proportional((button.label.font_size * scale).max(9.0)),
+            Self::play_ui_color(button.label.color),
+        );
+    }
+
+    fn draw_play_ui_panel(
+        &self,
+        painter: &egui::Painter,
+        viewport: egui::Rect,
+        panel: &stfsc_engine::ui::Panel,
+        hovered_button: Option<u32>,
+    ) {
+        let rect = Self::play_ui_panel_rect(viewport, panel, None);
+        let (scale, _) = Self::play_ui_scale_and_offset(viewport);
+        painter.rect_filled(
+            rect,
+            panel.corner_radius * scale,
+            Self::play_ui_color(panel.color),
+        );
+
+        for child in &panel.children {
+            match child {
+                stfsc_engine::ui::PanelChild::Button(button) => self.draw_play_ui_button(
+                    painter,
+                    viewport,
+                    button,
+                    hovered_button,
+                    Some(panel.position),
+                ),
+                stfsc_engine::ui::PanelChild::Text(text) => {
+                    Self::draw_play_ui_text(painter, viewport, text, Some(panel.position))
+                }
+            }
+        }
+    }
+
+    fn draw_play_ui_layout(
+        &self,
+        painter: &egui::Painter,
+        viewport: egui::Rect,
+        layout: &stfsc_engine::ui::UiLayout,
+        hovered_button: Option<u32>,
+    ) {
+        for panel in &layout.panels {
+            self.draw_play_ui_panel(painter, viewport, panel, hovered_button);
+        }
+        for button in &layout.buttons {
+            self.draw_play_ui_button(painter, viewport, button, hovered_button, None);
+        }
+        for text in &layout.texts {
+            Self::draw_play_ui_text(painter, viewport, text, None);
+        }
+    }
+
+    fn play_ui_button_at(
+        &self,
+        viewport: egui::Rect,
+        pointer_pos: egui::Pos2,
+    ) -> Option<(u32, Option<String>)> {
+        let Some(runtime) = self.play_runtime.as_ref() else {
+            return None;
+        };
+        if !viewport.contains(pointer_pos) {
+            return None;
+        }
+
+        let local = pointer_pos - viewport.min;
+        let point = glam::Vec2::new(local.x, local.y);
+        let screen_size = glam::Vec2::new(viewport.width(), viewport.height());
+        let visible_layers = runtime
+            .world
+            .ui_layers
+            .visible_layers(Some(&runtime.world.menu_stack));
+
+        for layout in visible_layers.into_iter().rev() {
+            for button in layout.buttons.iter().rev() {
+                if button.contains(point, screen_size, None) {
+                    return Some((button.id, button.on_click.clone()));
+                }
+            }
+
+            for panel in layout.panels.iter().rev() {
+                let parent_offset = glam::Vec2::from(panel.position);
+                for child in panel.children.iter().rev() {
+                    if let stfsc_engine::ui::PanelChild::Button(button) = child {
+                        if button.contains(point, screen_size, Some(parent_offset)) {
+                            return Some((button.id, button.on_click.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn play_ui_blocks_input(&self) -> bool {
+        self.play_paused
+            || self
+                .play_runtime
+                .as_ref()
+                .map(|runtime| {
+                    runtime
+                        .world
+                        .ui_layers
+                        .should_block_input(Some(&runtime.world.menu_stack))
+                })
+                .unwrap_or(false)
+    }
+
+    fn show_embedded_pause_menu(&mut self) {
+        self.play_paused = true;
+        if let Some(runtime) = &mut self.play_runtime {
+            runtime
+                .world
+                .ui_layers
+                .show(stfsc_engine::ui::UiLayer::PauseMenu);
+        }
+    }
+
+    fn resume_embedded_play(&mut self, ctx: &egui::Context) {
+        self.play_paused = false;
+        if let Some(runtime) = &mut self.play_runtime {
+            runtime
+                .world
+                .ui_layers
+                .hide(&stfsc_engine::ui::UiLayer::PauseMenu);
+            while let Some(alias) = runtime.world.menu_stack.pop() {
+                runtime
+                    .world
+                    .ui_layers
+                    .hide(&stfsc_engine::ui::UiLayer::Custom(alias));
+            }
+        }
+        self.set_play_mouse_capture(ctx, true);
+    }
+
+    fn handle_embedded_play_ui_callback(
+        &mut self,
+        ctx: &egui::Context,
+        id: u32,
+        callback: String,
+    ) {
+        let callback = callback.trim().to_string();
+        if callback == "resume()" || callback == "resume" {
+            self.resume_embedded_play(ctx);
+            return;
+        }
+
+        if callback == "quit()" || callback == "quit" {
+            self.exit_play_mode(ctx);
+            return;
+        }
+
+        if let Some(runtime) = &mut self.play_runtime {
+            runtime
+                .world
+                .pending_ui_events
+                .push(stfsc_engine::ui::UiEvent::ButtonClicked { id, callback });
+        }
+    }
+
+    fn handle_embedded_play_ui_click(
+        &mut self,
+        ctx: &egui::Context,
+        response: &egui::Response,
+    ) -> bool {
+        let Some(pointer_pos) = response.interact_pointer_pos() else {
+            return false;
+        };
+        let Some((id, callback)) = self.play_ui_button_at(response.rect, pointer_pos) else {
+            return false;
+        };
+        if let Some(callback) = callback {
+            self.handle_embedded_play_ui_callback(ctx, id, callback);
+        }
+        true
+    }
+
+    fn draw_play_ui_layers(
+        &self,
+        ui: &egui::Ui,
+        painter: &egui::Painter,
+        viewport: egui::Rect,
+    ) {
+        let Some(runtime) = self.play_runtime.as_ref() else {
+            return;
+        };
+        let hovered_button = ui
+            .input(|input| input.pointer.hover_pos())
+            .and_then(|pos| self.play_ui_button_at(viewport, pos).map(|(id, _)| id));
+
+        for layout in runtime
+            .world
+            .ui_layers
+            .visible_layers(Some(&runtime.world.menu_stack))
+        {
+            self.draw_play_ui_layout(painter, viewport, layout, hovered_button);
+        }
+    }
+
     fn play_script_cache_path() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("script_cache")
@@ -1057,6 +1381,22 @@ impl EditorApp {
         ))
     }
 
+    fn resolve_runtime_asset_path(&self, asset_path: &str) -> std::path::PathBuf {
+        let path = std::path::Path::new(asset_path);
+        if path.is_absolute() {
+            return path.to_path_buf();
+        }
+
+        if let Some(project) = &self.current_project {
+            let project_path = project.root_path.join(asset_path);
+            if project_path.exists() {
+                return project_path;
+            }
+        }
+
+        path.to_path_buf()
+    }
+
     fn runtime_updates_for_entity(&self, entity: &SceneEntity) -> Vec<SceneUpdate> {
         let mut updates = Vec::new();
         let collision_enabled = entity.effective_collision_enabled();
@@ -1138,8 +1478,9 @@ impl EditorApp {
                 });
             }
             EntityType::Mesh { path } => {
-                if let Ok(mesh_data) = std::fs::read(path) {
-                    let path_lower = path.to_lowercase();
+                let mesh_path = self.resolve_runtime_asset_path(path);
+                if let Ok(mesh_data) = std::fs::read(&mesh_path) {
+                    let path_lower = mesh_path.to_string_lossy().to_lowercase();
                     if path_lower.ends_with(".glb") || path_lower.ends_with(".gltf") {
                         updates.push(SceneUpdate::SpawnGltfMesh {
                             id: entity.id,
@@ -1361,12 +1702,18 @@ impl EditorApp {
         let ctx = ui.ctx().clone();
         if response.clicked() || response.drag_started() {
             response.request_focus();
-            self.play_paused = false;
-            self.set_play_mouse_capture(&ctx, true);
+            let ui_handled = response.clicked() && self.handle_embedded_play_ui_click(&ctx, response);
+            if !self.play_mode {
+                return;
+            }
+            if !ui_handled && !self.play_ui_blocks_input() {
+                self.play_paused = false;
+                self.set_play_mouse_capture(&ctx, true);
+            }
         }
 
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.play_paused = true;
+            self.show_embedded_pause_menu();
             self.set_play_mouse_capture(&ctx, false);
         }
 
@@ -1418,6 +1765,7 @@ impl EditorApp {
         self.play_jump_was_down = jump_down;
 
         let mut runtime_player_position = None;
+        let mut cursor_should_release = false;
         if let Some(runtime) = &mut self.play_runtime {
             if can_drive {
                 let forward_basis =
@@ -1534,10 +1882,13 @@ impl EditorApp {
                 runtime
                     .world
                     .update_streaming(player_pos, &mut runtime.physics);
-                if can_drive {
-                    runtime
-                        .world
-                        .update_logic(&mut runtime.physics, dt, ui_events);
+                let logic_dt = if self.play_paused { 0.0 } else { dt };
+                runtime
+                    .world
+                    .update_logic(&mut runtime.physics, logic_dt, ui_events);
+                if runtime.world.cursor_should_release {
+                    runtime.world.cursor_should_release = false;
+                    cursor_should_release = true;
                 }
 
                 let physics_updates: Vec<_> = runtime
@@ -1568,6 +1919,11 @@ impl EditorApp {
                     }
                 }
             }
+        }
+
+        if cursor_should_release {
+            self.play_paused = true;
+            self.set_play_mouse_capture(&ctx, false);
         }
 
         if let Some(player_pos) = runtime_player_position {
@@ -2598,10 +2954,14 @@ impl EditorApp {
                         }));
                 } else if let EntityType::Mesh { path } = &entity.entity_type {
                     // Load mesh from file and send via SpawnFbxMesh
-                    if let Ok(data) = std::fs::read(path) {
+                    let mesh_path = self.resolve_runtime_asset_path(path);
+                    if let Ok(data) = std::fs::read(&mesh_path) {
                         self.deploy_mesh_entity(entity, &data);
                     } else {
-                        println!("EDITOR WARN: Failed to load mesh file: {}", path);
+                        println!(
+                            "EDITOR WARN: Failed to load mesh file: {}",
+                            mesh_path.display()
+                        );
                     }
                 } else {
                     let primitive = match &entity.entity_type {
@@ -2753,6 +3113,15 @@ impl EditorApp {
             } else {
                 std::path::PathBuf::from(path)
             };
+            let stored_path = if let Some(proj) = &self.current_project {
+                absolute_path
+                    .strip_prefix(&proj.root_path)
+                    .ok()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|| path.replace('\\', "/"))
+            } else {
+                path.replace('\\', "/")
+            };
 
             // Ensure scenes directory exists
             if let Some(parent) = absolute_path.parent() {
@@ -2764,10 +3133,10 @@ impl EditorApp {
 
             std::fs::write(&absolute_path, json).map_err(|e| format!("Write error: {}", e))?;
 
-            self.current_scene_path = Some(path.to_string());
+            self.current_scene_path = Some(stored_path.clone());
             self.scene_dirty = false;
-            self.add_to_recent(path);
-            self.status = format!("Saved: {}", path);
+            self.add_to_recent(&stored_path);
+            self.status = format!("Saved: {}", stored_path);
             Ok(())
         } else {
             Err("No scene to save".into())
@@ -2783,10 +3152,8 @@ impl EditorApp {
             self.save_scene_to_path(&path)?;
             save_items.push("Scene");
         } else if let Some(scene) = &self.current_scene {
-            let path = format!(
-                "scenes/{}.json",
-                scene.name.to_lowercase().replace(" ", "_")
-            );
+            let slug = scene.name.to_lowercase().replace(" ", "_");
+            let path = format!("scenes/{}/main.json", slug);
             self.save_scene_to_path(&path)?;
             save_items.push("Scene");
         }
@@ -2848,6 +3215,11 @@ impl EditorApp {
                 ];
 
                 if let Some(proj) = &self.current_project {
+                    paths_to_try.push(
+                        proj.resolve_path(&texture_path)
+                            .to_string_lossy()
+                            .to_string(),
+                    );
                     paths_to_try.push(
                         proj.root_path
                             .join("assets/textures")
@@ -2947,25 +3319,49 @@ impl EditorApp {
         }
     }
 
-    /// Scan the scenes directory for .json files
+    /// Scan the scenes directory recursively for .json files
     fn scan_scene_files(&mut self) {
         self.open_scene_files.clear();
-        let scenes_dir = if let Some(proj) = &self.current_project {
-            proj.root_path.join("scenes")
+        let (project_root, scenes_dir) = if let Some(proj) = &self.current_project {
+            (Some(proj.root_path.clone()), proj.root_path.join("scenes"))
         } else {
-            std::path::PathBuf::from("scenes")
+            (None, std::path::PathBuf::from("scenes"))
         };
 
-        if let Ok(entries) = std::fs::read_dir(scenes_dir) {
+        fn scan_dir(
+            dir: &std::path::Path,
+            project_root: Option<&std::path::Path>,
+            out: &mut Vec<String>,
+        ) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "json") {
-                    if let Some(path_str) = path.to_str() {
-                        self.open_scene_files.push(path_str.to_string());
+                if path.is_dir() {
+                    scan_dir(&path, project_root, out);
+                } else if path.extension().map_or(false, |ext| ext == "json") {
+                    let stored_path = if let Some(root) = project_root {
+                        path.strip_prefix(root)
+                            .ok()
+                            .map(|p| p.to_string_lossy().replace('\\', "/"))
+                            .or_else(|| path.to_str().map(|p| p.replace('\\', "/")))
+                    } else {
+                        path.to_str().map(|p| p.replace('\\', "/"))
+                    };
+                    if let Some(path_str) = stored_path {
+                        out.push(path_str);
                     }
                 }
             }
         }
+
+        scan_dir(
+            &scenes_dir,
+            project_root.as_deref(),
+            &mut self.open_scene_files,
+        );
         self.open_scene_files.sort();
     }
 
@@ -5535,6 +5931,7 @@ impl EditorApp {
         }
 
         if self.play_mode {
+            self.draw_play_ui_layers(ui, &painter, rect);
             painter.rect_stroke(
                 rect.shrink(1.0),
                 0.0,
@@ -6679,10 +7076,8 @@ impl eframe::App for EditorApp {
                             }
                         } else if let Some(scene) = &self.current_scene {
                             // Default to scene name if no path
-                            let path = format!(
-                                "scenes/{}.json",
-                                scene.name.to_lowercase().replace(" ", "_")
-                            );
+                            let slug = scene.name.to_lowercase().replace(" ", "_");
+                            let path = format!("scenes/{}/main.json", slug);
                             if let Err(e) = self.save_scene_to_path(&path) {
                                 self.status = format!("Error: {}", e);
                             }
@@ -6693,12 +7088,10 @@ impl eframe::App for EditorApp {
                     // Save Scene As
                     if ui.button("💾 Save Scene As...").clicked() {
                         if let Some(scene) = &self.current_scene {
-                            self.save_as_path = format!(
-                                "scenes/{}.json",
-                                scene.name.to_lowercase().replace(" ", "_")
-                            );
+                            let slug = scene.name.to_lowercase().replace(" ", "_");
+                            self.save_as_path = format!("scenes/{}/main.json", slug);
                         } else {
-                            self.save_as_path = "scenes/untitled.json".to_string();
+                            self.save_as_path = "scenes/untitled/main.json".to_string();
                         }
                         self.show_save_as_dialog = true;
                         ui.close_menu();
@@ -8642,6 +9035,7 @@ impl eframe::App for EditorApp {
             
             // Handle actions outside borrow
             if let Some(id) = deploy_id {
+                let project_root = self.current_project.as_ref().map(|p| p.root_path.clone());
                 if let Some(scene) = &mut self.current_scene {
                     if let Some(e) = scene.entities.iter_mut().find(|e| e.id == id) {
                         if self.push_connected {
@@ -8655,8 +9049,22 @@ impl eframe::App for EditorApp {
                                 },
                                 EntityType::Mesh { path } => {
                                     // Load file data and send correct spawn command
-                                    if let Ok(data) = std::fs::read(path) {
-                                        let path_lower = path.to_lowercase();
+                                    let raw_path = std::path::Path::new(path);
+                                    let mesh_path = if raw_path.is_absolute() {
+                                        raw_path.to_path_buf()
+                                    } else if let Some(root) = &project_root {
+                                        let project_path = root.join(path);
+                                        if project_path.exists() {
+                                            project_path
+                                        } else {
+                                            raw_path.to_path_buf()
+                                        }
+                                    } else {
+                                        raw_path.to_path_buf()
+                                    };
+                                    if let Ok(data) = std::fs::read(&mesh_path) {
+                                        let path_lower =
+                                            mesh_path.to_string_lossy().to_lowercase();
                                         if path_lower.ends_with(".glb") || path_lower.ends_with(".gltf") {
                                             let _ = self.command_tx.send(AppCommand::Send(SceneUpdate::SpawnGltfMesh {
                                                 id: e.id,
@@ -8943,12 +9351,13 @@ impl eframe::App for EditorApp {
                                 test_scene.name = "Main".to_string();
                                 let scene_json =
                                     serde_json::to_string_pretty(&test_scene).unwrap_or_default();
-                                let scene_path = root.join("scenes/main.json");
+                                let scene_path = root.join("scenes/main/main.json");
                                 let _ = std::fs::create_dir_all(scene_path.parent().unwrap());
                                 let _ = std::fs::write(&scene_path, scene_json);
 
                                 // Set this as startup scene
-                                proj.metadata.startup_scene = Some("scenes/main.json".to_string());
+                                proj.metadata.startup_scene =
+                                    Some("scenes/main/main.json".to_string());
                                 let _ = proj.save();
 
                                 self.apply_loaded_project(ctx, proj);
@@ -10641,10 +11050,8 @@ impl eframe::App for EditorApp {
                                     return;
                                 }
                             } else if let Some(scene) = &self.current_scene {
-                                let path = format!(
-                                    "scenes/{}.json",
-                                    scene.name.to_lowercase().replace(" ", "_")
-                                );
+                                let slug = scene.name.to_lowercase().replace(" ", "_");
+                                let path = format!("scenes/{}/main.json", slug);
                                 if let Err(e) = self.save_scene_to_path(&path) {
                                     self.status = format!("Error: {}", e);
                                     self.show_unsaved_warning = false;

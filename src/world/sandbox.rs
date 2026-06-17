@@ -86,6 +86,8 @@ pub struct SandboxWorldSettings {
     pub hostile_mob_density: f32,
     #[serde(default = "default_max_natural_objects_per_chunk")]
     pub max_natural_objects_per_chunk: u32,
+    #[serde(default)]
+    pub spawn_clear_radius: f32,
     #[serde(default = "default_max_buildables_per_chunk")]
     pub max_buildables_per_chunk: u32,
     #[serde(default = "default_max_active_mobs")]
@@ -111,6 +113,7 @@ impl Default for SandboxWorldSettings {
             passive_mob_density: default_passive_mob_density(),
             hostile_mob_density: default_hostile_mob_density(),
             max_natural_objects_per_chunk: default_max_natural_objects_per_chunk(),
+            spawn_clear_radius: 0.0,
             max_buildables_per_chunk: default_max_buildables_per_chunk(),
             max_active_mobs: default_max_active_mobs(),
         }
@@ -154,6 +157,7 @@ impl SandboxWorldSettings {
         self.passive_mob_density = self.passive_mob_density.clamp(0.0, 1.0);
         self.hostile_mob_density = self.hostile_mob_density.clamp(0.0, 1.0);
         self.max_natural_objects_per_chunk = self.max_natural_objects_per_chunk.clamp(1, 512);
+        self.spawn_clear_radius = self.spawn_clear_radius.max(0.0);
         self.max_buildables_per_chunk = self.max_buildables_per_chunk.clamp(1, 4096);
         self.max_active_mobs = self.max_active_mobs.clamp(1, 8192);
     }
@@ -352,13 +356,10 @@ impl SandboxChunkGenerator {
             };
 
             if let Some(kind) = kind {
-                object_spawns.push(self.object_spawn(
-                    coord,
-                    index,
-                    kind,
-                    terrain_height,
-                    &settings,
-                ));
+                let spawn = self.object_spawn(coord, index, kind, terrain_height, &settings);
+                if !inside_spawn_clear_radius(spawn.position, settings.spawn_clear_radius) {
+                    object_spawns.push(spawn);
+                }
             }
         }
 
@@ -366,7 +367,7 @@ impl SandboxChunkGenerator {
         for index in 0..8 {
             let passive_roll = self.sample01(coord, 700 + index);
             if passive_roll < settings.passive_mob_density {
-                mob_spawns.push(self.mob_spawn(
+                let spawn = self.mob_spawn(
                     coord,
                     index,
                     "passive_wildlife",
@@ -374,12 +375,15 @@ impl SandboxChunkGenerator {
                     false,
                     terrain_height,
                     &settings,
-                ));
+                );
+                if !inside_spawn_clear_radius(spawn.position, settings.spawn_clear_radius) {
+                    mob_spawns.push(spawn);
+                }
             }
 
             let hostile_roll = self.sample01(coord, 900 + index);
             if hostile_roll < settings.hostile_mob_density {
-                mob_spawns.push(self.mob_spawn(
+                let spawn = self.mob_spawn(
                     coord,
                     100 + index,
                     "hostile_night_enemy",
@@ -387,7 +391,10 @@ impl SandboxChunkGenerator {
                     true,
                     terrain_height,
                     &settings,
-                ));
+                );
+                if !inside_spawn_clear_radius(spawn.position, settings.spawn_clear_radius) {
+                    mob_spawns.push(spawn);
+                }
             }
         }
 
@@ -650,6 +657,10 @@ fn wrap01(value: f32) -> f32 {
     value.rem_euclid(1.0)
 }
 
+fn inside_spawn_clear_radius(position: Vec3, radius: f32) -> bool {
+    radius > 0.0 && Vec3::new(position.x, 0.0, position.z).length_squared() < radius * radius
+}
+
 fn mix_u64(mut value: u64) -> u64 {
     value ^= value >> 30;
     value = value.wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -684,6 +695,24 @@ mod tests {
         assert!(plans
             .iter()
             .any(|plan| plan.coord == SandboxChunkCoord { x: 2, z: -2 }));
+    }
+
+    #[test]
+    fn spawn_clear_radius_removes_near_origin_spawns() {
+        let mut settings = SandboxWorldSettings::forest_survival(8842);
+        settings.tree_density = 1.0;
+        settings.resource_density = 0.0;
+        settings.passive_mob_density = 1.0;
+        settings.hostile_mob_density = 1.0;
+        settings.spawn_clear_radius = 128.0;
+
+        let generator = SandboxChunkGenerator::new(settings.seed);
+        let center = generator.generate_chunk(SandboxChunkCoord { x: 0, z: 0 }, &settings);
+        let far = generator.generate_chunk(SandboxChunkCoord { x: 8, z: 8 }, &settings);
+
+        assert!(center.object_spawns.is_empty());
+        assert!(center.mob_spawns.is_empty());
+        assert!(!far.object_spawns.is_empty());
     }
 
     #[test]

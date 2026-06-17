@@ -714,6 +714,7 @@ impl Project {
             "assets/models",
             "assets/textures",
             "assets/audio",
+            "assets/third_party",
             "scenes",
             "scripts",
             "ui",
@@ -945,5 +946,78 @@ pub fn format_bytes(bytes: u64) -> String {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn normalized(path: &str) -> String {
+        path.replace('\\', "/")
+    }
+
+    #[test]
+    fn twighlight_project_loads_from_nested_project_folder() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("projects")
+            .join("twighlight");
+        let project = Project::load(root.clone()).expect("twighlight project should load");
+        let startup_scene = project
+            .metadata
+            .startup_scene
+            .as_deref()
+            .expect("twighlight should define a startup scene");
+
+        assert_eq!(project.metadata.name, "Twighlight");
+        assert_eq!(startup_scene, "scenes/twighlight/main.json");
+        assert!(project
+            .assets
+            .scenes
+            .iter()
+            .any(|entry| normalized(&entry.path) == startup_scene));
+        assert!(project
+            .assets
+            .scripts
+            .iter()
+            .any(|entry| normalized(&entry.path) == "scripts/twighlight/bootstrap.fuck"));
+        assert!(project
+            .assets
+            .ui_layouts
+            .iter()
+            .any(|entry| normalized(&entry.path) == "ui/twighlight/pause.json"));
+        assert!(project
+            .assets
+            .models
+            .iter()
+            .any(|entry| normalized(&entry.path) == "assets/models/twighlight/tw_workbench.obj"));
+        assert!(project.assets.textures.iter().any(
+            |entry| normalized(&entry.path) == "assets/textures/twighlight/voxel/fox_body.png"
+        ));
+
+        let scene_json = fs::read_to_string(root.join(startup_scene))
+            .expect("twighlight startup scene should be readable");
+        let scene: scene::Scene =
+            serde_json::from_str(&scene_json).expect("twighlight startup scene should parse");
+        assert_eq!(scene.name, "Twighlight");
+        assert!(scene.entities.iter().any(|entry| {
+            entry.name == "Spawn Clearing Ground"
+                && matches!(entry.entity_type, scene::EntityType::Ground)
+        }));
+        assert!(scene
+            .entities
+            .iter()
+            .find(|entry| entry.name == "Player Start")
+            .is_some_and(|entry| entry.position[2] >= 10.0));
+        assert!(scene
+            .entities
+            .iter()
+            .find(|entry| entry.name == "Kenney Oak Landmark")
+            .is_some_and(|entry| entry.position[2] <= -12.0));
+        assert!(scene.sandbox.spawn_clear_radius >= 40.0);
+        assert!(scene
+            .scene_scripts
+            .iter()
+            .any(|name| name == "TwighlightBootstrap"));
     }
 }
